@@ -109,6 +109,12 @@ struct LocalInfo {
     cached_array_ptr: Option<Variable>,
     /// Compile-time constant value for const variables initialized with literals
     const_value: Option<f64>,
+    /// LICM: Hoisted element loads from invariant array accesses (arr[outer_idx] hoisted out of inner loop)
+    /// Maps index_var_id -> cache_variable containing the pre-loaded f64 value
+    hoisted_element_loads: Option<HashMap<LocalId, Variable>>,
+    /// LICM: Hoisted i32 products from invariant index computations (i*size hoisted out of inner loop)
+    /// Maps other_var_id -> cache_variable containing the pre-computed i32 product
+    hoisted_i32_products: Option<HashMap<LocalId, Variable>>,
 }
 
 /// Check if a block has been filled with a terminating instruction
@@ -209,6 +215,27 @@ fn try_compile_index_as_i32(
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
         {
+            // LICM: Check for hoisted i32 product (Mul only)
+            if *op == BinaryOp::Mul {
+                if let (Expr::LocalGet(a_id), Expr::LocalGet(b_id)) = (left.as_ref(), right.as_ref()) {
+                    // Check a's hoisted products for b
+                    if let Some(info) = locals.get(a_id) {
+                        if let Some(ref products) = info.hoisted_i32_products {
+                            if let Some(&cached) = products.get(b_id) {
+                                return Some(builder.use_var(cached));
+                            }
+                        }
+                    }
+                    // Check b's hoisted products for a (commutative)
+                    if let Some(info) = locals.get(b_id) {
+                        if let Some(ref products) = info.hoisted_i32_products {
+                            if let Some(&cached) = products.get(a_id) {
+                                return Some(builder.use_var(cached));
+                            }
+                        }
+                    }
+                }
+            }
             let l = try_compile_index_as_i32(builder, left, locals)?;
             let r = try_compile_index_as_i32(builder, right, locals)?;
             Some(match op {
@@ -767,6 +794,8 @@ impl Compiler {
                     product_cache: None,
                     cached_array_ptr: None,
                     const_value,
+                    hoisted_element_loads: None,
+                    hoisted_i32_products: None,
                 };
                 self.module_level_locals.insert(*id, info);
                 }
@@ -1441,7 +1470,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -1475,7 +1504,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
 
@@ -1731,7 +1760,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1878,7 +1907,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -1899,7 +1928,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2070,7 +2099,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -2091,7 +2120,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2290,7 +2319,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -2311,7 +2340,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -9637,7 +9666,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -9673,7 +9702,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
 
@@ -11234,7 +11263,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                 });
             }
 
@@ -11308,7 +11337,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     });
                 } else {
                     // For immutable captures, store the value directly
@@ -11337,7 +11366,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     });
                 }
             }
@@ -11377,7 +11406,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     })
                 };
 
@@ -12978,7 +13007,7 @@ fn compile_stmt(
                 None
             };
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value });
+            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None });
         }
         Stmt::Return(expr) => {
             // Check if this is a void function (no return type) - e.g., constructors
@@ -14119,6 +14148,230 @@ fn compile_stmt(
                 && !contains_loop_control(body)
                 && loop_stride.is_some();
 
+            // LICM helper functions (shared between unrolled and non-unrolled paths)
+            // Hoist invariant array element loads out of inner loops
+            fn collect_invariant_array_loads_expr(
+                expr: &Expr,
+                counter_id: LocalId,
+                pairs: &mut Vec<(LocalId, LocalId)>,
+                assigned_in_loop: &HashSet<LocalId>,
+            ) {
+                match expr {
+                    Expr::IndexGet { object, index } => {
+                        if let (Expr::LocalGet(arr_id), Expr::LocalGet(idx_id)) = (object.as_ref(), index.as_ref()) {
+                            if *idx_id != counter_id && !assigned_in_loop.contains(idx_id) {
+                                if !pairs.iter().any(|(a, i)| a == arr_id && i == idx_id) {
+                                    pairs.push((*arr_id, *idx_id));
+                                }
+                            }
+                        }
+                        collect_invariant_array_loads_expr(object, counter_id, pairs, assigned_in_loop);
+                        collect_invariant_array_loads_expr(index, counter_id, pairs, assigned_in_loop);
+                    }
+                    Expr::IndexSet { object, index, value } => {
+                        collect_invariant_array_loads_expr(object, counter_id, pairs, assigned_in_loop);
+                        collect_invariant_array_loads_expr(index, counter_id, pairs, assigned_in_loop);
+                        collect_invariant_array_loads_expr(value, counter_id, pairs, assigned_in_loop);
+                    }
+                    Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
+                    Expr::Logical { left, right, .. } => {
+                        collect_invariant_array_loads_expr(left, counter_id, pairs, assigned_in_loop);
+                        collect_invariant_array_loads_expr(right, counter_id, pairs, assigned_in_loop);
+                    }
+                    Expr::LocalSet(_, val) => collect_invariant_array_loads_expr(val, counter_id, pairs, assigned_in_loop),
+                    Expr::Unary { operand, .. } => collect_invariant_array_loads_expr(operand, counter_id, pairs, assigned_in_loop),
+                    Expr::Call { callee, args, .. } => {
+                        collect_invariant_array_loads_expr(callee, counter_id, pairs, assigned_in_loop);
+                        for a in args { collect_invariant_array_loads_expr(a, counter_id, pairs, assigned_in_loop); }
+                    }
+                    _ => {}
+                }
+            }
+            fn collect_invariant_array_loads_stmts(
+                stmts: &[Stmt],
+                counter_id: LocalId,
+                pairs: &mut Vec<(LocalId, LocalId)>,
+                assigned_in_loop: &HashSet<LocalId>,
+            ) {
+                for s in stmts {
+                    match s {
+                        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
+                            collect_invariant_array_loads_expr(e, counter_id, pairs, assigned_in_loop);
+                        }
+                        Stmt::Let { init: Some(e), .. } => collect_invariant_array_loads_expr(e, counter_id, pairs, assigned_in_loop),
+                        Stmt::If { condition, then_branch, else_branch, .. } => {
+                            collect_invariant_array_loads_expr(condition, counter_id, pairs, assigned_in_loop);
+                            collect_invariant_array_loads_stmts(then_branch, counter_id, pairs, assigned_in_loop);
+                            if let Some(eb) = else_branch { collect_invariant_array_loads_stmts(eb, counter_id, pairs, assigned_in_loop); }
+                        }
+                        Stmt::For { init, condition, update, body } => {
+                            if let Some(init_s) = init { collect_invariant_array_loads_stmts(&[init_s.as_ref().clone()], counter_id, pairs, assigned_in_loop); }
+                            if let Some(c) = condition { collect_invariant_array_loads_expr(c, counter_id, pairs, assigned_in_loop); }
+                            if let Some(u) = update { collect_invariant_array_loads_expr(u, counter_id, pairs, assigned_in_loop); }
+                            collect_invariant_array_loads_stmts(body, counter_id, pairs, assigned_in_loop);
+                        }
+                        Stmt::While { condition, body } => {
+                            collect_invariant_array_loads_expr(condition, counter_id, pairs, assigned_in_loop);
+                            collect_invariant_array_loads_stmts(body, counter_id, pairs, assigned_in_loop);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Collect variables assigned in the loop body (to exclude from invariant detection)
+            fn collect_assigned_ids_expr(expr: &Expr, assigned: &mut HashSet<LocalId>) {
+                match expr {
+                    Expr::LocalSet(id, val) => {
+                        assigned.insert(*id);
+                        collect_assigned_ids_expr(val, assigned);
+                    }
+                    Expr::Update { id, .. } => { assigned.insert(*id); }
+                    Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
+                    Expr::Logical { left, right, .. } => {
+                        collect_assigned_ids_expr(left, assigned);
+                        collect_assigned_ids_expr(right, assigned);
+                    }
+                    Expr::Unary { operand, .. } => collect_assigned_ids_expr(operand, assigned),
+                    Expr::Call { callee, args, .. } => {
+                        collect_assigned_ids_expr(callee, assigned);
+                        for a in args { collect_assigned_ids_expr(a, assigned); }
+                    }
+                    Expr::IndexGet { object, index } => {
+                        collect_assigned_ids_expr(object, assigned);
+                        collect_assigned_ids_expr(index, assigned);
+                    }
+                    Expr::IndexSet { object, index, value } => {
+                        collect_assigned_ids_expr(object, assigned);
+                        collect_assigned_ids_expr(index, assigned);
+                        collect_assigned_ids_expr(value, assigned);
+                    }
+                    Expr::Conditional { condition, then_expr, else_expr } => {
+                        collect_assigned_ids_expr(condition, assigned);
+                        collect_assigned_ids_expr(then_expr, assigned);
+                        collect_assigned_ids_expr(else_expr, assigned);
+                    }
+                    _ => {}
+                }
+            }
+            fn collect_assigned_ids_stmts(stmts: &[Stmt], assigned: &mut HashSet<LocalId>) {
+                for s in stmts {
+                    match s {
+                        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => collect_assigned_ids_expr(e, assigned),
+                        Stmt::Let { id, init, .. } => {
+                            assigned.insert(*id);
+                            if let Some(e) = init { collect_assigned_ids_expr(e, assigned); }
+                        }
+                        Stmt::If { condition, then_branch, else_branch, .. } => {
+                            collect_assigned_ids_expr(condition, assigned);
+                            collect_assigned_ids_stmts(then_branch, assigned);
+                            if let Some(eb) = else_branch { collect_assigned_ids_stmts(eb, assigned); }
+                        }
+                        Stmt::For { init, condition, update, body } => {
+                            if let Some(init_s) = init { collect_assigned_ids_stmts(&[init_s.as_ref().clone()], assigned); }
+                            if let Some(c) = condition { collect_assigned_ids_expr(c, assigned); }
+                            if let Some(u) = update { collect_assigned_ids_expr(u, assigned); }
+                            collect_assigned_ids_stmts(body, assigned);
+                        }
+                        Stmt::While { condition, body } => {
+                            collect_assigned_ids_expr(condition, assigned);
+                            collect_assigned_ids_stmts(body, assigned);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Detect invariant index products (e.g., i*size in inner k-loop)
+            fn collect_invariant_products_expr(
+                expr: &Expr,
+                counter_id: LocalId,
+                assigned_in_loop: &HashSet<LocalId>,
+                products: &mut HashSet<(LocalId, LocalId)>,
+            ) {
+                match expr {
+                    Expr::IndexGet { object, index } | Expr::IndexSet { object, index, .. } => {
+                        collect_invariant_products_from_index(index, counter_id, assigned_in_loop, products);
+                        collect_invariant_products_expr(object, counter_id, assigned_in_loop, products);
+                        collect_invariant_products_expr(index, counter_id, assigned_in_loop, products);
+                        if let Expr::IndexSet { value, .. } = expr {
+                            collect_invariant_products_expr(value, counter_id, assigned_in_loop, products);
+                        }
+                    }
+                    Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
+                    Expr::Logical { left, right, .. } => {
+                        collect_invariant_products_expr(left, counter_id, assigned_in_loop, products);
+                        collect_invariant_products_expr(right, counter_id, assigned_in_loop, products);
+                    }
+                    Expr::LocalSet(_, val) => collect_invariant_products_expr(val, counter_id, assigned_in_loop, products),
+                    Expr::Unary { operand, .. } => collect_invariant_products_expr(operand, counter_id, assigned_in_loop, products),
+                    Expr::Call { callee, args, .. } => {
+                        collect_invariant_products_expr(callee, counter_id, assigned_in_loop, products);
+                        for a in args { collect_invariant_products_expr(a, counter_id, assigned_in_loop, products); }
+                    }
+                    _ => {}
+                }
+            }
+            fn collect_invariant_products_stmts(
+                stmts: &[Stmt],
+                counter_id: LocalId,
+                assigned_in_loop: &HashSet<LocalId>,
+                products: &mut HashSet<(LocalId, LocalId)>,
+            ) {
+                for s in stmts {
+                    match s {
+                        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
+                            collect_invariant_products_expr(e, counter_id, assigned_in_loop, products);
+                        }
+                        Stmt::Let { init: Some(e), .. } => collect_invariant_products_expr(e, counter_id, assigned_in_loop, products),
+                        Stmt::If { condition, then_branch, else_branch, .. } => {
+                            collect_invariant_products_expr(condition, counter_id, assigned_in_loop, products);
+                            collect_invariant_products_stmts(then_branch, counter_id, assigned_in_loop, products);
+                            if let Some(eb) = else_branch { collect_invariant_products_stmts(eb, counter_id, assigned_in_loop, products); }
+                        }
+                        Stmt::For { init, condition, update, body } => {
+                            if let Some(init_s) = init { collect_invariant_products_stmts(&[init_s.as_ref().clone()], counter_id, assigned_in_loop, products); }
+                            if let Some(c) = condition { collect_invariant_products_expr(c, counter_id, assigned_in_loop, products); }
+                            if let Some(u) = update { collect_invariant_products_expr(u, counter_id, assigned_in_loop, products); }
+                            collect_invariant_products_stmts(body, counter_id, assigned_in_loop, products);
+                        }
+                        Stmt::While { condition, body } => {
+                            collect_invariant_products_expr(condition, counter_id, assigned_in_loop, products);
+                            collect_invariant_products_stmts(body, counter_id, assigned_in_loop, products);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Helper: scan an index expression for Mul(a, b) where both a, b are loop-invariant
+            fn collect_invariant_products_from_index(
+                expr: &Expr,
+                counter_id: LocalId,
+                assigned_in_loop: &HashSet<LocalId>,
+                products: &mut HashSet<(LocalId, LocalId)>,
+            ) {
+                match expr {
+                    Expr::Binary { op: BinaryOp::Mul, left, right } => {
+                        if let (Expr::LocalGet(a_id), Expr::LocalGet(b_id)) = (left.as_ref(), right.as_ref()) {
+                            // Both operands must be invariant (not the counter, not assigned in loop)
+                            if *a_id != counter_id && *b_id != counter_id
+                                && !assigned_in_loop.contains(a_id) && !assigned_in_loop.contains(b_id)
+                            {
+                                let key = if *a_id <= *b_id { (*a_id, *b_id) } else { (*b_id, *a_id) };
+                                products.insert(key);
+                            }
+                        }
+                        collect_invariant_products_from_index(left, counter_id, assigned_in_loop, products);
+                        collect_invariant_products_from_index(right, counter_id, assigned_in_loop, products);
+                    }
+                    Expr::Binary { left, right, .. } => {
+                        collect_invariant_products_from_index(left, counter_id, assigned_in_loop, products);
+                        collect_invariant_products_from_index(right, counter_id, assigned_in_loop, products);
+                    }
+                    _ => {}
+                }
+            }
+
             if can_unroll {
                 // UNROLLED LOOP: Main loop (8 iterations at a time) + Remainder loop
                 let len_var = cached_length_var.unwrap();
@@ -14409,10 +14662,83 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: Some(field_vars.clone()),
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     });
 
                     scalar_replacement_vars = Some((obj_id, field_vars));
+                }
+
+                // LICM for unrolled path: Hoist invariant loads and products before the loop
+                let mut unrolled_assigned_in_loop: HashSet<LocalId> = HashSet::new();
+                collect_assigned_ids_stmts(body, &mut unrolled_assigned_in_loop);
+                unrolled_assigned_in_loop.insert(idx_id);
+
+                // Hoist invariant array element loads
+                let mut unrolled_invariant_loads: Vec<(LocalId, LocalId)> = Vec::new();
+                collect_invariant_array_loads_stmts(body, idx_id, &mut unrolled_invariant_loads, &unrolled_assigned_in_loop);
+
+                let mut unrolled_hoisted_load_arr_ids: Vec<LocalId> = Vec::new();
+                for (arr_id, idx_load_id) in &unrolled_invariant_loads {
+                    if let Some(arr_info) = locals.get(arr_id) {
+                        if arr_info.is_array && !arr_info.is_mixed_array && !arr_info.is_union {
+                            if let Some(cache_ptr_var) = arr_info.cached_array_ptr {
+                                if locals.contains_key(idx_load_id) {
+                                    let arr_ptr = builder.use_var(cache_ptr_var);
+                                    let idx_val = {
+                                        let idx_info = locals.get(idx_load_id).unwrap();
+                                        if idx_info.is_i32 {
+                                            builder.use_var(idx_info.var)
+                                        } else if let Some(shadow) = idx_info.i32_shadow {
+                                            builder.use_var(shadow)
+                                        } else {
+                                            let f64_val = builder.use_var(idx_info.var);
+                                            builder.ins().fcvt_to_sint(types::I32, f64_val)
+                                        }
+                                    };
+                                    let idx_i64 = builder.ins().uextend(types::I64, idx_val);
+                                    let byte_offset = builder.ins().ishl_imm(idx_i64, 3);
+                                    let data_ptr = builder.ins().iadd_imm(arr_ptr, 8);
+                                    let element_ptr = builder.ins().iadd(data_ptr, byte_offset);
+                                    let element_val = builder.ins().load(types::F64, MemFlags::new(), element_ptr, 0);
+
+                                    let cache_var = Variable::new(*next_var);
+                                    *next_var += 1;
+                                    builder.declare_var(cache_var, types::F64);
+                                    builder.def_var(cache_var, element_val);
+
+                                    if !unrolled_hoisted_load_arr_ids.contains(arr_id) {
+                                        unrolled_hoisted_load_arr_ids.push(*arr_id);
+                                    }
+                                    drop(arr_info);
+                                    locals.get_mut(arr_id).unwrap()
+                                        .hoisted_element_loads.get_or_insert_with(HashMap::new)
+                                        .insert(*idx_load_id, cache_var);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Hoist invariant i32 index products
+                let mut unrolled_invariant_products: HashSet<(LocalId, LocalId)> = HashSet::new();
+                collect_invariant_products_stmts(body, idx_id, &unrolled_assigned_in_loop, &mut unrolled_invariant_products);
+
+                let mut unrolled_hoisted_product_ids: Vec<(LocalId, LocalId)> = Vec::new();
+                for (a_id, b_id) in &unrolled_invariant_products {
+                    let a_val = try_compile_index_as_i32(builder, &Expr::LocalGet(*a_id), locals);
+                    let b_val = try_compile_index_as_i32(builder, &Expr::LocalGet(*b_id), locals);
+                    if let (Some(a_i32), Some(b_i32)) = (a_val, b_val) {
+                        let product = builder.ins().imul(a_i32, b_i32);
+                        let cache_var = Variable::new(*next_var);
+                        *next_var += 1;
+                        builder.declare_var(cache_var, types::I32);
+                        builder.def_var(cache_var, product);
+                        unrolled_hoisted_product_ids.push((*a_id, *b_id));
+
+                        locals.get_mut(a_id).unwrap()
+                            .hoisted_i32_products.get_or_insert_with(HashMap::new)
+                            .insert(*b_id, cache_var);
+                    }
                 }
 
                 // Jump to main loop
@@ -14743,6 +15069,20 @@ fn compile_stmt(
                         idx_info.bounded_by_array = None;
                     }
                 }
+
+                // Clear LICM hoisted element loads (unrolled path)
+                for arr_id in &unrolled_hoisted_load_arr_ids {
+                    if let Some(info) = locals.get_mut(arr_id) {
+                        info.hoisted_element_loads = None;
+                    }
+                }
+
+                // Clear LICM hoisted i32 products (unrolled path)
+                for (a_id, _) in &unrolled_hoisted_product_ids {
+                    if let Some(info) = locals.get_mut(a_id) {
+                        info.hoisted_i32_products = None;
+                    }
+                }
             } else {
                 // NON-UNROLLED LOOP: Original implementation
 
@@ -14851,6 +15191,82 @@ fn compile_stmt(
                     }
                 }
 
+                let counter_id = bce_index_var.unwrap_or(u32::MAX);
+
+                // Collect all assigned variables in loop body
+                let mut assigned_in_loop: HashSet<LocalId> = HashSet::new();
+                collect_assigned_ids_stmts(body, &mut assigned_in_loop);
+                // The counter itself is always assigned in the loop
+                assigned_in_loop.insert(counter_id);
+
+                // LICM: Hoist invariant array element loads
+                let mut invariant_loads: Vec<(LocalId, LocalId)> = Vec::new();
+                collect_invariant_array_loads_stmts(body, counter_id, &mut invariant_loads, &assigned_in_loop);
+
+                let mut hoisted_load_arr_ids: Vec<LocalId> = Vec::new();
+                for (arr_id, idx_id) in &invariant_loads {
+                    if let Some(arr_info) = locals.get(arr_id) {
+                        if arr_info.is_array && !arr_info.is_mixed_array && !arr_info.is_union {
+                            if let Some(cache_ptr_var) = arr_info.cached_array_ptr {
+                                if locals.contains_key(idx_id) {
+                                    let arr_ptr = builder.use_var(cache_ptr_var);
+                                    let idx_val = {
+                                        let idx_info = locals.get(idx_id).unwrap();
+                                        if idx_info.is_i32 {
+                                            builder.use_var(idx_info.var)
+                                        } else if let Some(shadow) = idx_info.i32_shadow {
+                                            builder.use_var(shadow)
+                                        } else {
+                                            let f64_val = builder.use_var(idx_info.var);
+                                            builder.ins().fcvt_to_sint(types::I32, f64_val)
+                                        }
+                                    };
+                                    let idx_i64 = builder.ins().uextend(types::I64, idx_val);
+                                    let byte_offset = builder.ins().ishl_imm(idx_i64, 3);
+                                    let data_ptr = builder.ins().iadd_imm(arr_ptr, 8);
+                                    let element_ptr = builder.ins().iadd(data_ptr, byte_offset);
+                                    let element_val = builder.ins().load(types::F64, MemFlags::new(), element_ptr, 0);
+
+                                    let cache_var = Variable::new(*next_var);
+                                    *next_var += 1;
+                                    builder.declare_var(cache_var, types::F64);
+                                    builder.def_var(cache_var, element_val);
+
+                                    if !hoisted_load_arr_ids.contains(arr_id) {
+                                        hoisted_load_arr_ids.push(*arr_id);
+                                    }
+                                    drop(arr_info);
+                                    locals.get_mut(arr_id).unwrap()
+                                        .hoisted_element_loads.get_or_insert_with(HashMap::new)
+                                        .insert(*idx_id, cache_var);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // LICM: Hoist invariant i32 index products
+                let mut invariant_products: HashSet<(LocalId, LocalId)> = HashSet::new();
+                collect_invariant_products_stmts(body, counter_id, &assigned_in_loop, &mut invariant_products);
+
+                let mut hoisted_product_ids: Vec<(LocalId, LocalId)> = Vec::new();
+                for (a_id, b_id) in &invariant_products {
+                    let a_val = try_compile_index_as_i32(builder, &Expr::LocalGet(*a_id), locals);
+                    let b_val = try_compile_index_as_i32(builder, &Expr::LocalGet(*b_id), locals);
+                    if let (Some(a_i32), Some(b_i32)) = (a_val, b_val) {
+                        let product = builder.ins().imul(a_i32, b_i32);
+                        let cache_var = Variable::new(*next_var);
+                        *next_var += 1;
+                        builder.declare_var(cache_var, types::I32);
+                        builder.def_var(cache_var, product);
+                        hoisted_product_ids.push((*a_id, *b_id));
+
+                        locals.get_mut(a_id).unwrap()
+                            .hoisted_i32_products.get_or_insert_with(HashMap::new)
+                            .insert(*b_id, cache_var);
+                    }
+                }
+
                 let header_block = builder.create_block();
                 let body_block = builder.create_block();
                 let update_block = builder.create_block();
@@ -14950,6 +15366,20 @@ fn compile_stmt(
                 for arr_id in &cached_array_ids {
                     if let Some(info) = locals.get_mut(arr_id) {
                         info.cached_array_ptr = None;
+                    }
+                }
+
+                // Clear LICM hoisted element loads
+                for arr_id in &hoisted_load_arr_ids {
+                    if let Some(info) = locals.get_mut(arr_id) {
+                        info.hoisted_element_loads = None;
+                    }
+                }
+
+                // Clear LICM hoisted i32 products
+                for (a_id, _) in &hoisted_product_ids {
+                    if let Some(info) = locals.get_mut(a_id) {
+                        info.hoisted_i32_products = None;
                     }
                 }
             }
@@ -15232,7 +15662,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
                     });
                 }
 
@@ -25894,6 +26324,17 @@ fn compile_expr(
             Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::IndexGet { object, index } => {
+            // LICM: Check for hoisted element loads first (arr[outer_idx] hoisted out of inner loop)
+            if let (Expr::LocalGet(arr_id), Expr::LocalGet(idx_id)) = (object.as_ref(), index.as_ref()) {
+                if let Some(info) = locals.get(arr_id) {
+                    if let Some(ref hoisted) = info.hoisted_element_loads {
+                        if let Some(&cached_var) = hoisted.get(idx_id) {
+                            return Ok(builder.use_var(cached_var));
+                        }
+                    }
+                }
+            }
+
             // Handle array indexing: arr[i]
             // First, check if we have a known local array for optimized access
             if let Expr::LocalGet(id) = object.as_ref() {

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.128
+**Current Version:** 0.2.129
 
 ## Workflow Requirements
 
@@ -315,6 +315,9 @@ These are recurring issues encountered during development. Check these first whe
 - Const propagation: `const` numeric literals emit `f64const` inline instead of variable loads
 - Array pointer caching: `cached_array_ptr` hoists `js_nanbox_get_pointer` out of for-loops
 - i32 index arithmetic: `try_compile_index_as_i32` keeps integer ops contained to array indexing only
+- LICM: `hoisted_element_loads` caches invariant `arr[outer_idx]` loads before inner loops
+- LICM: `hoisted_i32_products` caches invariant `a * b` i32 products before inner loops
+- LICM detection functions defined before `if can_unroll` so both paths can use them
 
 ### Handle-Based Dispatch
 - TWO dispatch systems: `HANDLE_METHOD_DISPATCH` (method calls) and `HANDLE_PROPERTY_DISPATCH` (property access)
@@ -335,6 +338,22 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.129
+- Loop-Invariant Code Motion (LICM) for nested loops
+  - **Invariant array element hoisting**: `arr[i]` inside inner j-loop is loaded once before the loop, not every iteration
+    - Detects `IndexGet { LocalGet(arr), LocalGet(idx) }` where `idx` is not the loop counter and not assigned in the loop body
+    - Pre-computes the element load (arr_ptr + 8 + idx*8) and caches in a Cranelift variable
+    - `Expr::IndexGet` handler checks `hoisted_element_loads` map before computing inline access
+  - **Invariant i32 product hoisting**: `i * size` inside inner k-loop is computed once before the loop
+    - Detects `Binary { Mul, LocalGet(a), LocalGet(b) }` in array index expressions where both operands are loop-invariant
+    - Pre-computes `imul(a_i32, b_i32)` and caches in a Cranelift variable
+    - `try_compile_index_as_i32` checks `hoisted_i32_products` map before computing `imul`
+  - Both optimizations apply to unrolled and non-unrolled for-loop paths
+  - Two new fields on `LocalInfo`: `hoisted_element_loads` and `hoisted_i32_products`
+  - LICM helper functions shared between unrolled and non-unrolled paths: `collect_invariant_array_loads_stmts`, `collect_assigned_ids_stmts`, `collect_invariant_products_stmts`
+  - **nested_loops benchmark: ~26ms → ~21ms (19% faster, now matches Node.js ~20ms)**
+  - **matrix_multiply benchmark: ~46ms → ~41ms (11% faster)**
 
 ### v0.2.128
 - Add `clearTimeout` support
