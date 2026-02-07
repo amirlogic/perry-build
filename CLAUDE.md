@@ -389,6 +389,17 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
   - Counter demo now works: clicking "Increment" updates "Count: 0" → "Count: 1" → "Count: 2" etc.
   - Added `set_text_str(handle, text)` to `widgets/text.rs` for runtime text updates
   - Added text binding registry to `state.rs` with per-state-handle binding lists
+- Disable while-loop unrolling and add const value propagation for numeric literals
+  - **While-loop unrolling disabled**: The 8x unrolling for while loops with CSE (squared variable caching)
+    bloated data-dependent loops (like mandelbrot) beyond CPU i-cache/loop stream detector limits.
+    The CSE optimization (caching x*x, y*y at loop header) is independent and continues to work.
+    Mandelbrot improved from ~55ms to ~48ms (with unrolling disabled).
+  - **Const value propagation**: `const` variables initialized with numeric literals (`Integer` or `Number`)
+    now emit `f64const` inline instead of loading from Cranelift variables. Enables Cranelift constant folding.
+    - Added `const_value: Option<f64>` field to `LocalInfo` struct
+    - Tracked for both module-level and function-level `const` variables with `mutable: false`
+    - Only applies to non-pointer, non-string, non-bigint variables with literal initializers
+    - `Expr::LocalGet` returns `f64const(val)` when `const_value` is `Some`
 
 ### v0.2.115
 - Performance optimizations: array pointer caching in loops and integer function specialization
