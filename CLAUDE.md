@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.136
+**Current Version:** 0.2.137
 
 ## Workflow Requirements
 
@@ -378,6 +378,15 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.137
+- Fix arena allocator crash on large allocations (>8MB)
+  - Arrays with 1M+ elements (prime_sieve, array_write, array_read benchmarks) caused "Fresh block should have space" panic
+  - Root cause: `alloc_block()` always allocated exactly 8MB blocks; allocations exceeding block size panicked
+  - Fix: `alloc_block(min_size)` now rounds up to next multiple of 8MB for oversized allocations
+  - Also added proper alignment support in `ArenaBlock::alloc()` (alignment was previously ignored)
+  - All 16 benchmarks now pass correctly — 3 previously crashed
+  - **Perry now wins 12/15 benchmarks vs Node.js**: array_read 4x, closure 6x, math_intensive 3x, object_create 3x
 
 ### v0.2.136
 - Comprehensive perry/ui smoke test (`test-files/test_ui_comprehensive.ts`)

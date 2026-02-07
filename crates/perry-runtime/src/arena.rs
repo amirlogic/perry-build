@@ -10,6 +10,24 @@ use std::alloc::{alloc, Layout};
 /// Size of each arena block (8MB)
 const BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Create a block of at least the given size (for oversized allocations)
+fn alloc_block(min_size: usize) -> ArenaBlock {
+    let size = if min_size <= BLOCK_SIZE { BLOCK_SIZE } else {
+        // Round up to next multiple of BLOCK_SIZE
+        ((min_size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE
+    };
+    let layout = Layout::from_size_align(size, 16).unwrap();
+    let data = unsafe { alloc(layout) };
+    if data.is_null() {
+        panic!("Failed to allocate arena block of {} bytes", size);
+    }
+    ArenaBlock {
+        data,
+        size,
+        offset: 0,
+    }
+}
+
 /// A single arena block
 struct ArenaBlock {
     data: *mut u8,
@@ -19,27 +37,20 @@ struct ArenaBlock {
 
 impl ArenaBlock {
     fn new() -> Self {
-        let layout = Layout::from_size_align(BLOCK_SIZE, 16).unwrap();
-        let data = unsafe { alloc(layout) };
-        if data.is_null() {
-            panic!("Failed to allocate arena block");
-        }
-        ArenaBlock {
-            data,
-            size: BLOCK_SIZE,
-            offset: 0,
-        }
+        alloc_block(BLOCK_SIZE)
     }
 
-    /// Try to allocate within this block
+    /// Try to allocate within this block, respecting alignment
     #[inline]
-    fn alloc(&mut self, size: usize) -> Option<*mut u8> {
-        if self.offset + size > self.size {
+    fn alloc(&mut self, size: usize, align: usize) -> Option<*mut u8> {
+        // Align offset up
+        let aligned_offset = (self.offset + align - 1) & !(align - 1);
+        if aligned_offset + size > self.size {
             return None;
         }
 
-        let ptr = unsafe { self.data.add(self.offset) };
-        self.offset += size;
+        let ptr = unsafe { self.data.add(aligned_offset) };
+        self.offset = aligned_offset + size;
         Some(ptr)
     }
 }
@@ -59,17 +70,17 @@ impl Arena {
     }
 
     #[inline]
-    fn alloc(&mut self, size: usize) -> *mut u8 {
+    fn alloc(&mut self, size: usize, align: usize) -> *mut u8 {
         // Try current block first
-        if let Some(ptr) = self.blocks[self.current].alloc(size) {
+        if let Some(ptr) = self.blocks[self.current].alloc(size, align) {
             return ptr;
         }
 
-        // Need a new block
-        self.blocks.push(ArenaBlock::new());
+        // Need a new block — sized to fit the allocation
+        self.blocks.push(alloc_block(size));
         self.current += 1;
 
-        self.blocks[self.current].alloc(size)
+        self.blocks[self.current].alloc(size, align)
             .expect("Fresh block should have space")
     }
 }
@@ -81,10 +92,10 @@ thread_local! {
 /// Allocate memory from the thread-local arena
 /// This is very fast - just a pointer bump in the common case
 #[inline]
-pub fn arena_alloc(size: usize, _align: usize) -> *mut u8 {
+pub fn arena_alloc(size: usize, align: usize) -> *mut u8 {
     ARENA.with(|arena| {
         let arena = unsafe { &mut *arena.get() };
-        arena.alloc(size)
+        arena.alloc(size, align)
     })
 }
 
