@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.139
+**Current Version:** 0.2.140
 
 ## Workflow Requirements
 
@@ -423,6 +423,20 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.140
+- Inline NaN-box string operations to eliminate FFI overhead in string hot paths
+  - New `inline_nanbox_string(builder, ptr)`: 4-instruction Cranelift IR (band + bor + bitcast) replacing `js_nanbox_string` FFI
+  - New `inline_get_string_pointer(builder, val)`: 3-instruction Cranelift IR (bitcast + band) replacing `js_get_string_pointer_unified` FFI
+  - Replaced 9 FFI call sites in string concat/append codegen paths:
+    - String append hot path (`x = x + y`): 3 FFI calls eliminated (dest extraction, rhs extraction, result boxing)
+    - Binary Add string concat: 5 FFI calls eliminated (LHS/RHS extraction for nanboxed, string, might_be_string paths + result boxing)
+    - Union LocalSet string boxing: 1 FFI call eliminated
+  - **string_concat benchmark: 2ms (Perry) vs 4-5ms (Node) — 2x faster**
+- Add i32 shadow variables for integer function parameters
+  - Number params that aren't reassigned in function body get `i32_shadow` via `fcvt_to_sint` at function entry
+  - Avoids repeated `fcvt_to_sint` when params like `size` used in array index arithmetic (`i*size+k`)
+  - **array_read benchmark: 7ms → 3-5ms (40-60% faster, now 3x faster than Node's 12ms)**
 
 ### v0.2.139
 - Fix keyboard shortcuts registered before App() (dead code after blocking event loop)

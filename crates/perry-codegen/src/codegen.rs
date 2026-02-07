@@ -225,6 +225,26 @@ fn inline_truthiness_check(builder: &mut FunctionBuilder, val: Value) -> Value {
     builder.ins().bxor(is_falsy, one_i8)
 }
 
+/// Inline NaN-box a string pointer with STRING_TAG.
+/// Equivalent to `js_nanbox_string(ptr)` but avoids FFI overhead.
+/// ptr must be I64, returns F64.
+fn inline_nanbox_string(builder: &mut FunctionBuilder, ptr: Value) -> Value {
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let masked = builder.ins().band(ptr, mask);
+    let tag = builder.ins().iconst(types::I64, 0x7FFF_0000_0000_0000u64 as i64);
+    let tagged = builder.ins().bor(masked, tag);
+    builder.ins().bitcast(types::F64, MemFlags::new(), tagged)
+}
+
+/// Inline extract raw pointer from NaN-boxed string.
+/// Equivalent to `js_get_string_pointer_unified(val)` for values known to be NaN-boxed strings.
+/// val must be F64, returns I64.
+fn inline_get_string_pointer(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    builder.ins().band(val_i64, mask)
+}
+
 /// Compile a condition expression to an I8 bool without FFI calls.
 /// Handles Compare (fcmp), Logical And/Or (band/bor), Unary Not, and falls back
 /// to inline_truthiness_check for general expressions.
@@ -10240,6 +10260,76 @@ impl Compiler {
                 });
             }
 
+            // Add i32 shadow variables for Number function parameters that aren't reassigned
+            // This avoids repeated fcvt_to_sint conversions when params are used in array indices
+            {
+                fn collect_assigned_param_ids(stmts: &[Stmt], assigned: &mut HashSet<LocalId>) {
+                    for s in stmts {
+                        match s {
+                            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => collect_assigned_param_ids_expr(e, assigned),
+                            Stmt::Let { init: Some(e), .. } => collect_assigned_param_ids_expr(e, assigned),
+                            Stmt::If { condition, then_branch, else_branch, .. } => {
+                                collect_assigned_param_ids_expr(condition, assigned);
+                                collect_assigned_param_ids(then_branch, assigned);
+                                if let Some(eb) = else_branch { collect_assigned_param_ids(eb, assigned); }
+                            }
+                            Stmt::For { init, condition, update, body } => {
+                                if let Some(i) = init { collect_assigned_param_ids(&[i.as_ref().clone()], assigned); }
+                                if let Some(c) = condition { collect_assigned_param_ids_expr(c, assigned); }
+                                if let Some(u) = update { collect_assigned_param_ids_expr(u, assigned); }
+                                collect_assigned_param_ids(body, assigned);
+                            }
+                            Stmt::While { condition, body } => {
+                                collect_assigned_param_ids_expr(condition, assigned);
+                                collect_assigned_param_ids(body, assigned);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                fn collect_assigned_param_ids_expr(expr: &Expr, assigned: &mut HashSet<LocalId>) {
+                    match expr {
+                        Expr::LocalSet(id, val) => { assigned.insert(*id); collect_assigned_param_ids_expr(val, assigned); }
+                        Expr::Update { id, .. } => { assigned.insert(*id); }
+                        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
+                        Expr::Logical { left, right, .. } => {
+                            collect_assigned_param_ids_expr(left, assigned);
+                            collect_assigned_param_ids_expr(right, assigned);
+                        }
+                        Expr::Unary { operand, .. } => collect_assigned_param_ids_expr(operand, assigned),
+                        Expr::Call { callee, args, .. } => {
+                            collect_assigned_param_ids_expr(callee, assigned);
+                            for a in args { collect_assigned_param_ids_expr(a, assigned); }
+                        }
+                        Expr::IndexGet { object, index } => {
+                            collect_assigned_param_ids_expr(object, assigned);
+                            collect_assigned_param_ids_expr(index, assigned);
+                        }
+                        Expr::IndexSet { object, index, value } => {
+                            collect_assigned_param_ids_expr(object, assigned);
+                            collect_assigned_param_ids_expr(index, assigned);
+                            collect_assigned_param_ids_expr(value, assigned);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut assigned_params: HashSet<LocalId> = HashSet::new();
+                collect_assigned_param_ids(&func.body, &mut assigned_params);
+
+                for param in &func.params {
+                    if matches!(param.ty, perry_types::Type::Number) && !assigned_params.contains(&param.id) {
+                        if let Some(info) = locals.get_mut(&param.id) {
+                            let shadow = Variable::new(next_temp_var_id());
+                            builder.declare_var(shadow, types::I32);
+                            let f64_val = builder.use_var(info.var);
+                            let i32_val = builder.ins().fcvt_to_sint(types::I32, f64_val);
+                            builder.def_var(shadow, i32_val);
+                            info.i32_shadow = Some(shadow);
+                        }
+                    }
+                }
+            }
+
             // Load module-level variables from their global slots
             for (local_id, data_id) in &self.module_var_data_ids {
                 // Skip if this LocalId is already a function parameter
@@ -19642,12 +19732,8 @@ fn compile_expr(
 
                             // Get the current string pointer (stored as NaN-boxed f64 with STRING_TAG)
                             let dest_f64 = builder.use_var(info.var);
-                            // Extract raw pointer from NaN-boxed string
-                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
-                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
-                            let dest_call = builder.ins().call(get_str_ptr_ref, &[dest_f64]);
-                            let dest_ptr = builder.inst_results(dest_call)[0];
+                            // Extract raw pointer from NaN-boxed string (inline, no FFI)
+                            let dest_ptr = inline_get_string_pointer(builder, dest_f64);
 
                             // Compile the right side
                             let rhs_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
@@ -19660,9 +19746,8 @@ fn compile_expr(
                                     // Already a raw pointer (e.g., from string parameter)
                                     rhs_val
                                 } else {
-                                    // f64 (NaN-boxed) - extract raw pointer
-                                    let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_val]);
-                                    builder.inst_results(rhs_call)[0]
+                                    // f64 (NaN-boxed) - extract raw pointer (inline, no FFI)
+                                    inline_get_string_pointer(builder, rhs_val)
                                 }
                             } else {
                                 // Number to string
@@ -19680,12 +19765,8 @@ fn compile_expr(
                             let call = builder.ins().call(func_ref, &[dest_ptr, rhs_ptr]);
                             let new_ptr = builder.inst_results(call)[0];
 
-                            // NaN-box the new pointer with STRING_TAG for storage
-                            let nanbox_func = extern_funcs.get("js_nanbox_string")
-                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
-                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                            let nanbox_call = builder.ins().call(nanbox_ref, &[new_ptr]);
-                            let new_f64 = builder.inst_results(nanbox_call)[0];
+                            // NaN-box the new pointer with STRING_TAG for storage (inline, no FFI)
+                            let new_f64 = inline_nanbox_string(builder, new_ptr);
 
                             // Update the variable with the (possibly new) pointer
                             builder.def_var(info.var, new_f64);
@@ -19708,13 +19789,9 @@ fn compile_expr(
                 builder.ins().call(box_set_ref, &[box_ptr, val]);
                 Ok(val)
             } else if info.is_union && is_string_expr_for_union(value, locals) {
-                // For union types with string values, NaN-box the pointer using STRING_TAG
+                // For union types with string values, NaN-box the pointer using STRING_TAG (inline, no FFI)
                 let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-                let nanbox_func = extern_funcs.get("js_nanbox_string")
-                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
-                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                let call = builder.ins().call(nanbox_ref, &[ptr]);
-                let boxed_val = builder.inst_results(call)[0];
+                let boxed_val = inline_nanbox_string(builder, ptr);
                 builder.def_var(info.var, boxed_val);
                 Ok(boxed_val)
             } else if info.is_pointer && !info.is_union {
@@ -19937,13 +20014,9 @@ fn compile_expr(
 
                 // Convert non-string values to strings
                 let lhs_ptr = if is_nanboxed_left {
-                    // NaN-boxed string (from Conditional) - extract the raw pointer
-                    let get_ptr_func = extern_funcs.get("js_nanbox_get_string_pointer")
-                        .ok_or_else(|| anyhow!("js_nanbox_get_string_pointer not declared"))?;
-                    let func_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                    // NaN-boxed string (from Conditional) - extract the raw pointer (inline, no FFI)
                     let val_f64 = ensure_f64(builder, lhs_val);
-                    let call = builder.ins().call(func_ref, &[val_f64]);
-                    builder.inst_results(call)[0]
+                    inline_get_string_pointer(builder, val_f64)
                 } else if is_union_left {
                     // Union type (could be string, number, etc.) - use js_jsvalue_to_string
                     let jsvalue_to_str_func = extern_funcs.get("js_jsvalue_to_string")
@@ -19954,19 +20027,14 @@ fn compile_expr(
                     builder.inst_results(call)[0]
                 } else if is_string_left {
                     // String value - could be raw i64 pointer or NaN-boxed f64
-                    // Use js_get_string_pointer_unified to handle both cases
                     let lhs_type = builder.func.dfg.value_type(lhs_val);
                     if lhs_type == types::I64 {
                         // Already a raw pointer
                         lhs_val
                     } else {
-                        // f64 - could be NaN-boxed or raw pointer bitcast
-                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
-                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                        // f64 (NaN-boxed) - extract raw pointer (inline, no FFI)
                         let val_f64 = ensure_f64(builder, lhs_val);
-                        let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
-                        builder.inst_results(call)[0]
+                        inline_get_string_pointer(builder, val_f64)
                     }
                 } else {
                     // Check if the value is already i64 (a string pointer from function call)
@@ -19986,13 +20054,9 @@ fn compile_expr(
                             _ => false,
                         };
                         if might_be_string_ptr {
-                            // String stored as NaN-boxed f64 - extract the raw pointer
-                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
-                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            // String stored as NaN-boxed f64 - extract the raw pointer (inline, no FFI)
                             let val_f64 = ensure_f64(builder, lhs_val);
-                            let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
-                            builder.inst_results(call)[0]
+                            inline_get_string_pointer(builder, val_f64)
                         } else {
                             // Unknown f64 - could be NaN-boxed string or number
                             // Use js_jsvalue_to_string which handles both cases
@@ -20007,12 +20071,9 @@ fn compile_expr(
 
                 let rhs_ptr = if is_nanboxed_right {
                     // NaN-boxed string (from Conditional) - extract the raw pointer
-                    let get_ptr_func = extern_funcs.get("js_nanbox_get_string_pointer")
-                        .ok_or_else(|| anyhow!("js_nanbox_get_string_pointer not declared"))?;
-                    let func_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                    // Inline extract pointer from NaN-boxed string (no FFI)
                     let val_f64 = ensure_f64(builder, rhs_val);
-                    let call = builder.ins().call(func_ref, &[val_f64]);
-                    builder.inst_results(call)[0]
+                    inline_get_string_pointer(builder, val_f64)
                 } else if is_union_right {
                     // Union type (could be string, number, etc.) - use js_jsvalue_to_string
                     let jsvalue_to_str_func = extern_funcs.get("js_jsvalue_to_string")
@@ -20023,19 +20084,14 @@ fn compile_expr(
                     builder.inst_results(call)[0]
                 } else if is_string_right {
                     // String value - could be raw i64 pointer or NaN-boxed f64
-                    // Use js_get_string_pointer_unified to handle both cases
                     let rhs_type = builder.func.dfg.value_type(rhs_val);
                     if rhs_type == types::I64 {
                         // Already a raw pointer
                         rhs_val
                     } else {
-                        // f64 - could be NaN-boxed or raw pointer bitcast
-                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
-                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                        // f64 (NaN-boxed) - extract raw pointer (inline, no FFI)
                         let val_f64 = ensure_f64(builder, rhs_val);
-                        let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
-                        builder.inst_results(call)[0]
+                        inline_get_string_pointer(builder, val_f64)
                     }
                 } else {
                     // Check if the value is already i64 (a string pointer from function call)
@@ -20055,13 +20111,9 @@ fn compile_expr(
                             _ => false,
                         };
                         if might_be_string_ptr {
-                            // String stored as NaN-boxed f64 - extract the raw pointer
-                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
-                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            // String stored as NaN-boxed f64 - extract the raw pointer (inline, no FFI)
                             let val_f64 = ensure_f64(builder, rhs_val);
-                            let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
-                            builder.inst_results(call)[0]
+                            inline_get_string_pointer(builder, val_f64)
                         } else {
                             // Unknown f64 - could be NaN-boxed string or number
                             // Use js_jsvalue_to_string which handles both cases
@@ -20081,12 +20133,8 @@ fn compile_expr(
                 let call = builder.ins().call(func_ref, &[lhs_ptr, rhs_ptr]);
                 let result_ptr = builder.inst_results(call)[0];
 
-                // NaN-box the result with STRING_TAG
-                let nanbox_func = extern_funcs.get("js_nanbox_string")
-                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
-                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
-                return Ok(builder.inst_results(nanbox_call)[0]);
+                // NaN-box the result with STRING_TAG (inline, no FFI)
+                return Ok(inline_nanbox_string(builder, result_ptr));
             }
 
             // Check if this is BigInt arithmetic
