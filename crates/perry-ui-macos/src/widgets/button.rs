@@ -51,17 +51,23 @@ impl PerryButtonTarget {
     }
 }
 
+/// Extract a &str from a *const StringHeader pointer.
+fn str_from_header(ptr: *const u8) -> &'static str {
+    if ptr.is_null() {
+        return "";
+    }
+    unsafe {
+        let header = ptr as *const perry_runtime::string::StringHeader;
+        let len = (*header).length as usize;
+        let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
 /// Create an NSButton with a label and closure callback.
-/// `label_ptr` is a raw string pointer, `on_press` is a NaN-boxed closure pointer.
+/// `label_ptr` is a StringHeader pointer, `on_press` is a NaN-boxed closure pointer.
 pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
-    let label = if label_ptr.is_null() {
-        ""
-    } else {
-        unsafe {
-            let len = libc::strlen(label_ptr as *const i8);
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(label_ptr, len))
-        }
-    };
+    let label = str_from_header(label_ptr);
 
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     let ns_string = NSString::from_str(label);

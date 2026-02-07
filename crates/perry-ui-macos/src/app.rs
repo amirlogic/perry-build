@@ -1,7 +1,7 @@
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSWindow,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSLayoutConstraint, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGSize, CGRect};
@@ -20,15 +20,25 @@ struct AppEntry {
     _root_widget: Option<i64>,
 }
 
+/// Extract a &str from a *const StringHeader pointer.
+fn str_from_header(ptr: *const u8) -> &'static str {
+    if ptr.is_null() {
+        return "";
+    }
+    unsafe {
+        let header = ptr as *const perry_runtime::string::StringHeader;
+        let len = (*header).length as usize;
+        let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
 /// Create an app with title, width, height.
 pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
     let title = if title_ptr.is_null() {
         "Perry App"
     } else {
-        unsafe {
-            let len = libc::strlen(title_ptr as *const i8);
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(title_ptr, len))
-        }
+        str_from_header(title_ptr)
     };
 
     let w = if width > 0.0 { width } else { 400.0 };
@@ -75,7 +85,32 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
             apps[idx]._root_widget = Some(root_handle);
 
             if let Some(view) = widgets::get_widget(root_handle) {
+                unsafe {
+                    // Disable autoresizing mask translation for Auto Layout
+                    view.setTranslatesAutoresizingMaskIntoConstraints(false);
+                }
+
                 apps[idx].window.setContentView(Some(&view));
+
+                // Pin the root widget to fill the window's content view
+                if let Some(content_view) = apps[idx].window.contentView() {
+                    unsafe {
+                        let leading = view.leadingAnchor();
+                        let trailing = view.trailingAnchor();
+                        let top = view.topAnchor();
+                        let bottom = view.bottomAnchor();
+                        let cv_leading = content_view.leadingAnchor();
+                        let cv_trailing = content_view.trailingAnchor();
+                        let cv_top = content_view.topAnchor();
+                        let cv_bottom = content_view.bottomAnchor();
+                        NSLayoutConstraint::activateConstraints(&objc2_foundation::NSArray::from_retained_slice(&[
+                            leading.constraintEqualToAnchor(&cv_leading),
+                            trailing.constraintEqualToAnchor(&cv_trailing),
+                            top.constraintEqualToAnchor(&cv_top),
+                            bottom.constraintEqualToAnchor(&cv_bottom),
+                        ]));
+                    }
+                }
             }
         }
     });

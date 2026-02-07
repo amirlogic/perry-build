@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.120
+**Current Version:** 0.2.121
 
 ## Workflow Requirements
 
@@ -269,6 +269,20 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.121
+- Fix UI widgets not rendering text — string pointer format mismatch
+  - Widget FFI functions (`perry_ui_text_create`, `perry_ui_button_create`, `perry_ui_app_create`)
+    used `libc::strlen` assuming null-terminated C strings, but received `*const StringHeader` pointers
+  - `StringHeader` is `{ length: u32, capacity: u32 }` followed by UTF-8 data (not null-terminated)
+  - `libc::strlen` read the header bytes as characters, producing garbled/empty strings
+  - Fix: Read `length` from `StringHeader`, skip 8-byte header to get data pointer
+  - Added `str_from_header` helper in text.rs, button.rs, and app.rs
+- Fix VStack/HStack child views not visible — missing Auto Layout constraints
+  - Root widget was set as `contentView` but had no constraints to fill the window
+  - Added `translatesAutoresizingMaskIntoConstraints = false` and pinned all edges
+  - Added edge insets (20px padding) to NSStackView for visual spacing
+- Counter app now shows "Count: 0" text and "Increment" button correctly
 
 ### v0.2.120
 - Contained i32 index arithmetic optimization for array access in loops
