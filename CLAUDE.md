@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**NOTE**: This file is kept intentionally concise (~300 lines) because it is loaded into every conversation. Detailed historical changelogs are in CHANGELOG.md. When adding new changes, keep entries to 1-2 lines max and move older entries to CHANGELOG.md periodically.
+
 ## Project Overview
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
@@ -12,76 +14,18 @@ Perry is a native TypeScript compiler written in Rust that compiles TypeScript s
 
 **IMPORTANT:** Follow these practices for every code change:
 
-1. **Update CLAUDE.md**: After making any code changes, update this file to document:
-   - New features or fixes in the "Recent Changes" section
-   - Any new patterns, APIs, or important implementation details
-   - Changes to build commands or architecture
-
-2. **Increment Version**: Bump the version number with every change:
-   - Use patch increments (e.g., 0.2.40 → 0.2.41) for bug fixes and small changes
-   - Use minor increments (e.g., 0.2.x → 0.3.0) for new features
-   - Update the "Current Version" field at the top of this file
-
-3. **Commit Changes**: Always commit after completing a change:
-   - Include both the code changes and CLAUDE.md updates in the same commit
-   - Use descriptive commit messages that summarize the change
+1. **Update CLAUDE.md**: Add 1-2 line entry in "Recent Changes" for new features/fixes
+2. **Increment Version**: Bump patch version (e.g., 0.2.147 → 0.2.148)
+3. **Commit Changes**: Include code changes and CLAUDE.md updates together
 
 ## Build Commands
 
 ```bash
-# Build all crates (release)
-cargo build --release
-
-# Build the runtime library (required for linking)
-cargo build --release -p perry-runtime
-
-# Run tests
-cargo test
-
-# Run tests for a specific crate
-cargo test -p perry-hir
-
-# Check / format / lint
-cargo check
-cargo fmt
-cargo clippy
-```
-
-## Compiling TypeScript
-
-```bash
-# Compile a TypeScript file to executable
-cargo run --release -- test_factorial.ts -o factorial
-
-# Print HIR for debugging
-cargo run --release -- test_factorial.ts --print-hir
-
-# Produce object file only (no linking)
-cargo run --release -- test_factorial.ts --no-link
-
-# Compile a UI app for iOS Simulator
-cargo run --release -- test_ui_counter.ts --target ios-simulator -o CounterApp
-# Then: xcrun simctl install booted CounterApp.app && xcrun simctl launch booted com.perry.CounterApp
-```
-
-### iOS Cross-Compilation
-
-```bash
-# Install iOS target
-rustup target add aarch64-apple-ios-sim
-
-# Build iOS libraries
-cargo build --release -p perry-runtime --no-default-features --target aarch64-apple-ios-sim
-cargo build --release -p perry-stdlib --no-default-features --target aarch64-apple-ios-sim
-cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim
-
-# Build the compiler (runs on macOS host)
-cargo build --release
-
-# Compile and deploy
-cargo run --release -- app.ts --target ios-simulator -o MyApp
-xcrun simctl install booted MyApp.app
-xcrun simctl launch booted com.perry.MyApp
+cargo build --release                          # Build all crates
+cargo build --release -p perry-runtime -p perry-stdlib  # Rebuild runtime (MUST rebuild stdlib too!)
+cargo test --workspace --exclude perry-ui-ios  # Run tests (exclude iOS on macOS host)
+cargo run --release -- file.ts -o output && ./output    # Compile and run TypeScript
+cargo run --release -- file.ts --print-hir              # Debug: print HIR
 ```
 
 ## Architecture
@@ -90,757 +34,139 @@ xcrun simctl launch booted com.perry.MyApp
 TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Codegen (Cranelift) → .o → Link (cc) → Executable
 ```
 
-### Crate Structure
-
 | Crate | Purpose |
 |-------|---------|
-| **perry** | CLI driver that orchestrates the pipeline |
+| **perry** | CLI driver |
 | **perry-parser** | SWC wrapper for TypeScript parsing |
-| **perry-types** | Type system definitions (Void, Boolean, Number, String, Array, Object, Function, Union, Promise, etc.) |
+| **perry-types** | Type system definitions |
 | **perry-hir** | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
-| **perry-transform** | IR transformation passes (closure conversion, async lowering, inlining) |
+| **perry-transform** | IR passes (closure conversion, async lowering, inlining) |
 | **perry-codegen** | Cranelift-based native code generation |
-| **perry-runtime** | Runtime library linked into executables (`value.rs`, `object.rs`, `array.rs`, `string.rs`, `bigint.rs`, `closure.rs`, `promise.rs`, `builtins.rs`) |
-| **perry-stdlib** | Standard library — Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
-| **perry-ui** | Platform-agnostic UI types (WidgetHandle, WidgetKind, StateId) |
-| **perry-ui-macos** | macOS AppKit UI backend (NSWindow, NSButton, NSTextField, NSStackView) |
-| **perry-ui-ios** | iOS UIKit UI backend (UIWindow, UIButton, UILabel, UIStackView) |
+| **perry-runtime** | Runtime: value.rs, object.rs, array.rs, string.rs, gc.rs, arena.rs, etc. |
+| **perry-stdlib** | Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
+| **perry-ui** / **perry-ui-macos** / **perry-ui-ios** | Native UI (AppKit/UIKit) |
 | **perry-jsruntime** | JavaScript interop via QuickJS |
 
-### Key Data Flow
+## NaN-Boxing
 
-1. `perry_parser::parse_typescript()` produces SWC's `Module` AST
-2. `perry_hir::lower_module()` converts AST to typed HIR with unique IDs
-3. `perry_codegen::Compiler::compile_module()` generates native object code
-4. System linker (`cc`) links object file with `libperry_runtime.a`
-
-### HIR Structure
-
-The HIR (`crates/perry-hir/src/ir.rs`) represents a simplified, typed intermediate form:
-- **Module**: Contains globals, functions, classes, and init statements
-- **Function**: Name, params with types, return type, body, async flag
-- **Class**: Name, fields, constructor, instance/static methods
-- **Statement**: Let, Expr, Return, If, While, For, Break, Continue, Throw, Try
-- **Expression**: Literals, variable access (LocalGet/Set, GlobalGet/Set), operations, calls, object/array literals
-
-## NaN-Boxing Implementation
-
-Perry uses NaN-boxing to represent JavaScript values efficiently in 64 bits. Key tag constants in `perry-runtime/src/value.rs`:
-
-```rust
-TAG_UNDEFINED = 0x7FFC_0000_0000_0001
-TAG_NULL      = 0x7FFC_0000_0000_0002
-TAG_FALSE     = 0x7FFC_0000_0000_0003
-TAG_TRUE      = 0x7FFC_0000_0000_0004
-BIGINT_TAG    = 0x7FFA_0000_0000_0000  // BigInt pointer (lower 48 bits)
-STRING_TAG    = 0x7FFF_0000_0000_0000  // String pointer (lower 48 bits)
-POINTER_TAG   = 0x7FFD_0000_0000_0000  // Object/Array pointer (lower 48 bits)
-INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
-```
-
-### Key Runtime Functions
-
-- `js_nanbox_string(ptr)` / `js_nanbox_pointer(ptr)` / `js_nanbox_bigint(ptr)` — Wrap pointers with tags
-- `js_nanbox_get_pointer(f64)` — Extract object/array pointer from NaN-boxed value
-- `js_nanbox_get_bigint(f64)` — Extract BigInt pointer
-- `js_get_string_pointer_unified(f64)` — Extract raw pointer from NaN-boxed or raw string
-- `js_jsvalue_to_string(f64)` — Convert any NaN-boxed value to string
-- `js_is_truthy(f64)` — Proper JavaScript truthiness semantics
-
-### Module-Level Variables
-
-- **Strings**: Stored as F64 (NaN-boxed with STRING_TAG), NOT I64 raw pointers
-- **Arrays/Objects**: Stored as I64 (raw pointers)
-- Functions access module variables via `module_var_data_ids` mapping
-
-## Promise System
-
-Promises use closure-based callbacks (`ClosurePtr`) instead of raw function pointers:
-
-```rust
-pub type ClosurePtr = *const crate::closure::ClosureHeader;
-pub struct Promise {
-    state: PromiseState,
-    value: f64,
-    reason: f64,
-    on_fulfilled: ClosurePtr,
-    on_rejected: ClosurePtr,
-    next: *mut Promise,
-}
-```
-
-Callbacks are invoked via `js_closure_call1(closure, value)` which properly passes the closure environment.
-
-## Native UI Architecture (`perry/ui`)
-
-Perry supports native macOS GUI apps via `perry/ui`. Declarative TypeScript compiles to AppKit calls — no Electron, no WebView.
-
-### TypeScript API
-
-```typescript
-import { App, VStack, HStack, Text, Button, State, Spacer, Divider, TextField, Toggle, Slider, ForEach } from "perry/ui"
-
-const count = State(0)
-const dark = State(0)
-
-App({
-    title: "Counter",
-    width: 400,
-    height: 300,
-    body: VStack(16, [
-        Text(`Count: ${count.value}`),
-        Button("Increment", () => count.set(count.value + 1)),
-        Slider(0, 100, count.value, (val: number) => count.set(val)),  // two-way binding
-        dark.value ? Text("Dark ON") : Text("Dark OFF"),               // conditional rendering
-        Toggle("Dark mode", (on: boolean) => dark.set(on ? 1 : 0)),
-        ForEach(count, (i: number) => Text(`Item ${i}`)),              // dynamic list
-        Divider(),
-        TextField("Enter name", (text: string) => { console.log(text) }),
-        Spacer(),
-    ])
-})
-```
-
-### Pipeline
+Perry uses NaN-boxing to represent JavaScript values in 64 bits (`perry-runtime/src/value.rs`):
 
 ```
-TypeScript: import { Text, Button } from "perry/ui"
-  → HIR: "perry/ui" in NATIVE_MODULES → NativeMethodCall { module: "perry/ui", method: "Text" }
-  → Codegen: Special dispatch → calls perry_ui_* FFI functions
-  → Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit (or libperry_ui_ios.a + UIKit)
-  → Runtime: perry-ui-macos uses objc2/AppKit, perry-ui-ios uses objc2/UIKit
+TAG_UNDEFINED = 0x7FFC_0000_0000_0001    BIGINT_TAG  = 0x7FFA (lower 48 = ptr)
+TAG_NULL      = 0x7FFC_0000_0000_0002    POINTER_TAG = 0x7FFD (lower 48 = ptr)
+TAG_FALSE     = 0x7FFC_0000_0000_0003    INT32_TAG   = 0x7FFE (lower 32 = int)
+TAG_TRUE      = 0x7FFC_0000_0000_0004    STRING_TAG  = 0x7FFF (lower 48 = ptr)
 ```
 
-### iOS Support (`--target ios-simulator` / `--target ios`)
+Key functions: `js_nanbox_string/pointer/bigint`, `js_nanbox_get_pointer`, `js_get_string_pointer_unified`, `js_jsvalue_to_string`, `js_is_truthy`
 
-The same TypeScript UI source compiles to either macOS or iOS depending on the `--target` flag. The 47 `perry_ui_*` FFI functions are the abstraction boundary — codegen is platform-agnostic.
+**Module-level variables**: Strings stored as F64 (NaN-boxed), Arrays/Objects as I64 (raw pointers). Access via `module_var_data_ids`.
 
-| Component | macOS | iOS |
-|-----------|-------|-----|
-| UI library | `libperry_ui_macos.a` | `libperry_ui_ios.a` |
-| Text | NSTextField (label mode) | UILabel |
-| Button | NSButton + target-action | UIButton + TouchUpInside |
-| Stacks | NSStackView | UIStackView |
-| Toggle | NSSwitch | UISwitch |
-| Slider | NSSlider (f64) | UISlider (f32, cast at boundary) |
-| TextField | NSNotificationCenter observer | addTarget:EditingChanged |
-| App lifecycle | NSApplication.run() | UIApplicationMain + deferred creation |
-| Root widget | NSWindow contentView | UIViewController.view safeAreaLayoutGuide |
+## Garbage Collection
 
-**Stubbed on iOS** (no-op): Keyboard shortcuts, context menus, file dialog, appSetMinSize/appSetMaxSize, textSetSelectable.
+Mark-sweep GC in `crates/perry-runtime/src/gc.rs` with conservative stack scanning. Arena objects (arrays, objects) discovered by linear block walking (zero per-alloc tracking). Malloc objects (strings, closures, promises, bigints, errors) tracked in thread-local Vec. Triggers on new arena block allocation (~8MB) or explicit `gc()` call. 8-byte GcHeader per allocation.
 
-**Cross-compilation**: perry-runtime uses Cargo feature gates (`default = ["full"]`). iOS builds use `--no-default-features` to exclude postgres, redis, sysinfo, hostname, dirs, whoami. Cranelift codegen uses `target_lexicon::Triple` for `aarch64-apple-ios` ISA.
+## Native UI (`perry/ui`)
 
-### Handle-Based Widget System
+Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI functions. Handle-based widget system (1-based i64 handles, NaN-boxed with POINTER_TAG). 5 reactive binding types dispatched from `state_set()`. `--target ios-simulator`/`--target ios` for cross-compilation.
 
-All UI objects are stored in thread-local `Vec`s and referenced by **1-based i64 handles**. Handles are NaN-boxed with `POINTER_TAG` from generic `NativeMethodCall` codegen — callers must use `js_nanbox_get_pointer(f64) -> i64` to extract raw handles.
-
-### Reactive State Binding
-
-Perry/ui supports 5 types of reactive bindings, all dispatched from `state_set()`:
-
-1. **Single-state text**: `Text("Count: " + state.value)` → `perry_ui_state_bind_text_numeric` (prefix/suffix)
-2. **Multi-state text**: `` Text(`${a.value} + ${b.value}`) `` → `perry_ui_state_bind_text_template` (template parts)
-3. **Two-way binding**: `Slider(0, 10, state.value, cb)` → `perry_ui_state_bind_slider` (slider position tracks state)
-4. **Conditional rendering**: `state.value ? WidgetA : WidgetB` → `perry_ui_state_bind_visibility` (show/hide)
-5. **Dynamic lists**: `ForEach(state, (i) => Widget)` → `perry_ui_for_each_init` (clear + rebuild on change)
-
-### FFI Surface (all `#[no_mangle] pub extern "C"`)
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `perry_ui_app_create` | `(title: i64, w: f64, h: f64) -> i64` | Create NSWindow |
-| `perry_ui_app_set_body` | `(app: i64, root: i64)` | Set root widget with Auto Layout |
-| `perry_ui_app_run` | `(app: i64)` | Run NSApplication event loop |
-| `perry_ui_text_create` | `(text_ptr: i64) -> i64` | Create NSTextField label |
-| `perry_ui_button_create` | `(label: i64, on_press: f64) -> i64` | Create NSButton with closure |
-| `perry_ui_vstack_create` / `hstack` | `(spacing: f64) -> i64` | Create NSStackView |
-| `perry_ui_widget_add_child` | `(parent: i64, child: i64)` | Add child to container |
-| `perry_ui_state_create` | `(initial: f64) -> i64` | Create reactive state cell |
-| `perry_ui_state_get` / `set` | `(state: i64) -> f64` / `(state: i64, val: f64)` | Read/write state |
-| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64, suffix: i64)` | Bind text to state |
-| `perry_ui_spacer_create` | `() -> i64` | Create flexible spacer view |
-| `perry_ui_divider_create` | `() -> i64` | Create horizontal separator (NSBox) |
-| `perry_ui_textfield_create` | `(placeholder: i64, on_change: f64) -> i64` | Create editable text field |
-| `perry_ui_toggle_create` | `(label: i64, on_change: f64) -> i64` | Create switch + label |
-| `perry_ui_slider_create` | `(min: f64, max: f64, initial: f64, on_change: f64) -> i64` | Create horizontal slider |
-| `perry_ui_state_bind_slider` | `(state: i64, slider: i64)` | Two-way bind slider to state |
-| `perry_ui_state_bind_toggle` | `(state: i64, toggle: i64)` | Two-way bind toggle to state |
-| `perry_ui_state_bind_text_template` | `(text: i64, num_parts: i32, types: i64, values: i64)` | Multi-state text template binding |
-| `perry_ui_state_bind_visibility` | `(state: i64, show: i64, hide: i64)` | Conditional visibility binding |
-| `perry_ui_set_widget_hidden` | `(handle: i64, hidden: i64)` | Show/hide widget |
-| `perry_ui_for_each_init` | `(container: i64, state: i64, closure: f64)` | Init dynamic list with ForEach |
-| `perry_ui_widget_clear_children` | `(handle: i64)` | Remove all children from container |
-| `perry_ui_text_set_string` | `(handle: i64, text_ptr: i64)` | Update text content |
-| `perry_ui_text_set_color` | `(handle: i64, r: f64, g: f64, b: f64, a: f64)` | Set text color |
-| `perry_ui_text_set_font_size` | `(handle: i64, size: f64)` | Set font size |
-| `perry_ui_text_set_font_weight` | `(handle: i64, size: f64, weight: f64)` | Set font weight |
-| `perry_ui_text_set_selectable` | `(handle: i64, selectable: f64)` | Set text selectable |
-| `perry_ui_button_set_bordered` | `(handle: i64, bordered: f64)` | Set button border |
-| `perry_ui_button_set_title` | `(handle: i64, title_ptr: i64)` | Set button title |
-| `perry_ui_vstack_create_with_insets` | `(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64` | VStack with custom insets |
-| `perry_ui_hstack_create_with_insets` | `(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64` | HStack with custom insets |
-| `perry_ui_scrollview_create` | `() -> i64` | Create NSScrollView |
-| `perry_ui_scrollview_set_child` | `(scroll: i64, child: i64)` | Set scroll document view |
-| `perry_ui_scrollview_scroll_to` | `(scroll: i64, child: i64)` | Scroll child into view |
-| `perry_ui_scrollview_get_offset` | `(scroll: i64) -> f64` | Get vertical scroll offset |
-| `perry_ui_scrollview_set_offset` | `(scroll: i64, offset: f64)` | Set vertical scroll offset |
-| `perry_ui_clipboard_read` | `() -> f64` | Read text from clipboard |
-| `perry_ui_clipboard_write` | `(text_ptr: i64)` | Write text to clipboard |
-| `perry_ui_add_keyboard_shortcut` | `(key_ptr: i64, modifiers: f64, callback: f64)` | Add keyboard shortcut |
-| `perry_ui_textfield_focus` | `(handle: i64)` | Focus text field |
-| `perry_ui_textfield_set_string` | `(handle: i64, text_ptr: i64)` | Set text field value |
-| `perry_ui_menu_create` | `() -> i64` | Create context menu |
-| `perry_ui_menu_add_item` | `(menu: i64, title_ptr: i64, callback: f64)` | Add menu item |
-| `perry_ui_widget_set_context_menu` | `(widget: i64, menu: i64)` | Set context menu on widget |
-| `perry_ui_open_file_dialog` | `(callback: f64)` | Open file dialog |
-| `perry_ui_app_set_min_size` | `(app: i64, w: f64, h: f64)` | Set minimum window size |
-| `perry_ui_app_set_max_size` | `(app: i64, w: f64, h: f64)` | Set maximum window size |
-| `perry_ui_widget_add_child_at` | `(parent: i64, child: i64, index: f64)` | Insert child at index |
-
-### How to Add a New Widget
-
-Changes required in **4 places**:
-
-1. **Runtime** (`crates/perry-ui-macos/src/widgets/`): Create widget file, register with `register_widget(view)`
-2. **FFI** (`crates/perry-ui-macos/src/lib.rs`): Add `#[no_mangle] pub extern "C" fn perry_ui_<widget>_create(...) -> i64`
-3. **Codegen** (`crates/perry-codegen/src/codegen.rs`):
-   - Declare extern function in `declare_runtime_functions` (search for `perry_ui_`)
-   - Add dispatch entry in `NativeMethodCall` match (search for `"perry/ui"`)
-   - Simple widgets: `("perry/ui", false, "Widget") => "perry_ui_widget_create"`
-   - Container widgets: Follow VStack/HStack pattern for children array handling
-4. **HIR** (`crates/perry-hir/src/lower.rs`): Only if widget has instance methods — register as native instance class like State
-
-Build: `cargo build --release -p perry-ui-macos`. Non-UI programs are unaffected — UI libs only linked when `perry/ui` is imported.
-
-## Known Working Features
-
-- Arithmetic, comparisons, logical operators, variables, constants, type annotations
-- Functions (regular, async, arrow, closures with up to 8 args)
-- Classes with constructors, methods, inheritance
-- Arrays with methods (push, pop, map, filter, find, join, reduce, etc.)
-- Objects with property access (dot and bracket notation)
-- Template literals with interpolation
-- Promises (.then, .catch, .finally, Promise.all, Promise.resolve, Promise.reject)
-- async/await with proper rejection propagation
-- try/catch/finally
-- fetch() with custom headers
-- Multi-module compilation with imports/exports/re-exports
-- Native modules: mysql2, ioredis, ws, fastify, ethers, pg, async_hooks, and more
-- Native macOS UI via `perry/ui`
-- BigInt with arithmetic and comparisons
+**To add a new widget** — change 4 places:
+1. Runtime: `crates/perry-ui-macos/src/widgets/` — create widget, `register_widget(view)`
+2. FFI: `crates/perry-ui-macos/src/lib.rs` — `#[no_mangle] pub extern "C" fn perry_ui_<widget>_create`
+3. Codegen: `crates/perry-codegen/src/codegen.rs` — declare extern + NativeMethodCall dispatch
+4. HIR: `crates/perry-hir/src/lower.rs` — only if widget has instance methods
 
 ## Known Limitations
 
-### Mark-Sweep Garbage Collection
-Uses a **mark-sweep GC** (`crates/perry-runtime/src/gc.rs`) with conservative stack scanning. Arena objects (arrays, objects) are discovered by linear block walking — zero per-allocation tracking overhead. Malloc objects (strings, closures, promises, bigints, errors) are tracked in a thread-local list. GC triggers automatically when new arena blocks are allocated (every ~8MB), or manually via `gc()`. `process.memoryUsage()` available to monitor. The GC adds ~8 bytes overhead per allocation (GcHeader) but has zero cost for programs that fit in a single arena block.
-
-### No Runtime Type Checking
-TypeScript types are **erased at compile time**. `as` casts are no-ops. `typeof` works via NaN-boxing tag inspection. `instanceof` works for class instances via class ID chain. No runtime enforcement of interfaces or generics.
-
-### Single-Threaded
-User code runs on a single thread. Async I/O runs on a 4-thread tokio worker pool. Promise callbacks always execute on the main thread. Thread-local arenas mean JSValues cannot be shared between threads — use `spawn_for_promise_deferred()` for safe cross-thread data transfer.
-
-## Cross-Platform Development
-
-- **GitHub Actions**: Templates in `templates/github-actions/` (ci.yml, release.yml) — copy to `.github/workflows/` to activate
-- **Docker**: `Dockerfile` (multi-stage), `Dockerfile.dev` (development), `docker-compose.yml` (with MySQL, Redis, PostgreSQL)
-- See `docs/CROSS_PLATFORM.md` for details
-
-## Test Files
-
-Root-level `test_*.ts` files serve as integration tests. Compile and run: `cargo run --release -- test_factorial.ts && ./test_factorial`
-
-## Debugging Tips
-
-1. **Print HIR**: `--print-hir` shows the intermediate representation
-2. **Keep object files**: `--keep-intermediates` to inspect .o files
-3. **Check value types**: NaN-boxed values can be inspected by their bit patterns
-4. **Module init order**: Entry module calls `_perry_init_*` for each imported module
+- **No runtime type checking**: Types erased at compile time. `typeof` via NaN-boxing tags. `instanceof` via class ID chain.
+- **Single-threaded**: User code on one thread. Async I/O on tokio worker pool. Use `spawn_for_promise_deferred()` for safe cross-thread data transfer.
 
 ## Common Pitfalls & Patterns
 
-These are recurring issues encountered during development. Check these first when debugging.
-
 ### NaN-Boxing Mistakes
-- **Double NaN-boxing**: If value is already F64 (NaN-boxed), don't NaN-box again. Check `builder.func.dfg.value_type(val)` first.
-- **Wrong tag**: Strings use STRING_TAG, objects use POINTER_TAG, BigInt uses BIGINT_TAG.
-- **`as f64` vs `from_bits`**: Rust `u64 as f64` is numeric conversion (corrupts NaN-boxing). Use `f64::from_bits(u64_value)` to preserve bit patterns.
-- **Handle extraction**: Handle-based objects (Fastify, ioredis, UI widgets) are small integers NaN-boxed with POINTER_TAG. Use `js_nanbox_get_pointer` to extract, not bitcast.
+- **Double NaN-boxing**: If value is already F64, don't NaN-box again. Check `builder.func.dfg.value_type(val)`.
+- **Wrong tag**: Strings=STRING_TAG, objects=POINTER_TAG, BigInt=BIGINT_TAG.
+- **`as f64` vs `from_bits`**: `u64 as f64` is numeric conversion (WRONG). Use `f64::from_bits(u64)` to preserve bits.
+- **Handle extraction**: Handle-based objects are small integers NaN-boxed with POINTER_TAG. Use `js_nanbox_get_pointer`, not bitcast.
 
 ### Cranelift Type Mismatches
-- Loop counter optimization produces I32 values — always convert before passing to functions expecting F64/I64
-- Check `builder.func.dfg.value_type(val)` before conversion; handle all combinations: F64↔I64, I32→F64, I32→I64
-- Variables declared as F64 (due to `is_union` flag) must not receive I64 values — check `is_pointer && !is_union`
-- Constructor parameters are always F64 (NaN-boxed) at signature level, even for pointer types
+- Loop counter optimization produces I32 — always convert before passing to F64/I64 functions
+- Check `builder.func.dfg.value_type(val)` before conversion; handle F64↔I64, I32→F64, I32→I64
+- `is_pointer && !is_union` for variable type determination
+- Constructor parameters always F64 (NaN-boxed) at signature level
 
 ### Function Inlining (inline.rs)
-- `try_inline_call` returns full function body including `Stmt::Return` — in `Stmt::Expr` context, convert `Return(Some(e))` → `Expr(e)`
-- `substitute_locals` must handle ALL expression types (Object, JSON, Set/Map/Array methods, Await, etc.)
+- `try_inline_call` returns body with `Stmt::Return` — in `Stmt::Expr` context, convert `Return(Some(e))` → `Expr(e)`
+- `substitute_locals` must handle ALL expression types
 
 ### Async / Threading
-- Thread-local arenas: JSValues created on tokio worker threads are invalid on main thread
-- Use `spawn_for_promise_deferred()` — return raw Rust data from async block, convert to JSValue on main thread via converter that runs during `js_stdlib_process_pending()`
-- Async closures: `Expr::Closure` has `is_async` field; Promise pointer (I64) must be NaN-boxed with POINTER_TAG (not bitcast) before returning as F64
+- Thread-local arenas: JSValues from tokio workers invalid on main thread
+- Use `spawn_for_promise_deferred()` — return raw Rust data, convert to JSValue on main thread
+- Async closures: Promise pointer (I64) must be NaN-boxed with POINTER_TAG before returning as F64
 
 ### Cross-Module Issues
-- ExternFuncRef values are NaN-boxed — use `js_nanbox_get_pointer` to extract, not bitcast
+- ExternFuncRef values are NaN-boxed — use `js_nanbox_get_pointer` to extract
 - Module init order: topological sort by import dependencies
-- Functions with optional params: `imported_func_param_counts` propagation needed, including through re-exports
-- Wrapper functions: truncate `call_args` to match declared signature when caller provides excess args
+- Optional params need `imported_func_param_counts` propagation through re-exports
+- Wrapper functions: truncate `call_args` to match declared signature
 
 ### Closure Captures
-- `collect_local_refs_expr()` must explicitly handle all expression types — catch-all patterns silently skip variable references
-- Captured string/pointer values must be NaN-boxed before storing (`js_nanbox_string`/`js_nanbox_pointer`), not raw bitcast
-- Loop counter i32 values must be converted to f64 via `fcvt_from_sint` before capture storage
+- `collect_local_refs_expr()` must handle all expression types — catch-all silently skips refs
+- Captured string/pointer values must be NaN-boxed before storing, not raw bitcast
+- Loop counter i32 values: `fcvt_from_sint` to f64 before capture storage
 
 ### Loop Optimization
-- Generic accumulator optimization (Pattern 3: `x = x + f(i)`) creates 8 f64 accumulators — skip for string variables
-- While-loop unrolling disabled (bloated i-cache); CSE optimization (x*x caching) still active
-- Const propagation: `const` numeric literals emit `f64const` inline instead of variable loads
-- Array pointer caching: `cached_array_ptr` hoists `js_nanbox_get_pointer` out of for-loops
-- i32 index arithmetic: `try_compile_index_as_i32` keeps integer ops contained to array indexing only
-- LICM: `hoisted_element_loads` caches invariant `arr[outer_idx]` loads before inner loops
-- LICM: `hoisted_i32_products` caches invariant `a * b` i32 products before inner loops
-- LICM detection functions defined before `if can_unroll` so both paths can use them
+- Pattern 3 accumulator (8 f64 accumulators) — skip for string variables
+- LICM: `hoisted_element_loads` + `hoisted_i32_products` cache invariant loads before inner loops
+- `try_compile_index_as_i32` keeps i32 ops contained to array indexing only
 
 ### Handle-Based Dispatch
-- TWO dispatch systems: `HANDLE_METHOD_DISPATCH` (method calls) and `HANDLE_PROPERTY_DISPATCH` (property access)
-- Both must be registered for handles to work fully
-- Small pointer detection: value < 0x100000 indicates handle, not real pointer
+- TWO systems: `HANDLE_METHOD_DISPATCH` (methods) and `HANDLE_PROPERTY_DISPATCH` (properties)
+- Both must be registered. Small pointer detection: value < 0x100000 = handle.
 
-### UI Codegen (perry/ui)
-- NativeMethodCall has TWO arg-passing paths: has-object (appends to `call_args` starting with handle) and no-object (builds complete `call_args`)
-- For has-object methods like `State.set()`, add args in the has-object chain, NOT in the no-object section
-- Use `js_object_get_field_by_name_f64` (NOT `js_object_get_field_by_name`) for runtime field extraction
-- StringHeader format: `{ length: u32, capacity: u32 }` + data (not null-terminated) — use `str_from_header` helper
+### UI Codegen
+- NativeMethodCall has TWO arg paths: has-object and no-object — don't mix them up
+- `js_object_get_field_by_name_f64` (NOT `js_object_get_field_by_name`) for runtime field extraction
 
-### objc2 v0.6 API (perry-ui-macos)
-- `define_class!` (not `declare_class!`) with `#[unsafe(super(NSObject))]`
-- `Retained::cast_unchecked` (not `Retained::cast`)
-- `msg_send!` returns `Retained` directly (not `msg_send_id!`)
+### objc2 v0.6 API
+- `define_class!` with `#[unsafe(super(NSObject))]`, `msg_send!` returns `Retained` directly
 - All AppKit constructors require `MainThreadMarker`
-- `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
+- `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
 
 ### v0.2.147
-- **Mark-sweep garbage collection** for bounded memory in long-running programs
-  - New `crates/perry-runtime/src/gc.rs`: full GC infrastructure
-    - 8-byte `GcHeader` prepended to every heap allocation (obj_type, gc_flags, size)
-    - Conservative stack scanning: `setjmp` captures registers, walks stack with NaN-boxing tag validation
-    - Type-specific object tracing: arrays (elements), objects (fields + keys), closures (captures), promises (value/callbacks/chain), errors (message/name/stack)
-    - Iterative worklist-based marking (no recursion — safe for deep object graphs)
-    - Sweep: malloc objects freed via `dealloc`; arena objects added to free list for reuse
-  - Arena integration (`arena.rs`):
-    - `arena_alloc_gc(size, align, obj_type)`: allocates with GcHeader, checks free list first
-    - `arena_walk_objects(callback)`: linear block walking for zero-cost arena object discovery
-    - GC trigger check only on new block allocation (~every 8MB), not per-allocation
-  - All allocation sites instrumented:
-    - Arena: arrays (`js_array_alloc*`, `js_array_grow`), objects (`js_object_alloc*`) → `arena_alloc_gc`
-    - Malloc: strings (`js_string_from_bytes*`, `js_string_concat`, `js_string_append`) → `gc_malloc`/`gc_realloc`
-    - Malloc: closures (`js_closure_alloc`), promises (`js_promise_new`), bigints, errors → `gc_malloc`
-  - Root scanning: promise task queue, timer callbacks, exception state, module-level global variables
-  - Codegen: `gc()` callable from TypeScript, `js_gc_init()` in entry module, `js_gc_register_global_root()` for module globals
-  - HIR: `gc` added to `is_builtin_function()` for ExternFuncRef resolution
-  - `js_object_free()` and `js_promise_free()` made no-op (GC handles deallocation)
-  - **Performance**: Zero overhead for compute-heavy benchmarks (fibonacci, nested_loops); <5% for allocation-heavy code (8 extra bytes per alloc)
-  - **All 56 runtime tests pass**, all benchmarks run correctly
+- Mark-sweep garbage collection: gc.rs, arena_alloc_gc, conservative stack scan, root scanning, `gc()` built-in
+- `js_object_free()`/`js_promise_free()` now no-ops (GC handles deallocation)
 
-### v0.2.146
-- Fix i64 → f64 type mismatches when passing local object variables as arguments to NativeMethodCall
-  - Root cause: When a local object variable (stored as i64 pointer) is passed as an argument to a method call
-    like `wallet.connect(provider)`, the i64 was passed directly without NaN-boxing
-  - This was a 9th location missed in v0.2.145 - specifically the default argument handling in NativeMethodCall
-  - Fix: Modified the two default cases in NativeMethodCall argument handling to convert i64 values to f64
-  - Both `_ => arg_vals.clone()` cases now iterate over arguments and use `inline_nanbox_pointer` for i64 values
-  - Example: `ethers.Wallet.createRandom().connect(provider)` now properly NaN-boxes the `provider` argument
-- Fix fs module NativeMethodCall using wrong argument types (ensure_i64 instead of ensure_f64)
-  - Root cause: fs functions were changed to accept f64 (NaN-boxed strings) in v0.2.143, but the
-    NativeMethodCall argument handling still used `ensure_i64()` to extract i64 pointers
-  - Affected functions: `existsSync`, `readFileSync`, `writeFileSync`, `appendFileSync`, `mkdirSync`, `unlinkSync`
-  - Fix: Changed fs module argument handling to use `inline_nanbox_string()` for i64 values and `ensure_f64()` otherwise
-  - Also added `appendFileSync` to the explicit handling (was missing)
+### v0.2.143-v0.2.146
+- Fix fs.readFileSync SIGSEGV: accept NaN-boxed f64 instead of raw pointers
+- Fix i64→f64 type mismatches in NativeMethodCall args and cross-module calls (inline_nanbox_pointer)
+- Fix duplicate symbol linker errors with jsruntime stub generation
 
-### v0.2.145
-- Fix i64 → f64 type mismatches when passing object parameters to cross-module function calls
-  - Root cause: When a function has an object parameter (stored as i64 pointer), and passes it to another
-    function expecting f64 (NaN-boxed), the i64 was being bitcast to f64 instead of properly NaN-boxed
-  - Bitcast produces tiny denormalized floats (e.g., 4.94e-324 for pointer 1), not valid NaN-boxed values
-  - Example: `function foo(provider: Provider) { bar(provider); }` where bar expects NaN-boxed f64
-  - Fix: Use `inline_nanbox_pointer()` instead of `bitcast` for i64→f64 conversions in 8 locations:
-    - Wrapper function argument conversion (line 12342)
-    - FuncRef call argument conversion (line 21048)
-    - ExternFuncRef call argument conversion (lines 22941, 23069)
-    - Closure call argument conversion (line 23966)
-    - CallSpread argument conversion (line 24427)
-    - Other cross-module call patterns (lines 25439, 26420)
-  - `inline_nanbox_pointer` properly tags i64 pointers with POINTER_TAG (0x7FFD) for correct NaN-boxing
+### v0.2.140-v0.2.142
+- Shape-cached object allocation (5-6x faster object creation)
+- Inline NaN-box string ops (2x faster string concat vs Node)
+- i32 shadow variables for integer function parameters
 
-### v0.2.144
-- Fix duplicate symbol linker errors when using jsruntime
-  - Root cause: Stub generator was still adding `js_call_function`, `js_load_module`, `js_new_from_handle`
-    to undefined symbols even when jsruntime is enabled (where they're already defined)
-  - v0.2.141 added jsruntime to scan paths but the explicit symbol check was still adding them
-  - Fix: Only add these symbols to undefined list when `!use_jsruntime`
-  - Before: `_perry_stubs.o` contained stubs for these three functions, causing duplicate symbol errors
-  - After: These symbols are excluded from stub generation when jsruntime is linked
+### v0.2.135-v0.2.139
+- Module-scoped cross-module symbols for 183+ module projects
+- Stub generation for unresolved npm dependencies
+- iOS support: perry-ui-ios crate + `--target ios-simulator` CLI flag
+- Fix keyboard shortcuts before App(), arena crash on >8MB allocations
 
-### v0.2.143
-- Fix fs.readFileSync() SIGSEGV crash - NaN-boxed string pointers were dereferenced directly
-  - Root cause: `js_fs_read_file_sync` and other fs functions expected raw `*const StringHeader` pointers
-  - But codegen passes NaN-boxed f64 values (with STRING_TAG 0x7FFF in upper bits)
-  - Dereferencing 0x7fff000b0b4c5a70 (NaN-boxed) instead of 0x0000000b0b4c5a70 (raw) caused SIGSEGV
-  - Fix: Changed all fs functions to accept `f64` (NaN-boxed) and extract raw pointer via `& POINTER_MASK`
-  - Updated codegen function signatures from I64 to F64 for all fs functions
-  - Removed unnecessary bitcasts in codegen call sites - now pass f64 values directly
-  - Affected functions: `js_fs_read_file_sync`, `js_fs_write_file_sync`, `js_fs_append_file_sync`,
-    `js_fs_exists_sync`, `js_fs_mkdir_sync`, `js_fs_unlink_sync`
+### v0.2.126-v0.2.134
+- Perry UI Phase A: 24 FFI functions (styling, scrolling, clipboard, keyboard shortcuts, menus)
+- UI widgets: Spacer, Divider, TextField, Toggle, Slider
+- Reactive bindings: multi-state text, two-way binding, conditional rendering, ForEach
+- Inline truthiness checks (eliminate js_is_truthy FFI), LICM for nested loops
+- clearTimeout, fileURLToPath, cross-module enum exports, worker_threads module
 
-### v0.2.142
-- Shape-cached object literal allocation eliminates per-object key array construction
-  - New `js_object_alloc_with_shape(shape_id, field_count, packed_keys, len)` runtime function
-  - Thread-local `SHAPE_CACHE` maps FNV-1a hash of key names → cached keys array pointer
-  - First object with a given shape creates the keys array; all subsequent objects reuse it
-  - Codegen packs key names into null-separated data section, computes shape hash at compile time
-  - Replaced per-key `js_string_from_bytes` + `js_nanbox_string` + `js_array_push_f64` (17+ FFI calls per object) with single FFI call
-  - Also inlined string NaN-boxing for field values and pointer NaN-boxing for final result (new `inline_nanbox_pointer` helper)
-  - **object_create benchmark: 11-13ms → 2ms (5-6x faster, now 3x faster than Node's 5-7ms)**
-
-### v0.2.141
-- Fix stub generator including runtime functions that are already defined in libperry_jsruntime.a
-  - Root cause: When scanning for undefined symbols to generate stubs, jsruntime library wasn't being scanned
-  - `js_load_module`, `js_call_function`, `js_new_from_handle` were being added to stubs because they appeared
-    as undefined ("U") in object files, but weren't found in `defined_syms` since jsruntime wasn't scanned
-  - This caused duplicate symbol linker errors when linking with jsruntime
-  - Fix: Added jsruntime_lib to `all_scan_paths` when `ctx.needs_js_runtime || args.enable_js_runtime`
-  - Now these symbols are correctly found as defined in jsruntime and excluded from stub generation
-
-### v0.2.140
-- Inline NaN-box string operations to eliminate FFI overhead in string hot paths
-  - New `inline_nanbox_string(builder, ptr)`: 4-instruction Cranelift IR (band + bor + bitcast) replacing `js_nanbox_string` FFI
-  - New `inline_get_string_pointer(builder, val)`: 3-instruction Cranelift IR (bitcast + band) replacing `js_get_string_pointer_unified` FFI
-  - Replaced 9 FFI call sites in string concat/append codegen paths:
-    - String append hot path (`x = x + y`): 3 FFI calls eliminated (dest extraction, rhs extraction, result boxing)
-    - Binary Add string concat: 5 FFI calls eliminated (LHS/RHS extraction for nanboxed, string, might_be_string paths + result boxing)
-    - Union LocalSet string boxing: 1 FFI call eliminated
-  - **string_concat benchmark: 2ms (Perry) vs 4-5ms (Node) — 2x faster**
-- Add i32 shadow variables for integer function parameters
-  - Number params that aren't reassigned in function body get `i32_shadow` via `fcvt_to_sint` at function entry
-  - Avoids repeated `fcvt_to_sint` when params like `size` used in array index arithmetic (`i*size+k`)
-  - **array_read benchmark: 7ms → 3-5ms (40-60% faster, now 3x faster than Node's 12ms)**
-
-### v0.2.139
-- Fix keyboard shortcuts registered before App() (dead code after blocking event loop)
-  - `addKeyboardShortcut()` called before `App()` was silently failing because `mainMenu()` didn't exist yet
-  - Added `PENDING_SHORTCUTS` thread-local buffer in perry-ui-macos/src/app.rs
-  - `add_keyboard_shortcut()` now checks if mainMenu exists: if yes, installs immediately; if no, buffers
-  - `flush_pending_shortcuts()` called inside `app_run()` after `setup_menu_bar()` but before `app.run()`
-  - Shortcuts registered before `App()` are now properly installed when the menu bar is created
-
-### v0.2.138
-- **iOS support**: New `perry-ui-ios` crate + `--target ios-simulator`/`--target ios` CLI flag
-  - **perry-ui-ios**: Complete UIKit implementation of all 47 `perry_ui_*` FFI functions
-    - Widgets: UILabel (Text), UIButton, UIStackView (VStack/HStack), UISwitch (Toggle),
-      UISlider, UITextField, UIScrollView, Spacer (UIView), Divider (UIView)
-    - App lifecycle: UIApplicationMain with deferred UIWindow creation via PerryAppDelegate
-    - Reactive state: Verbatim copy of platform-agnostic state.rs (all 5 binding types)
-    - Clipboard: UIPasteboard read/write
-    - Stubbed: Keyboard shortcuts, context menus, file dialog, window sizing (no-op on iOS)
-  - **perry-runtime feature gates**: postgres, redis, sysinfo, hostname, dirs, whoami now optional
-    - `default = ["full"]` enables all; `--no-default-features` for iOS builds
-    - `#[cfg(feature = "full")]` guards on os.rs functions with safe fallbacks
-  - **Cross-compilation**: Cranelift uses `target_lexicon::Triple` for `aarch64-apple-ios(-sim)` ISA
-  - **iOS linker pipeline**: xcrun SDK discovery, proper `-target`/`-isysroot`, UIKit/Foundation/CoreGraphics frameworks
-  - **App bundle**: Generates `.app` directory with Info.plist for simulator deployment
-  - Target-aware library discovery: searches `target/{triple}/release/` for cross-compiled `.a` files
-
-### v0.2.137
-- Fix arena allocator crash on large allocations (>8MB)
-  - Arrays with 1M+ elements (prime_sieve, array_write, array_read benchmarks) caused "Fresh block should have space" panic
-  - Root cause: `alloc_block()` always allocated exactly 8MB blocks; allocations exceeding block size panicked
-  - Fix: `alloc_block(min_size)` now rounds up to next multiple of 8MB for oversized allocations
-  - Also added proper alignment support in `ArenaBlock::alloc()` (alignment was previously ignored)
-  - All 16 benchmarks now pass correctly — 3 previously crashed
-  - **Perry now wins 12/15 benchmarks vs Node.js**: array_read 4x, closure 6x, math_intensive 3x, object_create 3x
-
-### v0.2.136
-- Comprehensive perry/ui smoke test (`test-files/test_ui_comprehensive.ts`)
-  - Single file exercising all 9 widgets, 5 reactive binding types, and 24+ Phase A FFI functions
-  - Covers: styled text, counter, multi-state text, two-way slider binding, conditional rendering,
-    ForEach dynamic lists, TextField, dynamic mutation (textSetString, textSetColor, textSetFontWeight,
-    buttonSetTitle, buttonSetBordered), widget tree manipulation (widgetAddChild, widgetClearChildren,
-    widgetSetHidden), ScrollView with scrollviewSetChild/scrollviewSetOffset, clipboard read/write,
-    keyboard shortcuts (Cmd+N, Cmd+O), context menus, window size constraints (appSetMinSize/appSetMaxSize),
-    VStackWithInsets/HStackWithInsets, openFileDialog, textSetSelectable, textfieldFocus
-  - Compiles to 41MB arm64 native executable — serves as regression test for the full UI surface area
-
-### v0.2.135
-- Module-scoped cross-module symbols for large multi-module compilation
-  - **Duplicate symbol fix**: When multiple modules define functions with the same name (e.g., `formatTokenAmount`
-    in `lib/generic.ts` and `lib/risk-assessment.ts`), linker symbols like `__wrapper_formatTokenAmount` collided
-  - All cross-module symbols now prefixed with sanitized module path:
-    - `__wrapper_{module_prefix}__{func_name}` for wrapper functions
-    - `__export_{module_prefix}__{var_name}` for export data globals
-    - `__perry_init_{module_path}` uses full relative path (not just filename)
-  - Raw exported function linkage changed from `Linkage::Export` to `Linkage::Local` (only wrappers are exported)
-  - Thread-local `IMPORT_MODULE_PREFIXES` maps function names to source module prefixes for compile_expr
-  - `pre_declare_import_wrapper()` and `pre_declare_import_export()` pre-declare scoped symbols before compilation
-  - Common ancestor project root: computes shared path prefix across all discovered modules for consistent naming
-- Stub generation for unresolved external dependencies
-  - `generate_stub_object()` creates object files with stub functions that return TAG_UNDEFINED
-  - Allows compilation of projects with npm dependencies that aren't natively implemented
-  - Stub symbols logged at compile time for visibility
-- Successfully compiled 183-module arb worker application to 65MB native arm64 executable
-
-### v0.2.134
-- Perry UI Phase A: 24 new FFI functions for dynamic widget mutation, styling, scrolling, clipboard, keyboard shortcuts, context menus, and file dialogs
-  - **Phase A.0**: `widgetSetHidden(h, flag)`, `widgetClearChildren(h)` — now callable from TypeScript
-  - **Phase A.1 — Text mutation & layout control**:
-    - `textSetString(h, text)` — update Text widget content
-    - `VStackWithInsets(spacing, top, left, bottom, right)` / `HStackWithInsets(...)` — stacks with custom edge insets
-  - **Phase A.2 — ScrollView, Clipboard & Keyboard shortcuts**:
-    - `ScrollView()` — NSScrollView with vertical scroller
-    - `scrollviewSetChild(scroll, child)` — set document view
-    - `clipboardRead()` / `clipboardWrite(text)` — system clipboard access (NSPasteboard)
-    - `addKeyboardShortcut(key, modifiers, callback)` — add menu shortcuts (1=Cmd, 2=Shift, 4=Option, 8=Control)
-  - **Phase A.3 — Text & Button styling**:
-    - `textSetColor(h, r, g, b, a)` — RGBA text color via NSColor
-    - `textSetFontSize(h, size)` / `textSetFontWeight(h, size, weight)` — font control via NSFont
-    - `textSetSelectable(h, flag)` — make text selectable
-    - `buttonSetBordered(h, flag)` / `buttonSetTitle(h, title)` — button mutations
-  - **Phase A.4 — Focus & scroll-to**:
-    - `textfieldFocus(h)` — make text field first responder
-    - `textfieldSetString(h, text)` — set text field value
-    - `scrollviewScrollTo(scroll, child)` / `scrollviewGetOffset(h)` / `scrollviewSetOffset(h, y)` — scroll control
-  - **Phase A.5 — Context menus, file dialog & window sizing**:
-    - `menuCreate()` / `menuAddItem(menu, title, callback)` / `widgetSetContextMenu(widget, menu)` — right-click context menus
-    - `openFileDialog(callback)` — NSOpenPanel modal file picker
-    - `appSetMinSize(app, w, h)` / `appSetMaxSize(app, w, h)` — window size constraints
-  - **Bonus**: `widgetAddChild(parent, child)`, `widgetAddChildAt(parent, child, index)` — programmatic child management
-  - New Cargo.toml features: NSScrollView, NSClipView, NSPasteboard, NSColor, NSFont, NSSavePanel, NSOpenPanel
-  - All functions use module-level NativeMethodCall dispatch (no HIR changes needed)
-  - New files: `scrollview.rs`, `clipboard.rs`, `menu.rs`, `file_dialog.rs`
-
-### v0.2.133
-- Move array allocation from system malloc to arena bump allocator
-  - `js_array_alloc()` now uses `arena_alloc()` instead of `std::alloc::alloc()`
-  - `js_array_grow()` allocates new block from arena + `ptr::copy_nonoverlapping` (no `realloc`)
-  - Eliminates per-array malloc overhead — bump allocation is a single pointer increment
-  - **object_create benchmark: 13-14ms → 2-3ms (5x faster, now 2-3x faster than Node's 6-7ms)**
-- Fix `new Array(n)` pre-allocation — `arr[i] = val` now hits in-bounds fast path
-  - New `js_array_alloc_with_length(n)` sets both `length = n` and `capacity = n`
-  - Previous `js_array_alloc(n)` set `length = 0`, so `arr[i]` always took the slow extend path
-  - Codegen: `new Array(n)` emits `js_array_alloc_with_length` (single-arg), `new Array()` and `new Array(a,b,c)` still use `js_array_alloc`
-  - `arr.length` now correctly returns `n` after `new Array(n)`
-
-### v0.2.132
-- Advanced Reactive UI Phase 4: Multi-state text, two-way binding, conditional rendering, dynamic lists
-  - **Two-way binding** (4A): `Slider(0, 10, count.value, cb)` — slider position auto-updates when state changes
-    - `perry_ui_state_bind_slider(state, slider)` / `perry_ui_state_bind_toggle(state, toggle)` FFI
-    - `slider::set_value()` and `toggle::set_state()` runtime functions
-    - `TOGGLE_SWITCHES` side map stores NSSwitch reference for programmatic state setting
-    - Codegen detects `state.value` in Slider arg[2], emits bind call after widget creation
-  - **Multi-state text binding** (4B): `` Text(`${a.value} + ${b.value} = ...`) `` — updates when any referenced state changes
-    - `detect_text_parts()` walks Binary(Add) chains, collects `Literal` and `StateValue` parts
-    - Single-state optimization: 1 state ref uses existing prefix/suffix TextBinding (faster)
-    - Multi-state: 2+ state refs use `MultiTextBinding` with `TextPart::Literal`/`TextPart::StateRef` template
-    - `perry_ui_state_bind_text_template(text, num_parts, types_ptr, values_ptr)` FFI
-    - `MULTI_TEXT_BINDINGS` + `MULTI_TEXT_INDEX` for O(1) state→binding lookup
-    - `rebuild_multi_text()` reads current state values to format template on each update
-  - **Conditional rendering** (4C): `state.value ? Text("ON") : Text("OFF")` — toggles widget visibility
-    - `Expr::Conditional` detection in VStack/HStack children loop
-    - `Expr::Logical { And }` detection for `state.value && Widget` pattern
-    - Both branches compiled and added to container; `perry_ui_state_bind_visibility` sets initial + reactive hidden state
-    - `widgets::set_hidden()` wraps `setHidden:` on NSView
-    - `VisibilityBinding` struct with show_handle/hide_handle; `is_truthy_f64()` for JS truthiness
-  - **Dynamic lists** (4D): `ForEach(count, (i) => Text(\`Item ${i}\`))` — rebuilds children on state change
-    - `ForEach` imported from perry/ui, creates VStack(0) container at compile time
-    - `perry_ui_for_each_init(container, state, closure)` does initial render + registers binding
-    - `ForEachBinding` stores container handle + render closure (NaN-boxed)
-    - `state_set()` calls `clear_children()` then `render_for_each()` to rebuild
-    - `widgets::clear_children()` removes all `arrangedSubviews` from NSStackView
-    - Closure called with `js_closure_call1(closure, index)` for each 0..count
-  - All binding types dispatched from `state_set()`: text, multi-text, slider, toggle, visibility, forEach
-  - 8 new FFI exports in perry-ui-macos/lib.rs
-  - 8 new extern declarations in codegen.rs `declare_runtime_functions`
-  - New demo: `test-files/test_ui_phase4.ts`
-
-### v0.2.131
-- Eliminate js_is_truthy FFI calls from `if` statements, for-loop conditions, and while-loop conditions
-  - `Stmt::If` with Compare conditions compiled directly to `fcmp` (no FFI)
-  - `Stmt::If` with `&&` (Logical And) compiles each side via `compile_condition_inline`
-  - `Stmt::If` with other conditions uses inline bitwise truthiness check
-  - Inline truthiness: `(val - TAG_UNDEFINED) <=u 2` checks undefined/null/false, `(val << 1) == 0` checks ±0.0
-  - For-loop non-BCE condition fallback: Compare → fcmp, other → inline truthiness
-  - While-loop non-counter path: uses `compile_condition_inline` for And conditions, `inline_truthiness_check` for catch-all
-  - New helper functions: `compile_condition_inline()` (Compare→fcmp or inline truthiness), `inline_truthiness_check()` (pure Cranelift IR, no FFI)
-- Add i32 shadow variables for integer function parameters
-  - At function entry, Number params (not reassigned in body) get an i32 shadow via `fcvt_to_sint`
-  - `try_compile_index_as_i32` already checks `i32_shadow` — now it's populated for params
-  - Avoids repeated `fcvt_to_sint` when params like `size` are used in array index arithmetic
-  - Scans function body for assignments to skip reassigned params (shadow would be stale)
-  - Uses `next_temp_var_id()` for shadow variable IDs (no conflicts)
-
-### v0.2.130
-- Generalized reactive state text bindings for perry/ui
-  - Supports prefix+suffix patterns: `` Text(`Value: ${count.value} items`) ``
-  - Supports bare state: `` Text(`${count.value}`) ``
-  - Supports suffix-only: `` Text(`${count.value}!`) ``
-  - Previous prefix-only pattern continues to work: `` Text(`Count: ${count.value}`) ``
-  - `detect_state_in_text_arg()` recursively walks nested `Binary(Add)` chains from template literal desugaring
-  - Runtime `TextBinding` now has `suffix` field; `state_set()` formats `"{prefix}{value}{suffix}"`
-  - FFI `perry_ui_state_bind_text_numeric` updated to accept 4th `suffix_ptr: i64` param
-  - Text widget moved from generic dispatch to special handler for standalone binding detection
-  - New demo: `test-files/test_ui_state_binding.ts`
-
-### v0.2.129
-- Loop-Invariant Code Motion (LICM) for nested loops
-  - **Invariant array element hoisting**: `arr[i]` inside inner j-loop is loaded once before the loop, not every iteration
-    - Detects `IndexGet { LocalGet(arr), LocalGet(idx) }` where `idx` is not the loop counter and not assigned in the loop body
-    - Pre-computes the element load (arr_ptr + 8 + idx*8) and caches in a Cranelift variable
-    - `Expr::IndexGet` handler checks `hoisted_element_loads` map before computing inline access
-  - **Invariant i32 product hoisting**: `i * size` inside inner k-loop is computed once before the loop
-    - Detects `Binary { Mul, LocalGet(a), LocalGet(b) }` in array index expressions where both operands are loop-invariant
-    - Pre-computes `imul(a_i32, b_i32)` and caches in a Cranelift variable
-    - `try_compile_index_as_i32` checks `hoisted_i32_products` map before computing `imul`
-  - Both optimizations apply to unrolled and non-unrolled for-loop paths
-  - Two new fields on `LocalInfo`: `hoisted_element_loads` and `hoisted_i32_products`
-  - LICM helper functions shared between unrolled and non-unrolled paths: `collect_invariant_array_loads_stmts`, `collect_assigned_ids_stmts`, `collect_invariant_products_stmts`
-  - **nested_loops benchmark: ~26ms → ~21ms (19% faster, now matches Node.js ~20ms)**
-  - **matrix_multiply benchmark: ~46ms → ~41ms (11% faster)**
-
-### v0.2.128
-- Add `clearTimeout` support
-  - Timer callbacks now have unique IDs (via `NEXT_CALLBACK_TIMER_ID` thread-local counter)
-  - `js_set_timeout_callback` returns real timer IDs instead of 0
-  - `clearTimeout(timer_id)` marks timers as cleared and removes them
-  - `js_callback_timer_tick` skips cleared timers
-  - Added `clearTimeout` extern declaration in codegen (I64 → void)
-- Add `fileURLToPath` from `url` module
-  - New `FileURLToPath(Box<Expr>)` HIR expression variant
-  - `js_url_file_url_to_path` runtime function strips `file://` prefix and percent-decodes
-  - Added to all expression traversal functions (collect_local_refs, collect_assigned_locals, substitute_locals, collect_closures, is_string_expr)
-  - `import { fileURLToPath } from 'url'` now works correctly
-- Add cross-module enum exports
-  - Enum definitions propagated from exporting module to importing module via `exported_enums` HashMap
-  - Re-export propagation supports `export * from "./module"` chains
-  - Post-lowering HIR fixup pass (`fix_imported_enums`) replaces `PropertyGet { ExternFuncRef, property }` with `EnumMember` or inlined `Expr::String`
-  - `register_imported_enum` method on Compiler registers enum values for codegen lookup
-  - Numeric enums emit `f64const` inline; string enums inline as `Expr::String` for proper type detection
-  - Fixed pre-existing bug: string `EnumMember` values now NaN-boxed with STRING_TAG (was using raw bitcast)
-- Add `worker_threads` module (parentPort, workerData)
-  - `import { parentPort, workerData } from 'worker_threads'` now compiles and links
-  - `workerData`: Reads `PERRY_WORKER_DATA` env var, JSON-parses it → NaN-boxed value
-  - `parentPort.postMessage(data)`: JSON-stringify data, write to stdout
-  - `parentPort.on('message', callback)`: Register message callback, start background stdin reader thread
-  - `parentPort.on('close', callback)`: Register close callback for stdin EOF
-  - `js_worker_threads_process_pending()`: Processes queued stdin messages on main thread via `js_closure_call1`
-  - Integrated into `js_stdlib_process_pending()` event loop
-  - `js_worker_threads_has_pending()`: Check if stdin reader is active (for keep-alive)
-  - JSON functions accessed via `extern "C"` declarations (linked at link time from perry-stdlib)
-  - HIR: `parentPort` auto-registered as native instance (MessagePort class) at import time
-  - HIR: `workerData` resolves to `NativeMethodCall` getter (not `NativeModuleRef`)
-  - Codegen: 5 extern declarations, NativeMethodCall dispatch for all methods
-  - Communication protocol: One JSON message per line on stdin/stdout
-
-### v0.2.127
-- Add 5 new perry/ui widgets: Spacer, Divider, TextField, Toggle, Slider
-  - **Spacer**: Transparent NSView with low content-hugging priority — stretches to fill available space in stack views
-  - **Divider**: NSBox with separator type — horizontal line between sections
-  - **TextField**: Editable NSTextField with placeholder string and onChange callback
-    - Uses NSNotificationCenter to observe `NSControlTextDidChangeNotification`
-    - Callback receives NaN-boxed string (STRING_TAG) of current text content
-    - API: `TextField("placeholder", (text: string) => { ... })`
-  - **Toggle**: NSSwitch + NSTextField label in horizontal NSStackView, with onChange callback
-    - Callback receives TAG_TRUE/TAG_FALSE NaN-boxed boolean values
-    - API: `Toggle("label", (checked: boolean) => { ... })`
-  - **Slider**: Horizontal NSSlider with min/max/initial values and onChange callback
-    - Continuous mode — fires callback while dragging
-    - Callback receives plain f64 value (no NaN-boxing needed for numbers)
-    - API: `Slider(0, 100, 50, (value: number) => { ... })`
-  - All callback widgets follow the Button pattern: `define_class!` for target, thread-local HashMap for callbacks, `std::mem::forget(target)` to prevent deallocation
-  - Added `NSBox`, `NSSwitch`, `NSSlider` features to objc2-app-kit Cargo.toml
-  - Special codegen handlers for TextField, Toggle, Slider (string pointer extraction + closure handling)
-  - Spacer and Divider use generic dispatch (no args)
-  - New demo: `test-files/test_ui_controls.ts`
-
-### v0.2.126
-- Eliminate js_is_truthy FFI calls in while-loop conditions for Compare expressions
-  - While-loop conditions like `x*x + y*y <= 4.0 && iter < MAX_ITER` previously compiled Compare
-    expressions to f64 (via `select(fcmp, 1.0, 0.0)`), then called `js_is_truthy` FFI to convert
-    back to bool — a wasteful round-trip on every iteration (~50M iterations for mandelbrot)
-  - Now detects Compare expressions in while-loop conditions and compiles them directly as `fcmp`,
-    producing an I8 bool without any FFI call
-  - Optimized all while-loop condition paths: direct Compare, And(Compare, Compare), and the
-    non-optimized fallback path (no counter detected)
-  - **Mandelbrot benchmark: 48ms → 27ms (44% faster, now matches Node.js ~26ms)**
-- Extend constant folding to handle LocalGet with const_value
-  - `get_constant_value()` now checks `locals` for variables with `const_value` set
-  - Expressions like `WIDTH / 2.0` (where `const WIDTH = 800`) now fold to `f64const(400.0)`
-
-### v0.2.124-v0.2.125
-- Reactive text binding: `Text("prefix" + State.value)` auto-updates when State changes
-- Disable while-loop unrolling (i-cache pressure); keep CSE optimization
-- Const value propagation for numeric literals (`const_value: Option<f64>` in `LocalInfo`)
-
-### v0.2.122-v0.2.123
-- Fix Cmd+Q and button callbacks in perry/ui (extract raw closure pointer via `js_nanbox_get_pointer`)
-- Fix VStack/HStack children not rendering (use `js_nanbox_get_pointer` for child handle extraction)
-
-## Changelog Summary (v0.2.37-v0.2.121)
-
-### Performance Optimizations (v0.2.115-v0.2.121)
-- **Integer function specialization** (v0.2.115): Detect integer-only functions, generate i64 variants. Fibonacci 2x faster than Node.js.
-- **Array pointer caching** (v0.2.115): Hoist `js_nanbox_get_pointer` out of for-loops. Matrix multiply ~91ms → ~71ms.
-- **i32 index arithmetic** (v0.2.117-v0.2.120): Contained i32 ops for array indexing only (`try_compile_index_as_i32`). Matrix multiply → ~41ms (Node ~39ms).
-- **JSON.stringify optimization** (v0.2.99): Shared buffer, type hints, inline object field writes.
-- **Self-recursive call fast path** (v0.2.99): Skip conversion passes when argument types match.
-
-### Native UI (v0.2.116-v0.2.121)
-- v0.2.116: Initial perry/ui module — Text, Button, VStack/HStack, State, App
-- v0.2.119: Fix SIGILL crash, module init variable ID conflicts
-- v0.2.121: Fix StringHeader format mismatch, Auto Layout constraints
-
-### Fastify Framework (v0.2.79-v0.2.114)
-- v0.2.79: Fastify-compatible HTTP runtime (routing, hooks, plugins)
-- v0.2.80: Codegen integration (30+ extern functions, NativeMethodCall mappings)
-- v0.2.82: Method-specific return type handling (route methods return bool, not handle)
-- v0.2.102-v0.2.103: Handle-based method/property dispatch for cross-module calls
-- v0.2.114: Fix `as f64` vs `from_bits` NaN-boxing corruption in request properties
-
-### Async Closures & Promises (v0.2.39-v0.2.106)
-- v0.2.39: Promise callbacks rewritten to use ClosurePtr
-- v0.2.55: Promise.all()
-- v0.2.58: `spawn_for_promise_deferred()` for thread-safe async operations
-- v0.2.105-v0.2.106: `is_async` field on `Expr::Closure`, async closure Promise NaN-boxing
-
-### Cross-Module System (v0.2.57-v0.2.110)
-- v0.2.57: Cross-module array exports with NaN-boxing
-- v0.2.78: `imported_func_param_counts` for optional parameter propagation
-- v0.2.81: Re-export propagation for chained `export * from` patterns
-- v0.2.102: Topological sorting for module init order
-- v0.2.110: Fix module-level variable LocalId collisions with function parameters
-
-### Cranelift Type System Fixes (v0.2.83-v0.2.96)
-- Systematic I32 conversion fixes across 6+ codegen locations (v0.2.90, v0.2.96)
-- `is_pointer && !is_union` checks for variable type determination (v0.2.83)
-- Try/catch block variable type restoration after longjmp (v0.2.91)
-- Constructor parameters always F64 at signature level (v0.2.112)
-
-### Native Module Ecosystem (v0.2.41-v0.2.98)
-- mysql2: pool, connections, prepared statements, timeouts (v0.2.41-v0.2.74)
-- ioredis: synchronous constructor, handle-based dispatch (v0.2.54-v0.2.68)
-- WebSocketServer from `ws` module (v0.2.98)
-- AsyncLocalStorage from `async_hooks` (v0.2.97)
-- ethers.js: BigInt, Keccak-256, EIP-55 addresses (v0.2.64-v0.2.75)
-- Closure calls extended to 8 args (v0.2.88)
-
-### Foundation (v0.2.37-v0.2.51)
-- NaN-box string literals with STRING_TAG, undefined as TAG_UNDEFINED (v0.2.37)
-- Boolean TAG_TRUE/TAG_FALSE representation (v0.2.51)
-- BigInt with BIGINT_TAG, arithmetic, comparisons (v0.2.50)
-- Inline array literal method calls (v0.2.104)
-- Function inlining fixes: substitute_locals coverage, return-in-Expr-context (v0.2.94-v0.2.108)
-
-**Milestone: v0.2.49** — Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+### Older (v0.2.37-v0.2.125)
+See CHANGELOG.md for detailed history. Key milestones:
+- v0.2.116: Native UI module (perry/ui)
+- v0.2.115: Integer function specialization (fibonacci 2x faster than Node)
+- v0.2.102: Topological module init ordering
+- v0.2.79: Fastify-compatible HTTP runtime
+- v0.2.49: First production worker (MySQL, LLM APIs, scoring)
+- v0.2.37: NaN-boxing foundation
