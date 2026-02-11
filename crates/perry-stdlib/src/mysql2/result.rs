@@ -174,7 +174,9 @@ fn raw_value_to_jsvalue(value: &RawValue) -> JSValue {
     match value {
         RawValue::Null => JSValue::null(),
         RawValue::Bool(b) => JSValue::bool(*b),
-        RawValue::Int32(i) => JSValue::int32(*i),
+        // WORKAROUND for Bug #46: Use JSValue::number instead of JSValue::int32
+        // to avoid INT32_TAG NaN-boxing issues with arithmetic and comparisons
+        RawValue::Int32(i) => JSValue::number(*i as f64),
         RawValue::Int64(i) => JSValue::number(*i as f64),
         RawValue::Float64(f) => JSValue::number(*f),
         RawValue::String(s) => {

@@ -1079,7 +1079,6 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
 pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
     let bits = value.to_bits();
     let tag = bits >> 48;
-    eprintln!("[js_await_any_promise] bits=0x{:016X} tag=0x{:04X}", bits, tag);
 
     if tag == 0x7FFB {
         // JS_HANDLE_TAG — delegate to js_await_js_promise (runs V8 event loop).
