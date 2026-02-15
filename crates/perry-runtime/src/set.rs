@@ -71,24 +71,41 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     true
 }
 
+/// Extract a string pointer from a value that might be NaN-boxed with various tags.
+fn extract_string_ptr_from_value(bits: u64) -> *const StringHeader {
+    let upper = bits >> 48;
+    match upper {
+        0x7FFF => (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader, // STRING_TAG
+        0x7FFD => (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader, // POINTER_TAG
+        0x0000 => {
+            let lower = bits & 0x0000_FFFF_FFFF_FFFF;
+            if lower > 0x10000 { lower as *const StringHeader } else { std::ptr::null() }
+        }
+        _ => std::ptr::null(),
+    }
+}
+
+fn is_string_like(bits: u64) -> bool {
+    !extract_string_ptr_from_value(bits).is_null()
+}
+
 /// Check if two JSValues are equal (for set element comparison)
+/// Handles STRING_TAG (0x7FFF), POINTER_TAG (0x7FFD), raw pointers, and cross-tag combinations.
 fn jsvalue_eq(a: f64, b: f64) -> bool {
     let a_bits = a.to_bits();
     let b_bits = b.to_bits();
 
-    // Fast path: identical bit patterns
     if a_bits == b_bits {
         return true;
     }
 
-    // Both look like raw pointers - they might be strings with same content
-    if looks_like_pointer(a) && looks_like_pointer(b) {
-        let ptr_a = as_raw_pointer(a) as *const StringHeader;
-        let ptr_b = as_raw_pointer(b) as *const StringHeader;
-        unsafe { strings_equal(ptr_a, ptr_b) }
-    } else {
-        false
+    if is_string_like(a_bits) && is_string_like(b_bits) {
+        let ptr_a = extract_string_ptr_from_value(a_bits);
+        let ptr_b = extract_string_ptr_from_value(b_bits);
+        return unsafe { strings_equal(ptr_a, ptr_b) };
     }
+
+    false
 }
 
 /// Find the index of a value in the set, or -1 if not found
@@ -225,5 +242,26 @@ pub extern "C" fn js_set_delete(set: *mut SetHeader, value: f64) -> i32 {
 pub extern "C" fn js_set_clear(set: *mut SetHeader) {
     unsafe {
         (*set).size = 0;
+    }
+}
+
+/// Convert a Set to an Array (for Array.from(set))
+/// Returns a new array containing all elements of the set
+#[no_mangle]
+pub extern "C" fn js_set_to_array(set: *const SetHeader) -> *mut crate::array::ArrayHeader {
+    if set.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let size = (*set).size as usize;
+        let result = crate::array::js_array_alloc(size as u32);
+        if size > 0 {
+            let elements = (*set).elements as *const f64;
+            for i in 0..size {
+                let element = ptr::read(elements.add(i));
+                crate::array::js_array_push_f64(result, element);
+            }
+        }
+        result
     }
 }

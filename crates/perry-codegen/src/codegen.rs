@@ -429,6 +429,8 @@ struct ClassMeta {
     static_field_ids: HashMap<String, cranelift_module::DataId>,
     /// Method return types: method name -> return type (for determining if method returns string)
     method_return_types: HashMap<String, perry_types::Type>,
+    /// Static method return types: method name -> return type (for singleton pattern getInstance() etc.)
+    static_method_return_types: HashMap<String, perry_types::Type>,
     /// Type parameters of the class (e.g., ["T"] for class Box<T>)
     type_params: Vec<String>,
 }
@@ -766,6 +768,12 @@ impl Compiler {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
+        // Collect static method return types
+        let mut static_method_return_types = HashMap::new();
+        for method in &class.static_methods {
+            static_method_return_types.insert(method.name.clone(), method.return_type.clone());
+        }
+
         // Extract type parameter names
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
@@ -786,6 +794,7 @@ impl Compiler {
             static_method_ids: HashMap::new(),
             static_field_ids: HashMap::new(),
             method_return_types,
+            static_method_return_types,
             type_params,
         });
 
@@ -1557,6 +1566,12 @@ impl Compiler {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
+        // Collect static method return types for singleton pattern (getInstance() etc.)
+        let mut static_method_return_types = HashMap::new();
+        for method in &class.static_methods {
+            static_method_return_types.insert(method.name.clone(), method.return_type.clone());
+        }
+
         // Extract type parameter names
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
@@ -1575,6 +1590,7 @@ impl Compiler {
             static_method_ids: HashMap::new(),
             static_field_ids: HashMap::new(),
             method_return_types,
+            static_method_return_types,
             type_params,
         });
 
@@ -3439,6 +3455,20 @@ impl Compiler {
             self.extern_funcs.insert("js_array_unshift_f64".to_string(), func_id);
         }
 
+        // js_array_unshift_jsvalue(arr: *mut ArrayHeader, value: u64) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // value (NaN-boxed as u64)
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_unshift_jsvalue",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_unshift_jsvalue".to_string(), func_id);
+        }
+
         // js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i32
         {
             let mut sig = self.module.make_signature();
@@ -3527,6 +3557,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_array_concat".to_string(), func_id);
+        }
+
+        // js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // source array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new cloned array pointer
+            let func_id = self.module.declare_function(
+                "js_array_clone",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_clone".to_string(), func_id);
         }
 
         // === JSValue-based array functions for mixed-type arrays ===
@@ -3994,6 +4037,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_set_clear".to_string(), func_id);
+        }
+
+        // js_set_to_array(set: *const SetHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // set pointer
+            sig.returns.push(AbiParam::new(types::I64)); // array pointer
+            let func_id = self.module.declare_function(
+                "js_set_to_array",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_set_to_array".to_string(), func_id);
         }
 
         // String runtime functions
@@ -11849,7 +11905,7 @@ impl Compiler {
                 self.collect_closures_from_expr(obj, closures, enclosing_class);
             }
             // Array static methods
-            Expr::ArrayIsArray(value) => {
+            Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
             }
             // Global functions
@@ -13833,6 +13889,28 @@ fn compile_stmt(
                         let is_event_emitter = class_name == "EventEmitter";
                         (Some(class_name.clone()), !is_native_handle_class, false, false, false, false, false, false, false, is_event_emitter)
                     }
+                    Some(Expr::StaticMethodCall { class_name: static_class, method_name, .. }) => {
+                        // For singleton pattern (getInstance() etc.), check if the static method returns a class instance
+                        let class_name_from_return = classes.get(static_class)
+                            .and_then(|meta| meta.static_method_return_types.get(method_name))
+                            .and_then(|ret_type| {
+                                if let perry_types::Type::Named(name) = ret_type {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some(name) = class_name_from_return {
+                            // Check if it's a native handle-based class
+                            let is_native_handle_class = matches!(name.as_str(),
+                                "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command" | "EventEmitter" | "Redis");
+                            let is_event_emitter = name == "EventEmitter";
+                            (Some(name), !is_native_handle_class, false, false, false, false, false, false, false, is_event_emitter)
+                        } else {
+                            // Static method doesn't return a class instance, or class/method not found
+                            (None, false, false, false, false, false, false, false, false, false)
+                        }
+                    }
                     Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false, false),
                     // Object literals return object pointers
                     Some(Expr::Object(_)) => (None, true, false, false, false, false, false, false, false, false),
@@ -14322,8 +14400,9 @@ fn compile_stmt(
                         // Expression returned f64, need i64 - bitcast
                         builder.ins().bitcast(types::I64, MemFlags::new(), val)
                     } else if ret_type == types::F64 && val_type == types::I64 {
-                        // Expression returned i64 (pointer), convert to f64 for function returning f64
-                        builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                        // Expression returned i64 (pointer), NaN-box it for function returning f64
+                        // This happens when closures return pointers (e.g., new Object())
+                        inline_nanbox_pointer(builder, val)
                     } else if ret_type == types::I32 && val_type == types::F64 {
                         // Expression returned f64, need i32 - truncate
                         builder.ins().fcvt_to_sint(types::I32, val)
@@ -16505,7 +16584,113 @@ fn compile_stmt(
             }
         }
         Stmt::Expr(expr) => {
-            compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            // Check if this is an array mutation method call that returns a new pointer
+            // e.g., this.paths.push(x) or arr.push(x) - these need to update the property/variable
+            let needs_update = matches!(expr, Expr::Call { callee, .. } if {
+                if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                    let is_mutation = matches!(property.as_str(), "push" | "unshift" | "splice" | "concat");
+                    if is_mutation {
+                        eprintln!("[ARRAY-MUTATION-DEBUG] Detected array mutation method: {}", property);
+                    }
+                    is_mutation
+                } else {
+                    false
+                }
+            });
+
+            let result = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+
+            // If this is an array mutation method, update the property/variable with the returned pointer
+            // EXCEPTION: push/unshift are handled by specialized code that stores the new array pointer
+            // and returns the length, so we must NOT store the return value back to the property
+            if needs_update {
+                eprintln!("[ARRAY-MUTATION-DEBUG] needs_update = true, attempting to update property/variable");
+                if let Expr::Call { callee, .. } = expr {
+                    if let Expr::PropertyGet { object, property: method_name } = callee.as_ref() {
+                        eprintln!("[ARRAY-MUTATION-DEBUG] Method call on: {:?}", object);
+
+                        // Skip update for push/unshift - they're handled by specialized code
+                        if matches!(method_name.as_str(), "push" | "unshift") {
+                            eprintln!("[ARRAY-MUTATION-DEBUG] Skipping update for {} (specialized code already stored array)", method_name);
+                        } else {
+                        // Check if the object is a PropertyGet (this.paths) or LocalGet (arr)
+                        match object.as_ref() {
+                            Expr::PropertyGet { object: nested_obj, property: nested_prop } => {
+                                eprintln!("[ARRAY-MUTATION-DEBUG] Nested PropertyGet: obj.{}.push() where obj = {:?}", nested_prop, nested_obj);
+
+                                // Handle two cases:
+                                // 1. this.property.push() - use inline field storage if we have this_ctx
+                                // 2. localVar.property.push() - compile the object access and use generic property set
+
+                                match nested_obj.as_ref() {
+                                    Expr::This => {
+                                        // this.property.push() - use inline field storage
+                                        eprintln!("[ARRAY-MUTATION-DEBUG] Updating this.{}", nested_prop);
+                                        if let Some(this) = this_ctx {
+                                            if let Some(&field_idx) = this.class_meta.field_indices.get(nested_prop) {
+                                                let this_ptr = builder.use_var(this.this_var);
+                                                let result_f64 = ensure_f64(builder, result);
+                                                let field_offset = 24 + (field_idx as i32) * 8;
+                                                builder.ins().store(MemFlags::new(), result_f64, this_ptr, field_offset);
+                                                eprintln!("[ARRAY-MUTATION-DEBUG] Updated this.{} via inline store", nested_prop);
+                                            }
+                                        }
+                                    }
+                                    Expr::LocalGet(local_id) => {
+                                        // localVar.property.push() - get the object and update its property
+                                        eprintln!("[ARRAY-MUTATION-DEBUG] Updating LocalGet({}).{}", local_id, nested_prop);
+                                        if let Some(info) = locals.get(local_id) {
+                                            let obj_val = builder.use_var(info.var);
+                                            eprintln!("[ARRAY-MUTATION-DEBUG]   obj_val = {:?}", obj_val);
+                                            let obj_ptr = ensure_i64(builder, obj_val);
+                                            eprintln!("[ARRAY-MUTATION-DEBUG]   obj_ptr (i64) = {:?}", obj_ptr);
+                                            let result_f64 = ensure_f64(builder, result);
+                                            eprintln!("[ARRAY-MUTATION-DEBUG]   result_f64 = {:?}", result_f64);
+
+                                            // Check if we can use inline field access
+                                            if let Some(ref class_name) = info.class_name {
+                                                eprintln!("[ARRAY-MUTATION-DEBUG]   class_name = {}", class_name);
+                                                if let Some(class_meta) = classes.get(class_name) {
+                                                    eprintln!("[ARRAY-MUTATION-DEBUG]   Found class metadata");
+                                                    if let Some(&field_idx) = class_meta.field_indices.get(nested_prop) {
+                                                        let field_offset = 24 + (field_idx as i32) * 8;
+                                                        eprintln!("[ARRAY-MUTATION-DEBUG]   field_idx = {}, field_offset = {}", field_idx, field_offset);
+                                                        builder.ins().store(MemFlags::new(), result_f64, obj_ptr, field_offset);
+                                                        eprintln!("[ARRAY-MUTATION-DEBUG] ✅ Stored result to LocalGet({}).{} at offset {}", local_id, nested_prop, field_offset);
+                                                    } else {
+                                                        eprintln!("[ARRAY-MUTATION-DEBUG] ❌ Field '{}' not found in class metadata", nested_prop);
+                                                    }
+                                                } else {
+                                                    eprintln!("[ARRAY-MUTATION-DEBUG] ❌ Class '{}' not found in classes map", class_name);
+                                                }
+                                            } else {
+                                                eprintln!("[ARRAY-MUTATION-DEBUG] ❌ No class_name for LocalGet({})", local_id);
+                                            }
+                                        } else {
+                                            eprintln!("[ARRAY-MUTATION-DEBUG] ❌ LocalGet({}) not found in locals", local_id);
+                                        }
+                                    }
+                                    _ => {
+                                        eprintln!("[ARRAY-MUTATION-DEBUG] Unsupported object type for property update");
+                                    }
+                                }
+                            }
+                            Expr::LocalGet(id) => {
+                                eprintln!("[ARRAY-MUTATION-DEBUG] LocalGet: id = {}", id);
+                                // e.g., arr.push() - need to do arr = result
+                                // Update the local variable
+                                let var = Variable::from_u32(*id);
+                                builder.def_var(var, result);
+                                eprintln!("[ARRAY-MUTATION-DEBUG] Updated local variable {}", id);
+                            }
+                            _ => {
+                                eprintln!("[ARRAY-MUTATION-DEBUG] Object is neither PropertyGet nor LocalGet");
+                            }
+                        }
+                        }  // end of else block (skip update for push/unshift)
+                    }
+                }
+            }
         }
         Stmt::Break => {
             if let Some(ctx) = loop_ctx {
@@ -19282,10 +19467,26 @@ fn compile_expr(
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
             // Determine if value is a pointer type (object, array, string, etc.)
-            // In that case we need to use js_array_push_jsvalue (i64) instead of js_array_push_f64
+            // In that case we need to NaN-box it and use js_array_push_f64 so elements are properly tagged
             let val_type = builder.func.dfg.value_type(val);
-            let (func_name, push_val) = if val_type == types::I64 {
-                // Value is a pointer (i64) - use js_array_push_jsvalue
+
+            // Check if the value is a string (needs STRING_TAG 0x7FFF)
+            let is_string_val = match value.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                Expr::String(_) => true,
+                _ => false,
+            };
+
+            let (func_name, push_val) = if val_type == types::I64 && is_string_val {
+                // String value - NaN-box with STRING_TAG so it's recognized as a string when retrieved
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[val]);
+                let tagged_val = builder.inst_results(nanbox_call)[0];
+                ("js_array_push_f64", tagged_val)
+            } else if val_type == types::I64 {
+                // Non-string pointer (object, array, etc.) - use jsvalue push (preserves raw bits)
                 ("js_array_push_jsvalue", val)
             } else {
                 // Check if the value expression produces a pointer type (Object, New, etc.)
@@ -19554,7 +19755,7 @@ fn compile_expr(
             let result_ptr = builder.inst_results(call)[0];
 
             // Convert i64 pointer back to NaN-boxed pointer
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            Ok(inline_nanbox_pointer(builder, result_ptr))
         }
         Expr::ArraySplice { array_id, start, delete_count, items } => {
             // Get the array from local
@@ -19678,8 +19879,8 @@ fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64), bitcast to f64 for consistency
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Result is an array pointer (i64), must NaN-box it so consumers can detect it as a pointer
+            Ok(inline_nanbox_pointer(builder, result))
         }
         Expr::ArrayFilter { array, callback } => {
             // Compile array and callback
@@ -19703,8 +19904,8 @@ fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64), bitcast to f64 for consistency
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Result is an array pointer (i64), must NaN-box it so consumers can detect it as a pointer
+            Ok(inline_nanbox_pointer(builder, result))
         }
         Expr::ArrayFind { array, callback } => {
             // Compile array and callback
@@ -19858,9 +20059,29 @@ fn compile_expr(
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
-            // js_map_set expects f64 for key and value, bitcast if needed
-            let key_f64 = ensure_f64(builder, key_val);
-            let value_f64 = ensure_f64(builder, value_val);
+            // js_map_set expects f64 for key and value
+            // For I64 keys: always use js_nanbox_string (STRING_TAG 0x7FFF) since Map keys are
+            // almost always strings. This ensures keys are properly recognized as strings when
+            // retrieved later via map.keys()/entries() and used in template interpolation.
+            let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[key_val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                ensure_f64(builder, key_val)
+            };
+
+            let value_f64 = if builder.func.dfg.value_type(value_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[value_val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                ensure_f64(builder, value_val)
+            };
 
             let set_func = extern_funcs.get("js_map_set")
                 .ok_or_else(|| anyhow!("js_map_set not declared"))?;
@@ -19890,7 +20111,15 @@ fn compile_expr(
                 builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
-            let key_f64 = ensure_f64(builder, key_val);
+            let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[key_val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                ensure_f64(builder, key_val)
+            };
 
             let get_func = extern_funcs.get("js_map_get")
                 .ok_or_else(|| anyhow!("js_map_get not declared"))?;
@@ -19918,7 +20147,15 @@ fn compile_expr(
                 builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
-            let key_f64 = ensure_f64(builder, key_val);
+            let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[key_val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                ensure_f64(builder, key_val)
+            };
 
             let has_func = extern_funcs.get("js_map_has")
                 .ok_or_else(|| anyhow!("js_map_has not declared"))?;
@@ -19947,7 +20184,15 @@ fn compile_expr(
                 builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
-            let key_f64 = ensure_f64(builder, key_val);
+            let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[key_val]);
+                builder.inst_results(nanbox_call)[0]
+            } else {
+                ensure_f64(builder, key_val)
+            };
 
             let delete_func = extern_funcs.get("js_map_delete")
                 .ok_or_else(|| anyhow!("js_map_delete not declared"))?;
@@ -20746,7 +20991,8 @@ fn compile_expr(
                             Expr::LocalGet(id) => {
                                 // If the variable is stored as f64 but not marked as union or integer,
                                 // it might be a string pointer bitcast to f64
-                                locals.get(id).map(|i| !i.is_union && !i.is_pointer && !i.is_integer && !i.is_array && !i.is_bigint).unwrap_or(false)
+                                // IMPORTANT: Must also check is_string to avoid treating booleans as string pointers
+                                locals.get(id).map(|i| i.is_string && !i.is_union && !i.is_pointer && !i.is_integer && !i.is_array && !i.is_bigint).unwrap_or(false)
                             }
                             _ => false,
                         };
@@ -20803,7 +21049,8 @@ fn compile_expr(
                             Expr::LocalGet(id) => {
                                 // If the variable is stored as f64 but not marked as union or integer,
                                 // it might be a string pointer bitcast to f64
-                                locals.get(id).map(|i| !i.is_union && !i.is_pointer && !i.is_integer && !i.is_array && !i.is_bigint).unwrap_or(false)
+                                // IMPORTANT: Must also check is_string to avoid treating booleans as string pointers
+                                locals.get(id).map(|i| i.is_string && !i.is_union && !i.is_pointer && !i.is_integer && !i.is_array && !i.is_bigint).unwrap_or(false)
                             }
                             _ => false,
                         };
@@ -21823,6 +22070,105 @@ fn compile_expr(
                     }
                 }
                 Expr::PropertyGet { object, property } => {
+                    // Handle array mutation methods on property access (e.g., this.items.push(value))
+                    // These methods return the new array pointer and need to update the property
+                    if matches!(property.as_str(), "push" | "unshift") {
+                        if let Expr::PropertyGet { object: nested_obj, property: array_prop } = object.as_ref() {
+                            eprintln!("[CODEGEN] Compiling property-based {}: obj.{}.{}()", property, array_prop, property);
+
+                            // Check if this is accessing a local variable's property (e.g., obj.items or this.items)
+                            // In methods, 'this' is loaded into a local variable
+                            if let Expr::LocalGet(local_id) = nested_obj.as_ref() {
+                                if let Some(info) = locals.get(local_id) {
+                                    if let Some(ref class_name) = info.class_name {
+                                        if let Some(class_meta) = classes.get(class_name) {
+                                            if let Some(&field_idx) = class_meta.field_indices.get(array_prop) {
+                                                eprintln!("[CODEGEN] Using inline field access for class property");
+
+                                                // Get object pointer
+                                                let obj_val = builder.use_var(info.var);
+                                                let obj_ptr = ensure_i64(builder, obj_val);
+
+                                                // Load array from field (inline access)
+                                                let field_offset = 24 + (field_idx as i32) * 8;
+                                                let arr_val_f64 = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+
+                                                // Extract array pointer from NaN-boxed value
+                                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                                let ptr_call = builder.ins().call(get_ptr_ref, &[arr_val_f64]);
+                                                let arr_ptr = builder.inst_results(ptr_call)[0];
+
+                                                // Compile the value argument
+                                                if args.len() >= 1 {
+                                                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+
+                                                    // Determine if value is a pointer type (object, array, string, etc.)
+                                                    // In that case we need to use js_array_push_jsvalue (i64) instead of js_array_push_f64
+                                                    let val_type = builder.func.dfg.value_type(val);
+                                                    let base_func = match property.as_str() {
+                                                        "push" => "push",
+                                                        "unshift" => "unshift",
+                                                        _ => unreachable!(),
+                                                    };
+
+                                                    let (push_func_name, push_val) = if val_type == types::I64 {
+                                                        // Value is a pointer (i64) - use jsvalue version
+                                                        (format!("js_array_{}_jsvalue", base_func), val)
+                                                    } else {
+                                                        // Check if the value expression produces a pointer type (Object, New, etc.)
+                                                        // NOTE: LocalGet is NOT included because it could be a number or a NaN-boxed pointer
+                                                        // The f64 representation preserves NaN-boxing, so js_array_push_f64 handles both cases
+                                                        let is_pointer_expr = matches!(&args[0],
+                                                            Expr::Object(_) | Expr::Array(_) | Expr::ArraySpread(_) |
+                                                            Expr::New { .. } | Expr::MapNew | Expr::SetNew |
+                                                            Expr::JsonParse(_) | Expr::Closure { .. });
+                                                        if is_pointer_expr {
+                                                            // It's a pointer stored as f64 - bitcast to i64 and use jsvalue push
+                                                            let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                                                            (format!("js_array_{}_jsvalue", base_func), val_i64)
+                                                        } else {
+                                                            // Regular f64 value
+                                                            (format!("js_array_{}_f64", base_func), ensure_f64(builder, val))
+                                                        }
+                                                    };
+
+                                                    let push_func = extern_funcs.get(&push_func_name)
+                                                        .ok_or_else(|| anyhow!("{} not declared", push_func_name))?;
+                                                    let push_ref = module.declare_func_in_func(*push_func, builder.func);
+                                                    let push_call = builder.ins().call(push_ref, &[arr_ptr, push_val]);
+                                                    let new_arr_ptr = builder.inst_results(push_call)[0];
+
+                                                    // NaN-box the new array pointer
+                                                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                                    let nanbox_call = builder.ins().call(nanbox_ref, &[new_arr_ptr]);
+                                                    let new_arr_val = builder.inst_results(nanbox_call)[0];
+
+                                                    // Store the new array back to the field (inline store)
+                                                    builder.ins().store(MemFlags::new(), new_arr_val, obj_ptr, field_offset);
+
+                                                    // Return the new length (standard JavaScript push behavior)
+                                                    let len_func = extern_funcs.get("js_array_length")
+                                                        .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                                                    let len_ref = module.declare_func_in_func(*len_func, builder.func);
+                                                    let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
+                                                    let len_i32 = builder.inst_results(len_call)[0];
+                                                    let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
+
+                                                    eprintln!("[CODEGEN] Successfully compiled property-based {}", property);
+                                                    return Ok(len_f64);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Handle process.argv.includes() specially
                     if matches!(object.as_ref(), Expr::ProcessArgv) && property == "includes" && args.len() >= 1 {
                         // Compile ProcessArgv to get the array pointer
@@ -25840,8 +26186,8 @@ fn compile_expr(
             Ok(builder.block_params(merge_block)[0])
         }
         Expr::New { class_name, args, .. } => {
-            // Handle native module constructors first
-            if class_name == "EventEmitter" {
+            // Handle native module constructors first (only if not user-defined)
+            if class_name == "EventEmitter" && !classes.contains_key("EventEmitter") {
                 // new EventEmitter() - call js_event_emitter_new()
                 let new_func = extern_funcs.get("js_event_emitter_new")
                     .ok_or_else(|| anyhow!("js_event_emitter_new not declared"))?;
@@ -25852,7 +26198,7 @@ fn compile_expr(
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
             }
 
-            if class_name == "AsyncLocalStorage" {
+            if class_name == "AsyncLocalStorage" && !classes.contains_key("AsyncLocalStorage") {
                 // new AsyncLocalStorage() - call js_async_local_storage_new()
                 let new_func = extern_funcs.get("js_async_local_storage_new")
                     .ok_or_else(|| anyhow!("js_async_local_storage_new not declared"))?;
@@ -26089,7 +26435,7 @@ fn compile_expr(
             }
 
             // new LRUCache({ max: number }) - call js_lru_cache_new(max_size)
-            if class_name == "LRUCache" {
+            if class_name == "LRUCache" && !classes.contains_key("LRUCache") {
                 let new_func = extern_funcs.get("js_lru_cache_new")
                     .ok_or_else(|| anyhow!("js_lru_cache_new not declared"))?;
                 let func_ref = module.declare_func_in_func(*new_func, builder.func);
@@ -26108,7 +26454,7 @@ fn compile_expr(
 
             // new Redis(config?) - call js_ioredis_new(config)
             // Returns Handle (u64) synchronously - connects lazily like real ioredis
-            if class_name == "Redis" {
+            if class_name == "Redis" && !classes.contains_key("Redis") {
                 let new_func = extern_funcs.get("js_ioredis_new")
                     .ok_or_else(|| anyhow!("js_ioredis_new not declared"))?;
                 let func_ref = module.declare_func_in_func(*new_func, builder.func);
@@ -26129,8 +26475,8 @@ fn compile_expr(
                 return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
-            // new Command() - call js_commander_new()
-            if class_name == "Command" {
+            // new Command() - call js_commander_new() ONLY if not a user-defined class
+            if class_name == "Command" && !classes.contains_key("Command") {
                 let new_func = extern_funcs.get("js_commander_new")
                     .ok_or_else(|| anyhow!("js_commander_new not declared"))?;
                 let func_ref = module.declare_func_in_func(*new_func, builder.func);
@@ -26140,7 +26486,7 @@ fn compile_expr(
             }
 
             // new Pool(config) - PostgreSQL connection pool
-            if class_name == "Pool" {
+            if class_name == "Pool" && !classes.contains_key("Pool") {
                 // Pool needs config object, compile the first argument
                 if args.is_empty() {
                     return Err(anyhow!("new Pool() requires a config argument"));
@@ -26160,7 +26506,7 @@ fn compile_expr(
             }
 
             // new WebSocket(url) - WebSocket connection
-            if class_name == "WebSocket" {
+            if class_name == "WebSocket" && !classes.contains_key("WebSocket") {
                 if args.is_empty() {
                     return Err(anyhow!("new WebSocket() requires a URL argument"));
                 }
@@ -26179,7 +26525,7 @@ fn compile_expr(
             }
 
             // new WebSocketServer({ port }) - WebSocket server
-            if class_name == "WebSocketServer" {
+            if class_name == "WebSocketServer" && !classes.contains_key("WebSocketServer") {
                 // Compile options argument (or pass undefined if none)
                 let opts_val = if !args.is_empty() {
                     compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?
@@ -26237,7 +26583,9 @@ fn compile_expr(
             }
 
             // new Big(value) / new Decimal(value) / new BigNumber(value)
-            if class_name == "Big" || class_name == "Decimal" || class_name == "BigNumber" {
+            if (class_name == "Big" && !classes.contains_key("Big"))
+                || (class_name == "Decimal" && !classes.contains_key("Decimal"))
+                || (class_name == "BigNumber" && !classes.contains_key("BigNumber")) {
                 if args.is_empty() {
                     // Default to 0
                     let new_func = extern_funcs.get("js_decimal_from_number")
@@ -26334,6 +26682,7 @@ fn compile_expr(
                 let class_id = builder.ins().iconst(types::I32, class_meta.id as i64);
                 let parent_class_id = builder.ins().iconst(types::I32, parent_id as i64);
                 let field_count = builder.ins().iconst(types::I32, class_meta.field_count as i64);
+
                 let alloc_call = builder.ins().call(alloc_ref, &[class_id, parent_class_id, field_count, keys_ptr, keys_len]);
                 let obj_ptr = builder.inst_results(alloc_call)[0];
 
@@ -27877,8 +28226,62 @@ fn compile_expr(
                 }
             }
 
+            // Handle property-based array indexing: this.items[0], obj.paths[1], etc.
+            // This is for accessing array elements where the array is stored in an object property
+            if let Expr::PropertyGet { object: prop_obj, property: prop_name } = object.as_ref() {
+                // Check if this is accessing a property of a local variable with class metadata
+                if let Expr::LocalGet(obj_id) = prop_obj.as_ref() {
+                    if let Some(obj_info) = locals.get(obj_id) {
+                        if let Some(ref class_name) = obj_info.class_name {
+                            if let Some(class_meta) = classes.get(class_name) {
+                                if let Some(&field_idx) = class_meta.field_indices.get(prop_name) {
+                                    eprintln!("[CODEGEN] Property-based array indexing: obj.{}[index]", prop_name);
+
+                                    // Get the object pointer
+                                    let obj_val = builder.use_var(obj_info.var);
+                                    let obj_ptr = ensure_i64(builder, obj_val);
+
+                                    // Load the array from the property (inline field access)
+                                    let field_offset = 24 + (field_idx as i32) * 8;
+                                    let arr_val_f64 = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+
+                                    // Extract the array pointer from NaN-boxed value
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let ptr_call = builder.ins().call(get_ptr_ref, &[arr_val_f64]);
+                                    let arr_ptr = builder.inst_results(ptr_call)[0];
+
+                                    // Get the index as i32
+                                    let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
+                                        builder.ins().iconst(types::I32, *n)
+                                    } else {
+                                        let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                                        let idx_f64 = ensure_f64(builder, idx_val);
+                                        builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                                    };
+
+                                    // Call js_array_get_jsvalue to get the element
+                                    let get_func = extern_funcs.get("js_array_get_jsvalue")
+                                        .ok_or_else(|| anyhow!("js_array_get_jsvalue not declared"))?;
+                                    let get_ref = module.declare_func_in_func(*get_func, builder.func);
+                                    let get_call = builder.ins().call(get_ref, &[arr_ptr, idx_i32]);
+                                    let jsvalue_bits = builder.inst_results(get_call)[0];
+
+                                    // Convert u64 bits to f64
+                                    let result = builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits);
+                                    eprintln!("[CODEGEN] Successfully compiled property-based array indexing");
+                                    return Ok(result);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle array indexing: arr[i]
             // First, check if we have a known local array for optimized access
+            // OR if this is property access on an object that has an array property
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if info.is_array {
@@ -31815,6 +32218,45 @@ fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[value_f64]);
             Ok(builder.inst_results(call)[0])
+        }
+        Expr::ArrayFrom(value_expr) => {
+            // Array.from(iterable) - clone array from iterable (e.g., Map.entries(), Map.keys(), Set, another array)
+
+            // Check at compile time if the inner expression is a Set
+            let is_set = match value_expr.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_set).unwrap_or(false),
+                _ => false,
+            };
+
+            let value = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
+
+            // Get the raw I64 pointer from whatever format the value is in
+            let ptr = if builder.func.dfg.value_type(value) == types::I64 {
+                value
+            } else {
+                // NaN-boxed f64 value - extract the pointer
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let get_ptr_call = builder.ins().call(get_ptr_ref, &[value]);
+                builder.inst_results(get_ptr_call)[0]
+            };
+
+            if is_set {
+                // Set → Array conversion
+                let func = extern_funcs.get("js_set_to_array")
+                    .ok_or_else(|| anyhow!("js_set_to_array not declared"))?;
+                let func_ref = module.declare_func_in_func(*func, builder.func);
+                let call = builder.ins().call(func_ref, &[ptr]);
+                Ok(builder.inst_results(call)[0])
+            } else {
+                // Array clone (also handles Map.entries(), Map.keys(), Map.values() which return arrays)
+                let clone_func = extern_funcs.get("js_array_clone")
+                    .ok_or_else(|| anyhow!("js_array_clone not declared"))?;
+                let clone_ref = module.declare_func_in_func(*clone_func, builder.func);
+                let clone_call = builder.ins().call(clone_ref, &[ptr]);
+                Ok(builder.inst_results(clone_call)[0])
+            }
         }
         Expr::TypeOf(inner) => {
             // Compile the inner expression

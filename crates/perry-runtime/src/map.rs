@@ -98,8 +98,30 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     true
 }
 
+/// Extract a string pointer from a value that might be NaN-boxed with various tags.
+/// Returns the raw pointer if the value looks like it contains a string pointer, or null otherwise.
+fn extract_string_ptr_from_value(bits: u64) -> *const StringHeader {
+    let upper = bits >> 48;
+    match upper {
+        0x7FFF => (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader, // STRING_TAG
+        0x7FFD => (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader, // POINTER_TAG (string stored as generic pointer)
+        0x0000 => {
+            // Raw pointer (no NaN-boxing tag)
+            let lower = bits & 0x0000_FFFF_FFFF_FFFF;
+            if lower > 0x10000 { lower as *const StringHeader } else { std::ptr::null() }
+        }
+        _ => std::ptr::null(),
+    }
+}
+
+/// Check if a value looks like it contains a string/pointer (STRING_TAG, POINTER_TAG, or raw pointer)
+fn is_string_like(bits: u64) -> bool {
+    !extract_string_ptr_from_value(bits).is_null()
+}
+
 /// Check if two JSValues are equal (for map key comparison)
-/// This handles both NaN-boxed values and raw pointers, including string content comparison
+/// This handles NaN-boxed values with STRING_TAG (0x7FFF), POINTER_TAG (0x7FFD),
+/// raw pointers (0x0000), and cross-tag combinations (e.g., STRING_TAG vs POINTER_TAG).
 fn jsvalue_eq(a: f64, b: f64) -> bool {
     let a_bits = a.to_bits();
     let b_bits = b.to_bits();
@@ -109,17 +131,19 @@ fn jsvalue_eq(a: f64, b: f64) -> bool {
         return true;
     }
 
-    // Both look like raw pointers - they might be strings with same content
-    if looks_like_pointer(a) && looks_like_pointer(b) {
-        let ptr_a = as_raw_pointer(a) as *const StringHeader;
-        let ptr_b = as_raw_pointer(b) as *const StringHeader;
-        // Try string comparison - if both are strings, compare content
-        // Note: We can't easily distinguish string pointers from other pointers,
-        // so we assume map keys that are pointers are strings
-        unsafe { strings_equal(ptr_a, ptr_b) }
-    } else {
-        false
+    // If both values look like they contain string pointers (any tag combination),
+    // compare by content. This handles:
+    // - STRING_TAG (0x7FFF) vs STRING_TAG (0x7FFF)
+    // - STRING_TAG (0x7FFF) vs POINTER_TAG (0x7FFD)
+    // - POINTER_TAG (0x7FFD) vs POINTER_TAG (0x7FFD)
+    // - Raw pointer (0x0000) vs any of the above
+    if is_string_like(a_bits) && is_string_like(b_bits) {
+        let ptr_a = extract_string_ptr_from_value(a_bits);
+        let ptr_b = extract_string_ptr_from_value(b_bits);
+        return unsafe { strings_equal(ptr_a, ptr_b) };
     }
+
+    false
 }
 
 /// Allocate a new empty map with the given initial capacity

@@ -35,7 +35,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.146"
+version = "0.2.148"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/skelpo/perry"

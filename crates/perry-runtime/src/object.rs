@@ -458,13 +458,13 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 
     // The object must be a pointer (object, array, etc.)
     if !obj_val.is_pointer() {
-        eprintln!("[HAS-PROP-DEBUG] obj is not a pointer");
+        // // eprintln!("[HAS-PROP-DEBUG] obj is not a pointer");
         return 0.0;
     }
 
     let obj_ptr = obj_val.as_pointer::<ObjectHeader>();
     if obj_ptr.is_null() {
-        eprintln!("[HAS-PROP-DEBUG] obj_ptr is null");
+        // // eprintln!("[HAS-PROP-DEBUG] obj_ptr is null");
         return 0.0;
     }
 
@@ -472,7 +472,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
     if !key_val.is_string() {
         // If key is a number, convert to string for lookup
         // For now, we only support string keys
-        eprintln!("[HAS-PROP-DEBUG] key is not a string");
+        // // eprintln!("[HAS-PROP-DEBUG] key is not a string");
         return 0.0;
     }
 
@@ -488,13 +488,13 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
         let keys = (*obj_ptr).keys_array;
         let class_id = (*obj_ptr).class_id;
         if keys.is_null() {
-            eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, but keys_array is NULL!", key_str_rust, class_id);
+            // eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, but keys_array is NULL!", key_str_rust, class_id);
             return 0.0;
         }
 
         // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
-        eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, key_count={}", key_str_rust, class_id, key_count);
+        // // eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, key_count={}", key_str_rust, class_id, key_count);
         for i in 0..key_count {
             let stored_key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
@@ -506,17 +506,17 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
                     let bytes = std::slice::from_raw_parts(ptr, len as usize);
                     std::str::from_utf8(bytes).unwrap_or("<invalid>")
                 };
-                eprintln!("[HAS-PROP-DEBUG]   [{}] = '{}'", i, stored_key_rust);
+                // // eprintln!("[HAS-PROP-DEBUG]   [{}] = '{}'", i, stored_key_rust);
                 if crate::string::js_string_equals(key_str, stored_key) {
                     // Found the property
-                    eprintln!("[HAS-PROP-DEBUG] FOUND '{}' at index {}", key_str_rust, i);
+                    // eprintln!("[HAS-PROP-DEBUG] FOUND '{}' at index {}", key_str_rust, i);
                     return 1.0;
                 }
             }
         }
 
         // Key not found
-        eprintln!("[HAS-PROP-DEBUG] NOT FOUND '{}'", key_str_rust);
+        // // eprintln!("[HAS-PROP-DEBUG] NOT FOUND '{}'", key_str_rust);
         0.0
     }
 }
@@ -616,19 +616,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
 
         // If no keys array exists, create one
         if keys.is_null() {
-            if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
-                eprintln!("[OBJECT-SET-FIELD-DEBUG] Creating NEW keys_array for obj=0x{:x}, first key='{}'",
-                    obj as usize, key_str);
-            }
             // Create a new keys array with the key
             let new_keys = crate::array::js_array_alloc(4);
             crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
             (*obj).keys_array = new_keys;
-
-            if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
-                eprintln!("[OBJECT-SET-FIELD-DEBUG] Created keys_array=0x{:x} for obj=0x{:x}",
-                    new_keys as usize, obj as usize);
-            }
 
             // Reallocate fields to hold at least one value
             // Note: We assume the object has enough field slots pre-allocated
@@ -652,10 +643,6 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         }
 
         // Key not found - add it to the object
-        if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
-            eprintln!("[OBJECT-SET-FIELD-DEBUG] Adding key '{}' to EXISTING keys_array=0x{:x} for obj=0x{:x} (had {} keys)",
-                key_str, keys as usize, obj as usize, key_count);
-        }
         // First, add the key to the keys array
         crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
 

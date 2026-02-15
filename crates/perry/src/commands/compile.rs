@@ -481,6 +481,7 @@ fn collect_modules(
     visited: &mut HashSet<PathBuf>,
     enable_js_runtime: bool,
     format: OutputFormat,
+    next_class_id: &mut perry_hir::ClassId,
 ) -> Result<()> {
     let canonical = entry_path
         .canonicalize()
@@ -546,7 +547,8 @@ fn collect_modules(
 
     let ast_module = perry_parser::parse_typescript(&source, filename)?;
     let source_file_path = canonical.to_string_lossy().to_string();
-    let mut hir_module = perry_hir::lower_module(&ast_module, &module_name, &source_file_path)?;
+    let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id(&ast_module, &module_name, &source_file_path, *next_class_id)?;
+    *next_class_id = new_next_class_id; // Update the global class_id counter
 
     // Apply function inlining optimization
     inline_functions(&mut hir_module);
@@ -568,7 +570,7 @@ fn collect_modules(
             match kind {
                 ModuleKind::NativeCompiled => {
                     // Recursively collect TypeScript modules
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
                 }
                 ModuleKind::Interpreted => {
                     // Skip declaration files (.d.ts) - they only contain type information
@@ -592,7 +594,7 @@ fn collect_modules(
                     }
 
                     // Collect JS module
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
                 }
                 ModuleKind::NativeRust => {
                     // Native Rust modules are handled by stdlib
@@ -623,11 +625,11 @@ fn collect_modules(
             if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root) {
                 match kind {
                     ModuleKind::NativeCompiled => {
-                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format)?;
+                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
                     }
                     ModuleKind::Interpreted => {
                         if enable_js_runtime {
-                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format)?;
+                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
                         }
                     }
                     ModuleKind::NativeRust => {}
@@ -681,8 +683,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let mut ctx = CompilationContext::new(project_root);
     let mut visited = HashSet::new();
+    let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
 
-    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format)?;
+    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, &mut next_class_id)?;
 
     // Recompute project_root as the common ancestor of all module paths.
     // The initial project_root is the parent of the entry file, but modules may be in sibling

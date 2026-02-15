@@ -77,11 +77,15 @@ pub struct LoweringContext {
 
 impl LoweringContext {
     pub fn new(source_file_path: impl Into<String>) -> Self {
+        Self::with_class_id_start(source_file_path, 1)
+    }
+
+    pub fn with_class_id_start(source_file_path: impl Into<String>, start_class_id: ClassId) -> Self {
         Self {
             next_local_id: 0,
             next_global_id: 0,
             next_func_id: 0,
-            next_class_id: 1, // Start at 1 so 0 can be used as "no parent" sentinel
+            next_class_id: start_class_id, // Start from the provided ID to avoid collisions across modules
             next_enum_id: 0,
             next_interface_id: 0,
             next_type_alias_id: 0,
@@ -757,7 +761,11 @@ fn lower_decorators(_ctx: &mut LoweringContext, decorators: &[ast::Decorator]) -
 ///
 /// `source_file_path` should be the absolute path to the source file for import.meta.url support.
 pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str) -> Result<Module> {
-    let mut ctx = LoweringContext::new(source_file_path);
+    lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
+}
+
+pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId) -> Result<(Module, ClassId)> {
+    let mut ctx = LoweringContext::with_class_id_start(source_file_path, start_class_id);
     let mut module = Module::new(name);
 
     // Pre-scan: Find all function names that have implementations (bodies)
@@ -899,7 +907,7 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
         }
     }
 
-    Ok(module)
+    Ok((module, ctx.next_class_id))
 }
 
 fn lower_module_decl(
@@ -3466,6 +3474,10 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             let value = args.get(0).cloned().unwrap_or(Expr::Undefined);
                                             return Ok(Expr::ArrayIsArray(Box::new(value)));
                                         }
+                                        "from" => {
+                                            let value = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ArrayFrom(Box::new(value)));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -4395,6 +4407,27 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     }
                                 }
                                 }  // close is_array_type check
+                            }
+
+                            // Check for array methods on property access (e.g., this.items.push(value))
+                            // This handles cases where the array is a property of an object, not a local variable
+                            if let ast::Expr::Member(obj_member) = member.obj.as_ref() {
+                                if let ast::MemberProp::Ident(obj_prop_ident) = &obj_member.prop {
+                                    let property_name = obj_prop_ident.sym.to_string();
+                                    // Lower the object expression (e.g., 'this' or a local variable)
+                                    let object_expr = lower_expr(ctx, &obj_member.obj)?;
+
+                                    match method_name {
+                                        "push" => {
+                                            if args.len() >= 1 {
+                                                // For now, fall through to generic Call handling
+                                                // We'll compile this in codegen using inline property access
+                                                eprintln!("[HIR-LOWER] Found property-based push: object.{}.push()", property_name);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                     }
@@ -8107,7 +8140,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_local_refs_expr(obj, refs);
         }
-        Expr::ArrayIsArray(value) => {
+        Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_local_refs_expr(value, refs);
         }
         Expr::RegExpTest { regex, string } => {
@@ -8805,7 +8838,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_assigned_locals_expr(obj, assigned);
         }
-        Expr::ArrayIsArray(value) => {
+        Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::RegExpTest { regex, string } => {

@@ -1021,6 +1021,9 @@ pub enum Expr {
     /// Array.isArray(value) -> boolean
     /// Returns true if the value is an array
     ArrayIsArray(Box<Expr>),
+    /// Array.from(iterable) -> Array
+    /// Creates a new array from an iterable (e.g., Map.entries(), Map.keys(), another array)
+    ArrayFrom(Box<Expr>),
 
     // Global built-in functions
     /// parseInt(string, radix?) -> number

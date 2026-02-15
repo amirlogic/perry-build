@@ -780,8 +780,7 @@ pub extern "C" fn js_dynamic_array_get(value: f64, index: i32) -> f64 {
     // Call the native array get function
     let result_bits = crate::array::js_array_get_jsvalue(ptr as *const crate::array::ArrayHeader, index as u32);
     let result_top16 = result_bits >> 48;
-    eprintln!("[DYNAMIC-ARRAY-GET-DEBUG] Returning result: bits=0x{:016x}, top16=0x{:04x}, is_pointer={}, is_undefined={}",
-        result_bits, result_top16, result_top16 == 0x7FFD, result_top16 == 0x7FFC);
+    // debug: DYNAMIC-ARRAY-GET-DEBUG disabled
     f64::from_bits(result_bits)
 }
 
@@ -790,11 +789,11 @@ pub extern "C" fn js_dynamic_array_get(value: f64, index: i32) -> f64 {
 pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
     let bits = arr_value.to_bits();
     let top16 = bits >> 48;
-    eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Called with arr_value bits=0x{:016x}, top16=0x{:04x}", bits, top16);
+    // // eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Called with arr_value bits=0x{:016x}, top16=0x{:04x}", bits, top16);
 
     // Check if this is a JS handle
     if is_js_handle(arr_value) {
-        eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Detected as JS handle");
+        // eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Detected as JS handle");
         // Try to use the JS runtime function if it's been registered
         let func_ptr = JS_HANDLE_ARRAY_LENGTH.load(Ordering::SeqCst);
         if !func_ptr.is_null() {
@@ -807,14 +806,14 @@ pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
 
     // Not a JS handle - extract the pointer
     let ptr = js_nanbox_get_pointer(arr_value);
-    eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Extracted pointer: 0x{:016x}", ptr);
+    // // eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Extracted pointer: 0x{:016x}", ptr);
     if ptr == 0 {
-        eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Pointer is null, returning 0");
+        // eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Pointer is null, returning 0");
         return 0;
     }
 
     let len = crate::array::js_array_length(ptr as *const crate::array::ArrayHeader) as i32;
-    eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Array length: {}", len);
+    // // eprintln!("[DYNAMIC-ARRAY-LENGTH-DEBUG] Array length: {}", len);
     len
 }
 

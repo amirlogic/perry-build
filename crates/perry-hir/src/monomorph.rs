@@ -1239,8 +1239,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::ObjectValues(obj) => Expr::ObjectValues(Box::new(substitute_expr(obj, substitutions))),
         Expr::ObjectEntries(obj) => Expr::ObjectEntries(Box::new(substitute_expr(obj, substitutions))),
 
-        // Array.isArray
+        // Array.isArray / Array.from
         Expr::ArrayIsArray(value) => Expr::ArrayIsArray(Box::new(substitute_expr(value, substitutions))),
+        Expr::ArrayFrom(value) => Expr::ArrayFrom(Box::new(substitute_expr(value, substitutions))),
 
         // Global built-in functions
         Expr::ParseInt { string, radix } => Expr::ParseInt {

@@ -535,6 +535,27 @@ pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeade
     }
 }
 
+/// Clone an array from a NaN-boxed f64 pointer value.
+/// Extracts the array pointer from the NaN-boxed value and creates a shallow copy.
+/// If the value is not a valid array pointer, returns an empty array.
+#[no_mangle]
+pub extern "C" fn js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader {
+    if src.is_null() {
+        return js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*src).length;
+        let result = js_array_alloc(len);
+        if len > 0 {
+            let src_elements = (src as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+            let dst_elements = (result as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            ptr::copy_nonoverlapping(src_elements, dst_elements, len as usize);
+            (*result).length = len;
+        }
+        result
+    }
+}
+
 // ============================================================================
 // Array higher-order function methods
 // These use closure pointers to call the callback function
@@ -770,24 +791,24 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
 pub extern "C" fn js_array_is_array(value: f64) -> f64 {
     use crate::value::JSValue;
     let bits = value.to_bits();
-    eprintln!("[ARRAY-IS-ARRAY-DEBUG] Called with value bits=0x{:016x}, top16=0x{:04x}", bits, bits >> 48);
+    // eprintln!("[ARRAY-IS-ARRAY-DEBUG] Called with value bits=0x{:016x}, top16=0x{:04x}", bits, bits >> 48);
 
     let jsvalue = JSValue::from_bits(bits);
 
     // Check if it's a pointer
     if !jsvalue.is_pointer() {
-        eprintln!("[ARRAY-IS-ARRAY-DEBUG] Not a pointer, returning false");
+        // eprintln!("[ARRAY-IS-ARRAY-DEBUG] Not a pointer, returning false");
         return 0.0;
     }
 
     // Get the pointer
     let ptr = jsvalue.as_pointer::<ArrayHeader>();
     if ptr.is_null() {
-        eprintln!("[ARRAY-IS-ARRAY-DEBUG] Pointer is null, returning false");
+        // eprintln!("[ARRAY-IS-ARRAY-DEBUG] Pointer is null, returning false");
         return 0.0;
     }
 
-    eprintln!("[ARRAY-IS-ARRAY-DEBUG] Valid pointer 0x{:x}, returning true", ptr as usize);
+    // eprintln!("[ARRAY-IS-ARRAY-DEBUG] Valid pointer 0x{:x}, returning true", ptr as usize);
 
     // Check if it's an array by looking at the header
     // Arrays have a specific structure - we check the magic/type indicator

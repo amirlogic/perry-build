@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.147
+**Current Version:** 0.2.148
 
 ## Workflow Requirements
 
@@ -134,6 +134,18 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.148
+- `Array.from()` support: new `ArrayFrom` HIR node, `js_array_clone` + `js_set_to_array` runtime functions
+- Singleton pattern: track `static_method_return_types` in ClassMeta for proper type inference (e.g., `getInstance()`)
+- Multi-module class ID management: thread `next_class_id` through module collection to prevent collisions
+- Array mutation on properties: `this.arr.push()` / `obj.arr.push()` stores new pointer back to field
+- `js_array_unshift_jsvalue` runtime function for NaN-boxed unshift support
+- Map/Set NaN-boxing fixes: robust cross-tag string equality in `jsvalue_eq()`, strict STRING_TAG for map keys
+- Fix closure return type: NaN-box pointer (not bitcast) when closure returns I64 for F64 function
+- Fix string/boolean confusion: additional `is_string` check in binary ops prevents treating booleans as string pointers
+- Native module overridability: user-defined classes can shadow builtins (EventEmitter, Redis, WebSocket, etc.)
+- Remove hot-path debug logging: disabled DYNAMIC-ARRAY-GET/LENGTH, ARRAY-IS-ARRAY, HAS-PROP, OBJECT-SET-FIELD eprintln
 
 ### v0.2.147
 - Mark-sweep garbage collection: gc.rs, arena_alloc_gc, conservative stack scan, root scanning, `gc()` built-in
