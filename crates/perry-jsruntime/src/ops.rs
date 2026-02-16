@@ -34,12 +34,6 @@ fn op_perry_fetch(
     #[string] body: String,
     #[serde] headers: HashMap<String, String>,
 ) -> Result<serde_json::Value, deno_core::error::AnyError> {
-    eprintln!("[op_perry_fetch] {} {} body_len={}", method, url, body.len());
-    if !body.is_empty() {
-        eprintln!("[op_perry_fetch] body first 300 chars: {}", &body[..body.len().min(300)]);
-    }
-    eprintln!("[op_perry_fetch] headers: {:?}", headers);
-
     let agent = ureq::agent();
     let method_upper = method.to_uppercase();
 

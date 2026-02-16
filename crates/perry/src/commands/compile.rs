@@ -782,14 +782,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Debug: print exported func return instances
-    if !exported_func_return_instances.is_empty() {
-        eprintln!("[DEBUG compile] exported_func_return_instances ({}):", exported_func_return_instances.len());
-        for ((path, name), info) in &exported_func_return_instances {
-            eprintln!("  {}:{} -> {}.{}", path, name, info.native_module, info.native_class);
-        }
-    }
-
     // Fix local native instance method calls within each module
     // This handles cases like: const pool = mysql.createPool(); pool.execute();
     for (_, hir_module) in ctx.native_modules.iter_mut() {

@@ -380,11 +380,6 @@ pub unsafe extern "C" fn js_call_method(
             }
         };
 
-        let is_promise = result.is_promise();
-        if is_promise || method_name == "getReserves" {
-            eprintln!("[js_call_method] '{}' returned is_promise={} is_obj={} is_undef={}", method_name, is_promise, result.is_object(), result.is_undefined());
-        }
-
         v8_to_native(scope, result)
     })
 }
@@ -967,12 +962,9 @@ pub unsafe extern "C" fn js_should_use_runtime(
 /// Returns the resolved value as NaN-boxed f64.
 #[no_mangle]
 pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
-    let bits = value.to_bits();
-    eprintln!("[js_await_js_promise] CALLED bits=0x{:016X} tag=0x{:04X}", bits, bits >> 48);
     let handle_id = match get_handle_id(value) {
         Some(id) => id,
         None => {
-            eprintln!("[js_await_js_promise] NOT a JS handle, returning as-is");
             return value;
         }
     };
@@ -1001,25 +993,13 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
                 };
 
                 if !v8_val.is_promise() {
-                    // Not a Promise, convert and return
-                    let type_str = if v8_val.is_object() { "object" }
-                        else if v8_val.is_array() { "array" }
-                        else if v8_val.is_function() { "function" }
-                        else if v8_val.is_string() { "string" }
-                        else if v8_val.is_number() { "number" }
-                        else { "other" };
-                    eprintln!("[js_await_js_promise] handle {} is NOT a promise (type={}), returning directly", handle_id, type_str);
                     return v8_to_native(scope, v8_val);
                 }
 
                 let promise = v8::Local::<v8::Promise>::try_from(v8_val).unwrap();
                 let state_val = promise.state();
                 if state_val != v8::PromiseState::Pending {
-                    // Already settled, return the result
                     let result = promise.result(scope);
-                    let result_str = result.to_rust_string_lossy(scope);
-                    eprintln!("[js_await_js_promise] handle {} ALREADY SETTLED ({:?}): is_obj={} is_arr={} str={}",
-                        handle_id, state_val, result.is_object(), result.is_array(), &result_str[..result_str.len().min(200)]);
                     return v8_to_native(scope, result);
                 }
             }
@@ -1048,8 +1028,6 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
                 match final_state {
                     v8::PromiseState::Fulfilled => {
                         let result = promise.result(scope);
-                        let result_str = result.to_rust_string_lossy(scope);
-                        eprintln!("[js_await_js_promise] FULFILLED: is_obj={} is_arr={} is_undef={} str={}", result.is_object(), result.is_array(), result.is_undefined(), &result_str[..result_str.len().min(200)]);
                         v8_to_native(scope, result)
                     }
                     v8::PromiseState::Rejected => {

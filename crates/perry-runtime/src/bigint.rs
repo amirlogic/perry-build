@@ -1,14 +1,21 @@
 //! BigInt runtime support for Perry
 //!
-//! Provides 256-bit integer arithmetic for cryptocurrency operations.
-//! Uses primitive_types::U256 for the underlying representation.
+//! Provides 512-bit integer arithmetic for cryptocurrency operations.
+//! Uses 8 x u64 limbs in little-endian order.
 
-/// BigInt is stored as a heap-allocated U256 (256-bit unsigned integer)
-/// Layout: 32 bytes (4 x u64)
+/// Number of 64-bit limbs in a BigInt (512 bits total)
+const BIGINT_LIMBS: usize = 8;
+/// Total number of bits
+const BIGINT_BITS: usize = BIGINT_LIMBS * 64;
+
+const ZERO_LIMBS: [u64; BIGINT_LIMBS] = [0; BIGINT_LIMBS];
+
+/// BigInt is stored as a heap-allocated 512-bit integer
+/// Layout: 64 bytes (8 x u64)
 #[repr(C)]
 pub struct BigIntHeader {
-    /// The 256-bit value stored as 4 x u64 in little-endian order
-    pub limbs: [u64; 4],
+    /// The 512-bit value stored as 8 x u64 in little-endian order
+    pub limbs: [u64; BIGINT_LIMBS],
 }
 
 /// Allocate a BigInt with GC tracking
@@ -23,7 +30,8 @@ fn bigint_alloc() -> *mut BigIntHeader {
 pub extern "C" fn js_bigint_from_u64(value: u64) -> *mut BigIntHeader {
     let ptr = bigint_alloc();
     unsafe {
-        (*ptr).limbs = [value, 0, 0, 0];
+        (*ptr).limbs = ZERO_LIMBS;
+        (*ptr).limbs[0] = value;
     }
     ptr
 }
@@ -34,10 +42,12 @@ pub extern "C" fn js_bigint_from_i64(value: i64) -> *mut BigIntHeader {
     let ptr = bigint_alloc();
     unsafe {
         if value >= 0 {
-            (*ptr).limbs = [value as u64, 0, 0, 0];
+            (*ptr).limbs = ZERO_LIMBS;
+            (*ptr).limbs[0] = value as u64;
         } else {
             // Two's complement for negative numbers
-            (*ptr).limbs = [value as u64, u64::MAX, u64::MAX, u64::MAX];
+            (*ptr).limbs = [value as u64, u64::MAX, u64::MAX, u64::MAX,
+                           u64::MAX, u64::MAX, u64::MAX, u64::MAX];
         }
         ptr
     }
@@ -100,7 +110,7 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
             (false, s)
         };
 
-        let mut limbs = [0u64; 4];
+        let mut limbs = ZERO_LIMBS;
 
         if is_hex {
             // Parse hex string
@@ -150,10 +160,10 @@ pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
         let mut carry = 0u64;
 
-        for i in 0..4 {
+        for i in 0..BIGINT_LIMBS {
             let sum = (a_limbs[i] as u128) + (b_limbs[i] as u128) + (carry as u128);
             result[i] = sum as u64;
             carry = (sum >> 64) as u64;
@@ -172,10 +182,10 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
         let mut borrow = 0i128;
 
-        for i in 0..4 {
+        for i in 0..BIGINT_LIMBS {
             let diff = (a_limbs[i] as i128) - (b_limbs[i] as i128) - borrow;
             if diff < 0 {
                 result[i] = (diff + (1i128 << 64)) as u64;
@@ -197,17 +207,17 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
     let ptr = bigint_alloc();
     unsafe {
         if a.is_null() || b.is_null() {
-            (*ptr).limbs = [0, 0, 0, 0];
+            (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
-        // School multiplication (only keeping lower 256 bits)
-        for i in 0..4 {
+        // School multiplication (only keeping lower 512 bits)
+        for i in 0..BIGINT_LIMBS {
             let mut carry = 0u128;
-            for j in 0..(4 - i) {
+            for j in 0..(BIGINT_LIMBS - i) {
                 let product = (a_limbs[i] as u128) * (b_limbs[j] as u128)
                     + (result[i + j] as u128)
                     + carry;
@@ -231,15 +241,15 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
         let b_limbs = (*b).limbs;
 
         // Check for division by zero
-        if b_limbs == [0, 0, 0, 0] {
+        if b_limbs == ZERO_LIMBS {
             panic!("Division by zero");
         }
 
         // Simple binary division
-        let mut quotient = [0u64; 4];
-        let mut remainder = [0u64; 4];
+        let mut quotient = ZERO_LIMBS;
+        let mut remainder = ZERO_LIMBS;
 
-        for i in (0..256).rev() {
+        for i in (0..BIGINT_BITS).rev() {
             // Shift remainder left by 1
             let mut carry = 0u64;
             for limb in remainder.iter_mut() {
@@ -277,14 +287,14 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
         let b_limbs = (*b).limbs;
 
         // Check for division by zero
-        if b_limbs == [0, 0, 0, 0] {
+        if b_limbs == ZERO_LIMBS {
             panic!("Division by zero");
         }
 
         // Simple binary division, return remainder
-        let mut remainder = [0u64; 4];
+        let mut remainder = ZERO_LIMBS;
 
-        for i in (0..256).rev() {
+        for i in (0..BIGINT_BITS).rev() {
             // Shift remainder left by 1
             let mut carry = 0u64;
             for limb in remainder.iter_mut() {
@@ -321,12 +331,14 @@ pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         if exp == 0 {
             // Anything to the power of 0 is 1
-            (*ptr).limbs = [1, 0, 0, 0];
+            (*ptr).limbs = ZERO_LIMBS;
+            (*ptr).limbs[0] = 1;
             return ptr;
         }
 
         // Binary exponentiation
-        let mut result = [1u64, 0, 0, 0];
+        let mut result = ZERO_LIMBS;
+        result[0] = 1;
         let mut base = (*a).limbs;
         let mut e = exp;
 
@@ -344,11 +356,11 @@ pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) 
 }
 
 /// Multiply two limb arrays (helper for pow)
-fn mul_limbs(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
-    let mut result = [0u64; 4];
-    for i in 0..4 {
+fn mul_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> [u64; BIGINT_LIMBS] {
+    let mut result = ZERO_LIMBS;
+    for i in 0..BIGINT_LIMBS {
         let mut carry = 0u128;
-        for j in 0..(4 - i) {
+        for j in 0..(BIGINT_LIMBS - i) {
             let product = (a[i] as u128) * (b[j] as u128)
                 + (result[i + j] as u128)
                 + carry;
@@ -367,14 +379,13 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
     unsafe {
 
         let shift = (*b).limbs[0] as usize;
-        if shift >= 256 {
-            // Shift by 256 or more bits results in zero
-            (*ptr).limbs = [0, 0, 0, 0];
+        if shift >= BIGINT_BITS {
+            (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
 
         let a_limbs = (*a).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
         // Calculate full limb shifts and bit shifts within a limb
         let limb_shift = shift / 64;
@@ -382,23 +393,16 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         if bit_shift == 0 {
             // Simple case: only limb-aligned shift
-            for i in limb_shift..4 {
+            for i in limb_shift..BIGINT_LIMBS {
                 result[i] = a_limbs[i - limb_shift];
             }
         } else {
             // General case: shift across limb boundaries
-            for i in limb_shift..4 {
+            for i in limb_shift..BIGINT_LIMBS {
                 let src_idx = i - limb_shift;
-                result[i] |= a_limbs[src_idx] << bit_shift;
-                if src_idx > 0 && i > limb_shift {
+                result[i] = a_limbs[src_idx] << bit_shift;
+                if src_idx > 0 {
                     result[i] |= a_limbs[src_idx - 1] >> (64 - bit_shift);
-                }
-            }
-            // Handle carry from lower limb into higher position
-            if limb_shift < 4 {
-                for i in (limb_shift + 1)..4 {
-                    let src_idx = i - limb_shift - 1;
-                    result[i] |= a_limbs[src_idx] >> (64 - bit_shift);
                 }
             }
         }
@@ -416,14 +420,13 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
     unsafe {
 
         let shift = (*b).limbs[0] as usize;
-        if shift >= 256 {
-            // Shift by 256 or more bits results in zero
-            (*ptr).limbs = [0, 0, 0, 0];
+        if shift >= BIGINT_BITS {
+            (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
 
         let a_limbs = (*a).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
         // Calculate full limb shifts and bit shifts within a limb
         let limb_shift = shift / 64;
@@ -431,15 +434,15 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         if bit_shift == 0 {
             // Simple case: only limb-aligned shift
-            for i in 0..(4 - limb_shift) {
+            for i in 0..(BIGINT_LIMBS - limb_shift) {
                 result[i] = a_limbs[i + limb_shift];
             }
         } else {
             // General case: shift across limb boundaries
-            for i in 0..(4 - limb_shift) {
+            for i in 0..(BIGINT_LIMBS - limb_shift) {
                 let src_idx = i + limb_shift;
-                result[i] |= a_limbs[src_idx] >> bit_shift;
-                if src_idx + 1 < 4 {
+                result[i] = a_limbs[src_idx] >> bit_shift;
+                if src_idx + 1 < BIGINT_LIMBS {
                     result[i] |= a_limbs[src_idx + 1] << (64 - bit_shift);
                 }
             }
@@ -458,9 +461,9 @@ pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
-        for i in 0..4 {
+        for i in 0..BIGINT_LIMBS {
             result[i] = a_limbs[i] & b_limbs[i];
         }
 
@@ -477,9 +480,9 @@ pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
-        for i in 0..4 {
+        for i in 0..BIGINT_LIMBS {
             result[i] = a_limbs[i] | b_limbs[i];
         }
 
@@ -496,9 +499,9 @@ pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) 
 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
-        let mut result = [0u64; 4];
+        let mut result = ZERO_LIMBS;
 
-        for i in 0..4 {
+        for i in 0..BIGINT_LIMBS {
             result[i] = a_limbs[i] ^ b_limbs[i];
         }
 
@@ -541,33 +544,35 @@ pub extern "C" fn js_bigint_to_f64(a: *const BigIntHeader) -> f64 {
     }
 }
 
+/// Helper to convert limbs to decimal string
+fn limbs_to_decimal_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
+    let mut digits = Vec::new();
+    let mut temp = *limbs;
+
+    // Check if zero
+    if temp == ZERO_LIMBS {
+        return "0".to_string();
+    }
+
+    while temp != ZERO_LIMBS {
+        let mut remainder = 0u128;
+        for i in (0..BIGINT_LIMBS).rev() {
+            let dividend = (remainder << 64) + temp[i] as u128;
+            temp[i] = (dividend / 10) as u64;
+            remainder = dividend % 10;
+        }
+        digits.push((remainder as u8 + b'0') as char);
+    }
+
+    digits.reverse();
+    digits.into_iter().collect()
+}
+
 /// Convert BigInt to string
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::string::StringHeader {
     unsafe {
-        let limbs = (*a).limbs;
-
-        // Convert to decimal string
-        let mut digits = Vec::new();
-        let mut temp = limbs;
-
-        // Check if zero
-        if temp == [0, 0, 0, 0] {
-            return crate::string::js_string_from_bytes("0".as_ptr(), 1);
-        }
-
-        while temp != [0, 0, 0, 0] {
-            let mut remainder = 0u128;
-            for i in (0..4).rev() {
-                let dividend = (remainder << 64) + temp[i] as u128;
-                temp[i] = (dividend / 10) as u64;
-                remainder = dividend % 10;
-            }
-            digits.push((remainder as u8 + b'0') as char);
-        }
-
-        digits.reverse();
-        let s: String = digits.into_iter().collect();
+        let s = limbs_to_decimal_string(&(*a).limbs);
         crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
     }
 }
@@ -576,30 +581,7 @@ pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::str
 #[no_mangle]
 pub extern "C" fn js_bigint_print(a: *const BigIntHeader) {
     unsafe {
-        let limbs = (*a).limbs;
-
-        // Convert to decimal string
-        let mut digits = Vec::new();
-        let mut temp = limbs;
-
-        // Check if zero
-        if temp == [0, 0, 0, 0] {
-            println!("0n");
-            return;
-        }
-
-        while temp != [0, 0, 0, 0] {
-            let mut remainder = 0u128;
-            for i in (0..4).rev() {
-                let dividend = (remainder << 64) + temp[i] as u128;
-                temp[i] = (dividend / 10) as u64;
-                remainder = dividend % 10;
-            }
-            digits.push((remainder as u8 + b'0') as char);
-        }
-
-        digits.reverse();
-        let s: String = digits.into_iter().collect();
+        let s = limbs_to_decimal_string(&(*a).limbs);
         println!("{}n", s);
     }
 }
@@ -608,30 +590,7 @@ pub extern "C" fn js_bigint_print(a: *const BigIntHeader) {
 #[no_mangle]
 pub extern "C" fn js_bigint_error(a: *const BigIntHeader) {
     unsafe {
-        let limbs = (*a).limbs;
-
-        // Convert to decimal string
-        let mut digits = Vec::new();
-        let mut temp = limbs;
-
-        // Check if zero
-        if temp == [0, 0, 0, 0] {
-            eprintln!("0n");
-            return;
-        }
-
-        while temp != [0, 0, 0, 0] {
-            let mut remainder = 0u128;
-            for i in (0..4).rev() {
-                let dividend = (remainder << 64) + temp[i] as u128;
-                temp[i] = (dividend / 10) as u64;
-                remainder = dividend % 10;
-            }
-            digits.push((remainder as u8 + b'0') as char);
-        }
-
-        digits.reverse();
-        let s: String = digits.into_iter().collect();
+        let s = limbs_to_decimal_string(&(*a).limbs);
         eprintln!("{}n", s);
     }
 }
@@ -640,38 +599,15 @@ pub extern "C" fn js_bigint_error(a: *const BigIntHeader) {
 #[no_mangle]
 pub extern "C" fn js_bigint_warn(a: *const BigIntHeader) {
     unsafe {
-        let limbs = (*a).limbs;
-
-        // Convert to decimal string
-        let mut digits = Vec::new();
-        let mut temp = limbs;
-
-        // Check if zero
-        if temp == [0, 0, 0, 0] {
-            eprintln!("0n");
-            return;
-        }
-
-        while temp != [0, 0, 0, 0] {
-            let mut remainder = 0u128;
-            for i in (0..4).rev() {
-                let dividend = (remainder << 64) + temp[i] as u128;
-                temp[i] = (dividend / 10) as u64;
-                remainder = dividend % 10;
-            }
-            digits.push((remainder as u8 + b'0') as char);
-        }
-
-        digits.reverse();
-        let s: String = digits.into_iter().collect();
+        let s = limbs_to_decimal_string(&(*a).limbs);
         eprintln!("{}n", s);
     }
 }
 
 // Helper functions
 
-fn compare_limbs(a: &[u64; 4], b: &[u64; 4]) -> i32 {
-    for i in (0..4).rev() {
+fn compare_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> i32 {
+    for i in (0..BIGINT_LIMBS).rev() {
         if a[i] > b[i] {
             return 1;
         }
@@ -682,9 +618,9 @@ fn compare_limbs(a: &[u64; 4], b: &[u64; 4]) -> i32 {
     0
 }
 
-fn subtract_limbs(a: &mut [u64; 4], b: &[u64; 4]) {
+fn subtract_limbs(a: &mut [u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) {
     let mut borrow = 0i128;
-    for i in 0..4 {
+    for i in 0..BIGINT_LIMBS {
         let diff = (a[i] as i128) - (b[i] as i128) - borrow;
         if diff < 0 {
             a[i] = (diff + (1i128 << 64)) as u64;
@@ -746,5 +682,57 @@ mod tests {
             assert_eq!((*bi).limbs[0], u64::MAX);
             assert_eq!((*bi).limbs[1], 0);
         }
+    }
+
+    #[test]
+    fn test_bigint_mul_3limb() {
+        // 1e39 * 2e39 = 2e78
+        let s1 = "1000000000000000000000000000000000000000";
+        let s2 = "2000000000000000000000000000000000000000";
+        let a = js_bigint_from_string(s1.as_ptr(), s1.len() as u32);
+        let b = js_bigint_from_string(s2.as_ptr(), s2.len() as u32);
+
+        let a_f64 = js_bigint_to_f64(a);
+        let b_f64 = js_bigint_to_f64(b);
+        assert!((a_f64 - 1e39).abs() / 1e39 < 1e-15, "a parse wrong: {}", a_f64);
+        assert!((b_f64 - 2e39).abs() / 2e39 < 1e-15, "b parse wrong: {}", b_f64);
+
+        let c = js_bigint_mul(a, b);
+        let c_f64 = js_bigint_to_f64(c);
+        assert!((c_f64 - 2e78).abs() / 2e78 < 1e-15,
+            "3L*3L multiply wrong: got {}, expected 2e78", c_f64);
+    }
+
+    #[test]
+    fn test_bigint_mul_shifted() {
+        // Reproduce: a = 46903565894391149, shifted = a << 96, b = 392217725163781510767080209313900517
+        // shifted * b should be ~1.458e81
+        let sa = "46903565894391149";
+        let sb = "392217725163781510767080209313900517";
+        let a = js_bigint_from_string(sa.as_ptr(), sa.len() as u32);
+        let b96 = js_bigint_from_u64(96);
+        let shifted = js_bigint_shl(a, b96);
+        let b = js_bigint_from_string(sb.as_ptr(), sb.len() as u32);
+
+        let product = js_bigint_mul(shifted, b);
+        let product_f64 = js_bigint_to_f64(product);
+
+        // Expected: ~1.458e81
+        assert!(product_f64 > 1e80,
+            "shifted*b too small: got {}, expected ~1.458e81", product_f64);
+    }
+
+    #[test]
+    fn test_bigint_div_large() {
+        // Test division: (1e39 * 2e39) / 1e39 = 2e39
+        let s1 = "1000000000000000000000000000000000000000";
+        let s2 = "2000000000000000000000000000000000000000";
+        let a = js_bigint_from_string(s1.as_ptr(), s1.len() as u32);
+        let b = js_bigint_from_string(s2.as_ptr(), s2.len() as u32);
+        let product = js_bigint_mul(a, b);
+        let quotient = js_bigint_div(product, a);
+        let q_f64 = js_bigint_to_f64(quotient);
+        assert!((q_f64 - 2e39).abs() / 2e39 < 1e-15,
+            "division wrong: got {}, expected 2e39", q_f64);
     }
 }

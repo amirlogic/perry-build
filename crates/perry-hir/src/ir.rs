@@ -1016,6 +1016,9 @@ pub enum Expr {
     /// Object.entries(obj) -> [string, any][]
     /// Returns an array of the object's own enumerable [key, value] pairs
     ObjectEntries(Box<Expr>),
+    /// Object rest destructuring: copies all properties except the excluded keys
+    /// Used for `const { a, b, ...rest } = obj` → rest = ObjectRest(obj, ["a", "b"])
+    ObjectRest { object: Box<Expr>, exclude_keys: Vec<String> },
 
     // Array static methods
     /// Array.isArray(value) -> boolean

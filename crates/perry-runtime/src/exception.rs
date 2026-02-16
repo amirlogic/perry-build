@@ -33,7 +33,7 @@ extern "C" {
 }
 
 // Maximum nesting depth for try blocks
-const MAX_TRY_DEPTH: usize = 32;
+const MAX_TRY_DEPTH: usize = 128;
 
 // Static storage for exception handling
 static mut JUMP_BUFFERS: [JmpBuf; MAX_TRY_DEPTH] = [JmpBuf::new(); MAX_TRY_DEPTH];

@@ -384,7 +384,27 @@ fn mark_global_roots(valid_ptrs: &HashSet<usize>) {
         for &root_ptr in roots.iter() {
             if !root_ptr.is_null() {
                 let value = unsafe { *root_ptr };
-                try_mark_value(value, valid_ptrs);
+                // First try NaN-boxed interpretation (exported globals, closures, etc.)
+                if !try_mark_value(value, valid_ptrs) {
+                    // Module variable globals store raw I64 pointers (not NaN-boxed).
+                    // The codegen stores raw pointer values for is_pointer && !is_union types
+                    // but the GC needs NaN-box tags to identify heap pointers.
+                    // Try the raw value directly as a heap pointer address.
+                    // This is safe: we validate against valid_ptrs (known heap allocations),
+                    // and f64 number values have upper bits set (exponent) so they won't
+                    // falsely match real heap addresses in the lower 48-bit address space.
+                    let raw_ptr = value as usize;
+                    if raw_ptr != 0 && valid_ptrs.contains(&raw_ptr) {
+                        unsafe {
+                            let header = header_from_user_ptr(raw_ptr as *const u8);
+                            if (*header).gc_flags & GC_FLAG_MARKED == 0
+                                && (*header).gc_flags & GC_FLAG_PINNED == 0
+                            {
+                                (*header).gc_flags |= GC_FLAG_MARKED;
+                            }
+                        }
+                    }
+                }
             }
         }
     });

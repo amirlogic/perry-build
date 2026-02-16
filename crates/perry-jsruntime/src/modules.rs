@@ -76,7 +76,6 @@ impl NodeModuleLoader {
             let resolved = self.resolve_with_extensions(resolved)?;
             // Check browser field mapping (e.g., ethers geturl.js -> geturl-browser.js)
             if let Some(browser_path) = self.check_browser_field(&resolved) {
-                eprintln!("[module-resolve] BROWSER FIELD: {:?} -> {:?}", resolved, browser_path);
                 return Ok(browser_path);
             }
             return Ok(resolved);
@@ -305,9 +304,6 @@ impl ModuleLoader for NodeModuleLoader {
         };
 
         let resolved_path = self.resolve_module_path(specifier, &referrer_path)?;
-        if specifier.contains("geturl") {
-            eprintln!("[module-resolve] specifier='{}' referrer='{}' -> resolved='{:?}'", specifier, referrer, resolved_path);
-        }
 
         let canonical = std::fs::canonicalize(&resolved_path)
             .unwrap_or(resolved_path);

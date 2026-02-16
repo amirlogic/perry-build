@@ -263,16 +263,17 @@ pub extern "C" fn js_ethers_parse_units(str_ptr: *const StringHeader, decimals: 
     }
 }
 
-/// Convert limbs (little-endian u64 array, fixed 4 limbs) to decimal string
-fn limbs_to_string(limbs: &[u64; 4]) -> String {
+/// Number of limbs in BigIntHeader (must match perry-runtime)
+const BIGINT_LIMBS: usize = 8;
+
+/// Convert limbs (little-endian u64 array) to decimal string
+fn limbs_to_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
     if limbs.iter().all(|&x| x == 0) {
         return "0".to_string();
     }
 
-    // For U256, we can use repeated division by 10
-    // Work with a copy of the limbs
     let mut work = *limbs;
-    let mut digits = Vec::with_capacity(78); // max digits for U256
+    let mut digits = Vec::with_capacity(155); // max digits for 512-bit
 
     while !is_zero(&work) {
         let remainder = div_by_10(&mut work);
@@ -284,17 +285,17 @@ fn limbs_to_string(limbs: &[u64; 4]) -> String {
     digits.into_iter().collect()
 }
 
-/// Check if U256 (4 limbs) is zero
-fn is_zero(limbs: &[u64; 4]) -> bool {
-    limbs[0] == 0 && limbs[1] == 0 && limbs[2] == 0 && limbs[3] == 0
+/// Check if limbs are zero
+fn is_zero(limbs: &[u64; BIGINT_LIMBS]) -> bool {
+    limbs.iter().all(|&x| x == 0)
 }
 
-/// Divide U256 (4 limbs in little-endian) by 10, return remainder
-fn div_by_10(limbs: &mut [u64; 4]) -> u8 {
+/// Divide limbs (little-endian) by 10, return remainder
+fn div_by_10(limbs: &mut [u64; BIGINT_LIMBS]) -> u8 {
     let mut remainder: u128 = 0;
 
     // Process from most significant to least significant limb
-    for i in (0..4).rev() {
+    for i in (0..BIGINT_LIMBS).rev() {
         let current = (remainder << 64) | (limbs[i] as u128);
         limbs[i] = (current / 10) as u64;
         remainder = current % 10;

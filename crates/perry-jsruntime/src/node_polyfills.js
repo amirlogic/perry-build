@@ -266,7 +266,6 @@
     if (typeof globalThis.fetch === 'undefined') {
         const core = Deno.core;
         globalThis.fetch = async function(input, init) {
-            console.log('[perry-fetch]', typeof input === 'string' ? input.substring(0, 80) : input.url);
             const url = typeof input === 'string' ? input : input.url;
             const method = (init && init.method) || 'GET';
             let body = (init && init.body) || '';
@@ -286,9 +285,6 @@
                 } else if (typeof init.headers === 'object') {
                     Object.assign(headers, init.headers);
                 }
-            }
-            if (body && body.length > 0) {
-                console.log('[perry-fetch] body preview:', body.substring(0, 200));
             }
             const result = core.ops.op_perry_fetch(url, method, body, headers);
             return {

@@ -879,9 +879,6 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
     }
 
     // Populate exported_func_return_native_instances for functions that return native instances
-    for (name, module_n, class_n) in &ctx.func_return_native_instances {
-        eprintln!("[DEBUG lower] func_return_native_instance: name={} module={} class={}", name, module_n, class_n);
-    }
     for (func_name, native_module, native_class) in &ctx.func_return_native_instances {
         // Check if this function is directly exported
         let is_exported = module.functions.iter().any(|f| f.name == *func_name && f.is_exported);
@@ -7517,19 +7514,22 @@ fn lower_var_decl_with_destructuring(
                             });
                         }
                         ast::Pat::Rest(rest_pat) => {
-                            // Rest element: let [...rest] = arr
-                            // This would need slice operation - for now, skip
+                            // Rest element: let [a, b, ...rest] = arr
+                            // Generate: let rest = __tmp.slice(idx)
                             if let ast::Pat::Ident(ident) = &*rest_pat.arg {
                                 let name = ident.id.sym.to_string();
                                 let ty = Type::Array(Box::new(elem_ty.clone()));
                                 let id = ctx.define_local(name.clone(), ty.clone());
-                                // For now, just assign undefined - proper slice would need runtime support
                                 result.push(Stmt::Let {
                                     id,
                                     name,
                                     ty,
                                     mutable,
-                                    init: Some(Expr::Undefined),
+                                    init: Some(Expr::ArraySlice {
+                                        array: Box::new(Expr::LocalGet(tmp_id)),
+                                        start: Box::new(Expr::Number(idx as f64)),
+                                        end: None,
+                                    }),
                                 });
                             }
                         }
@@ -7653,18 +7653,41 @@ fn lower_var_decl_with_destructuring(
                         });
                     }
                     ast::ObjectPatProp::Rest(rest) => {
-                        // { ...rest } - collect remaining properties
-                        // For now, just skip as this requires runtime support
+                        // { ...rest } - collect remaining properties not explicitly destructured
                         if let ast::Pat::Ident(ident) = &*rest.arg {
                             let name = ident.id.sym.to_string();
-                            let ty = Type::Any; // Rest spread type is unknown
+                            let ty = Type::Any;
                             let id = ctx.define_local(name.clone(), ty.clone());
+
+                            // Collect all explicitly destructured keys from this pattern
+                            let mut exclude_keys = Vec::new();
+                            for other_prop in &obj_pat.props {
+                                match other_prop {
+                                    ast::ObjectPatProp::KeyValue(kv) => {
+                                        if let Some(key) = match &kv.key {
+                                            ast::PropName::Ident(i) => Some(i.sym.to_string()),
+                                            ast::PropName::Str(s) => Some(s.value.as_str().unwrap_or("").to_string()),
+                                            _ => None,
+                                        } {
+                                            exclude_keys.push(key);
+                                        }
+                                    }
+                                    ast::ObjectPatProp::Assign(assign) => {
+                                        exclude_keys.push(assign.key.sym.to_string());
+                                    }
+                                    ast::ObjectPatProp::Rest(_) => {} // Skip the rest itself
+                                }
+                            }
+
                             result.push(Stmt::Let {
                                 id,
                                 name,
                                 ty,
                                 mutable,
-                                init: Some(Expr::Object(vec![])), // Empty object placeholder
+                                init: Some(Expr::ObjectRest {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    exclude_keys,
+                                }),
                             });
                         }
                     }

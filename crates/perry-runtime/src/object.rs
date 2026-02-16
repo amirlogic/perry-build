@@ -456,67 +456,43 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
     let obj_val = JSValue::from_bits(obj.to_bits());
     let key_val = JSValue::from_bits(key.to_bits());
 
-    // The object must be a pointer (object, array, etc.)
     if !obj_val.is_pointer() {
-        // // eprintln!("[HAS-PROP-DEBUG] obj is not a pointer");
         return 0.0;
     }
 
     let obj_ptr = obj_val.as_pointer::<ObjectHeader>();
     if obj_ptr.is_null() {
-        // // eprintln!("[HAS-PROP-DEBUG] obj_ptr is null");
         return 0.0;
     }
 
-    // The key should be a string
     if !key_val.is_string() {
-        // If key is a number, convert to string for lookup
-        // For now, we only support string keys
-        // // eprintln!("[HAS-PROP-DEBUG] key is not a string");
         return 0.0;
     }
 
     let key_str = key_val.as_pointer::<crate::StringHeader>();
-    let key_str_rust = unsafe {
-        let len = (*key_str).length;
-        let ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-        let bytes = std::slice::from_raw_parts(ptr, len as usize);
-        std::str::from_utf8(bytes).unwrap_or("<invalid>")
-    };
 
     unsafe {
         let keys = (*obj_ptr).keys_array;
-        let class_id = (*obj_ptr).class_id;
         if keys.is_null() {
-            // eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, but keys_array is NULL!", key_str_rust, class_id);
             return 0.0;
         }
 
-        // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
-        // // eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, key_count={}", key_str_rust, class_id, key_count);
         for i in 0..key_count {
             let stored_key_val = crate::array::js_array_get(keys, i as u32);
-            // Keys are stored as string pointers (NaN-boxed)
             if stored_key_val.is_string() {
                 let stored_key = stored_key_val.as_pointer::<crate::StringHeader>();
-                let stored_key_rust = {
-                    let len = (*stored_key).length;
-                    let ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                    let bytes = std::slice::from_raw_parts(ptr, len as usize);
-                    std::str::from_utf8(bytes).unwrap_or("<invalid>")
-                };
-                // // eprintln!("[HAS-PROP-DEBUG]   [{}] = '{}'", i, stored_key_rust);
                 if crate::string::js_string_equals(key_str, stored_key) {
-                    // Found the property
-                    // eprintln!("[HAS-PROP-DEBUG] FOUND '{}' at index {}", key_str_rust, i);
+                    // Check if the field was deleted (set to undefined by delete operator)
+                    let field_val = js_object_get_field(obj_ptr, i as u32);
+                    if field_val.is_undefined() {
+                        return 0.0;
+                    }
                     return 1.0;
                 }
             }
         }
 
-        // Key not found
-        // // eprintln!("[HAS-PROP-DEBUG] NOT FOUND '{}'", key_str_rust);
         0.0
     }
 }
@@ -714,6 +690,72 @@ pub extern "C" fn js_object_delete_dynamic(obj: *mut ObjectHeader, key: f64) -> 
 
     // For other types, delete succeeds vacuously
     1
+}
+
+/// Create a rest object from destructuring: copies all properties from src except excluded keys.
+/// exclude_keys is an array of NaN-boxed string pointers (the explicitly destructured keys).
+/// Returns a pointer to a new object with the remaining key-value pairs.
+#[no_mangle]
+pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const ArrayHeader) -> *mut ObjectHeader {
+    if src.is_null() {
+        return js_object_alloc(0, 0);
+    }
+    unsafe {
+        let keys = (*src).keys_array;
+        if keys.is_null() {
+            return js_object_alloc(0, 0);
+        }
+
+        let key_count = crate::array::js_array_length(keys) as usize;
+        let exclude_count = if exclude_keys.is_null() { 0 } else { crate::array::js_array_length(exclude_keys) as usize };
+
+        // Collect indices of keys to include (not in exclude list and not undefined/deleted)
+        let mut include_indices: Vec<usize> = Vec::new();
+        for i in 0..key_count {
+            let key_val = crate::array::js_array_get(keys, i as u32);
+            if !key_val.is_string() { continue; }
+            let key_str = key_val.as_pointer::<crate::StringHeader>();
+
+            // Check if field was deleted
+            let field_val = js_object_get_field(src, i as u32);
+            if field_val.is_undefined() { continue; }
+
+            // Check if this key is in the exclude list
+            let mut excluded = false;
+            for j in 0..exclude_count {
+                let ex_val = crate::array::js_array_get(exclude_keys, j as u32);
+                if ex_val.is_string() {
+                    let ex_str = ex_val.as_pointer::<crate::StringHeader>();
+                    if crate::string::js_string_equals(key_str, ex_str) {
+                        excluded = true;
+                        break;
+                    }
+                }
+            }
+            if !excluded {
+                include_indices.push(i);
+            }
+        }
+
+        // Allocate new object with the right number of fields
+        let rest_count = include_indices.len() as u32;
+        let rest_obj = js_object_alloc(0, rest_count);
+
+        // Create keys array for the rest object
+        let rest_keys = crate::array::js_array_alloc_with_length(rest_count);
+        (*rest_obj).keys_array = rest_keys;
+
+        // Copy included key-value pairs
+        for (new_idx, &src_idx) in include_indices.iter().enumerate() {
+            let key_val = crate::array::js_array_get(keys, src_idx as u32);
+            crate::array::js_array_set(rest_keys, new_idx as u32, key_val);
+
+            let field_val = js_object_get_field(src, src_idx as u32);
+            js_object_set_field(rest_obj, new_idx as u32, field_val);
+        }
+
+        rest_obj
+    }
 }
 
 /// Check if a value is an instance of a class with the given class_id

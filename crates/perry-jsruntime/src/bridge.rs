@@ -538,7 +538,7 @@ fn v8_bigint_to_native(_scope: &mut v8::HandleScope<'_>, bigint: v8::Local<v8::B
     if word_count == 0 {
         // Zero value
         unsafe {
-            (*ptr).limbs = [0, 0, 0, 0];
+            (*ptr).limbs = [0; 8];
         }
         return ptr as *mut u8;
     }
@@ -547,14 +547,14 @@ fn v8_bigint_to_native(_scope: &mut v8::HandleScope<'_>, bigint: v8::Local<v8::B
     let mut words = vec![0u64; word_count];
     let (sign_bit, _) = bigint.to_words_array(&mut words);
 
-    // Copy words to our BigIntHeader (up to 4 limbs / 256 bits)
+    // Copy words to our BigIntHeader (up to 8 limbs / 512 bits)
     unsafe {
-        let mut limbs = [0u64; 4];
-        for (i, &word) in words.iter().enumerate().take(4) {
+        let mut limbs = [0u64; 8];
+        for (i, &word) in words.iter().enumerate().take(8) {
             limbs[i] = word;
         }
 
-        // Handle negative numbers (two's complement for 256 bits)
+        // Handle negative numbers (two's complement for 512 bits)
         if sign_bit {
             // Negate: invert all bits and add 1
             for limb in limbs.iter_mut() {
