@@ -14315,25 +14315,6 @@ fn compile_stmt(
                             } else {
                                 (None, false, false, false, false, false, false, false, false, false)
                             }
-                        } else if let Expr::ExternFuncRef { return_type, name, .. } = callee.as_ref() {
-                            // Cross-module function call — only detect Map/Set return types
-                            // (other types like Named classes would need class metadata not available cross-module)
-                            let actual_type = if matches!(return_type, perry_types::Type::Any) {
-                                IMPORTED_FUNC_RETURN_TYPES.with(|p| p.borrow().get(name).cloned())
-                            } else {
-                                Some(return_type.clone())
-                            };
-                            match actual_type.as_ref() {
-                                Some(perry_types::Type::Generic { base, .. }) if base == "Map" => {
-                                    (None, true, false, false, false, false, true, false, false, false)
-                                }
-                                Some(perry_types::Type::Generic { base, .. }) if base == "Set" => {
-                                    (None, true, false, false, false, false, false, true, false, false)
-                                }
-                                _ => {
-                                    (None, false, false, false, false, false, false, false, false, false)
-                                }
-                            }
                         } else {
                             (None, false, false, false, false, false, false, false, false, false)
                         }
