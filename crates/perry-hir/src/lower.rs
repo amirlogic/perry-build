@@ -4389,6 +4389,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             if is_map && args.is_empty() {
                                                 return Ok(Expr::MapValues(Box::new(Expr::LocalGet(array_id))));
                                             }
+                                            let is_set = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Set"))
+                                                .unwrap_or(false);
+                                            if is_set && args.is_empty() {
+                                                return Ok(Expr::SetValues(Box::new(Expr::LocalGet(array_id))));
+                                            }
                                         }
                                         // Set methods
                                         "add" => {
@@ -8095,7 +8101,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(set, refs);
             collect_local_refs_expr(value, refs);
         }
-        Expr::SetSize(set) | Expr::SetClear(set) => {
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
             collect_local_refs_expr(set, refs);
         }
         // JSON operations
@@ -8793,7 +8799,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(set, assigned);
             collect_assigned_locals_expr(value, assigned);
         }
-        Expr::SetSize(set) | Expr::SetClear(set) => {
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
             collect_assigned_locals_expr(set, assigned);
         }
         // JSON operations

@@ -853,7 +853,7 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::SetAdd { value, .. } => {
             substitute_locals(value, param_map, next_local_id);
         }
-        Expr::SetSize(set) | Expr::SetClear(set) => {
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
             substitute_locals(set, param_map, next_local_id);
         }
         // Map operations

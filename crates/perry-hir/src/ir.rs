@@ -878,6 +878,7 @@ pub enum Expr {
     SetDelete { set: Box<Expr>, value: Box<Expr> },            // set.delete(value) -> boolean
     SetSize(Box<Expr>),                                        // set.size -> number
     SetClear(Box<Expr>),                                       // set.clear() -> void
+    SetValues(Box<Expr>),                                      // set.values() -> Array (via js_set_to_array)
 
     // Sequence expression (comma operator)
     Sequence(Vec<Expr>),

@@ -1150,6 +1150,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         },
         Expr::SetSize(set) => Expr::SetSize(Box::new(substitute_expr(set, substitutions))),
         Expr::SetClear(set) => Expr::SetClear(Box::new(substitute_expr(set, substitutions))),
+        Expr::SetValues(set) => Expr::SetValues(Box::new(substitute_expr(set, substitutions))),
 
         // JSON operations
         Expr::JsonParse(expr) => Expr::JsonParse(Box::new(substitute_expr(expr, substitutions))),
@@ -1842,7 +1843,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(set, ctx, module);
             collect_instantiations_in_expr(value, ctx, module);
         }
-        Expr::SetSize(set) | Expr::SetClear(set) => {
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
             collect_instantiations_in_expr(set, ctx, module);
         }
         // JSON operations
@@ -2249,7 +2250,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(set, ctx, lookup);
             update_call_sites_in_expr(value, ctx, lookup);
         }
-        Expr::SetSize(set) | Expr::SetClear(set) => {
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
             update_call_sites_in_expr(set, ctx, lookup);
         }
         // JSON operations

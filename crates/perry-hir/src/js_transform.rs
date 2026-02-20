@@ -744,7 +744,7 @@ fn transform_expr(
             transform_expr(set, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
-        Expr::SetSize(e) | Expr::SetClear(e) => {
+        Expr::SetSize(e) | Expr::SetClear(e) | Expr::SetValues(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         // Date methods

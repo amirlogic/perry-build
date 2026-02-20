@@ -12013,7 +12013,7 @@ impl Compiler {
             Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
                 self.collect_closures_from_expr(map, closures, enclosing_class);
             }
-            Expr::SetSize(set) | Expr::SetClear(set) => {
+            Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
                 self.collect_closures_from_expr(set, closures, enclosing_class);
             }
             // Date operations
@@ -12546,10 +12546,16 @@ impl Compiler {
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
+                let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
+                // Detect Map/Set parameter types for proper property dispatch (map.size, set.size, etc.)
+                let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Map");
+                let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Set");
                 // Any/Unknown are union types - they could be numbers, strings, objects, etc.
                 // Don't treat them as pointers since we can't extract pointer from plain numbers
                 let is_union_type = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Unknown);
-                let is_pointer = is_closure || is_string || is_array ||
+                let is_pointer = is_closure || is_string || is_array || is_map || is_set ||
                     matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_));
                 // Use i64 for known pointer types, f64 for numbers and union types
                 let var_type = if is_pointer && !is_union_type { types::I64 } else { types::F64 };
@@ -12576,10 +12582,10 @@ impl Compiler {
                     is_pointer: is_pointer && !is_union_type,
                     is_array,
                     is_string,
-                    is_bigint: false,
+                    is_bigint,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -20830,6 +20836,33 @@ fn compile_expr(
             builder.ins().call(clear_ref, &[set_ptr]);
             // clear() returns undefined (0.0)
             Ok(builder.ins().f64const(0.0))
+        }
+        Expr::SetValues(set) => {
+            // Convert set to array for iteration (set.values() -> Array)
+            let set_ptr = if let Expr::LocalGet(id) = set.as_ref() {
+                if let Some(info) = locals.get(id) {
+                    if (info.is_set || info.is_pointer) && !info.is_union {
+                        { let v = builder.use_var(info.var); ensure_i64(builder, v) }
+                    } else {
+                        let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
+                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    }
+                } else {
+                    let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
+                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                }
+            } else {
+                let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
+                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+            };
+
+            let func = extern_funcs.get("js_set_to_array")
+                .ok_or_else(|| anyhow!("js_set_to_array not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[set_ptr]);
+            let arr_ptr = builder.inst_results(call)[0]; // I64 pointer to array
+            // Return as F64 (bitcast), consistent with Expr::Array
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr))
         }
         Expr::LocalGet(id) => {
             let info = locals.get(id)
