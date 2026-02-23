@@ -13,6 +13,19 @@ thread_local! {
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
+    // dispatch_get_main_queue() is a macro; the actual symbol is _dispatch_main_q
+    static _dispatch_main_q: std::ffi::c_void;
+    fn dispatch_async_f(
+        queue: *const std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+unsafe extern "C" fn button_callback_trampoline(context: *mut std::ffi::c_void) {
+    let closure_f64 = f64::from_bits(context as u64);
+    let closure_ptr = js_nanbox_get_pointer(closure_f64);
+    js_closure_call0(closure_ptr as *const u8);
 }
 
 pub struct PerryButtonTargetIvars {
@@ -31,9 +44,14 @@ define_class!(
             let key = self.ivars().callback_key.get();
             BUTTON_CALLBACKS.with(|cbs| {
                 if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    // Dispatch async to avoid modifying the view hierarchy during
+                    // UIKit touch event processing (crashes on iOS 26+).
                     unsafe {
-                        js_closure_call0(closure_ptr as *const u8);
+                        dispatch_async_f(
+                            &_dispatch_main_q as *const _ as *const std::ffi::c_void,
+                            closure_f64.to_bits() as *mut std::ffi::c_void,
+                            button_callback_trampoline,
+                        );
                     }
                 }
             });

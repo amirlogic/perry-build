@@ -11,6 +11,9 @@ pub fn create() -> i64 {
             new
         ];
         let _: () = msg_send![&*scroll, setTranslatesAutoresizingMaskIntoConstraints: false];
+        // Disable touch delay to avoid iOS 26 crash in
+        // UIGestureRecognizer _delayTouchesForEvent:inPhase:
+        let _: () = msg_send![&*scroll, setDelaysContentTouches: false];
 
         let view: Retained<UIView> = Retained::cast_unchecked(scroll);
         super::register_widget(view)

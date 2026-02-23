@@ -1,11 +1,11 @@
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadOnly};
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 use objc2_ui_kit::{UIView, UIViewController, UIWindow};
 
 use std::cell::RefCell;
+use std::ffi::CStr;
 
 use crate::widgets;
 
@@ -80,85 +80,139 @@ define_class!(
     impl PerryAppDelegate {
         #[unsafe(method(application:didFinishLaunchingWithOptions:))]
         fn did_finish_launching(&self, _application: &AnyObject, _options: *const AnyObject) -> bool {
-            unsafe {
-                let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
-
-                // Create UIWindow with the main screen bounds
-                let screen: Retained<AnyObject> = msg_send![
-                    objc2::runtime::AnyClass::get(c"UIScreen").unwrap(),
-                    mainScreen
-                ];
-                let bounds: CGRect = msg_send![&*screen, bounds];
-                let window = UIWindow::initWithFrame(UIWindow::alloc(mtm), bounds);
-
-                // Create root UIViewController
-                let vc: Retained<UIViewController> = msg_send![
-                    objc2::runtime::AnyClass::get(c"UIViewController").unwrap(),
-                    new
-                ];
-
-                // Set white background
-                let white: Retained<AnyObject> = msg_send![
-                    objc2::runtime::AnyClass::get(c"UIColor").unwrap(),
-                    whiteColor
-                ];
-                let vc_view: Retained<UIView> = msg_send![&*vc, view];
-                let _: () = msg_send![&*vc_view, setBackgroundColor: &*white];
-
-                // Set window title (not visible on iOS, but stored)
-                PENDING_CONFIG.with(|c| {
-                    let _config = c.borrow();
-                    // iOS doesn't have window titles, but we've stored the config
-                });
-
-                // Attach the root widget if set
-                PENDING_BODY.with(|b| {
-                    if let Some(root_handle) = b.borrow().as_ref() {
-                        if let Some(root_view) = widgets::get_widget(*root_handle) {
-                            let _: () = msg_send![&*root_view, setTranslatesAutoresizingMaskIntoConstraints: false];
-
-                            vc_view.addSubview(&root_view);
-
-                            // Pin root widget to safe area layout guide
-                            let safe_area: *const AnyObject = msg_send![&*vc_view, safeAreaLayoutGuide];
-
-                            let root_leading: *const AnyObject = msg_send![&*root_view, leadingAnchor];
-                            let root_trailing: *const AnyObject = msg_send![&*root_view, trailingAnchor];
-                            let root_top: *const AnyObject = msg_send![&*root_view, topAnchor];
-                            let root_bottom: *const AnyObject = msg_send![&*root_view, bottomAnchor];
-
-                            let safe_leading: *const AnyObject = msg_send![safe_area, leadingAnchor];
-                            let safe_trailing: *const AnyObject = msg_send![safe_area, trailingAnchor];
-                            let safe_top: *const AnyObject = msg_send![safe_area, topAnchor];
-                            let safe_bottom: *const AnyObject = msg_send![safe_area, bottomAnchor];
-
-                            let c1: Retained<AnyObject> = msg_send![root_leading, constraintEqualToAnchor: safe_leading];
-                            let c2: Retained<AnyObject> = msg_send![root_trailing, constraintEqualToAnchor: safe_trailing];
-                            let c3: Retained<AnyObject> = msg_send![root_top, constraintEqualToAnchor: safe_top];
-                            let c4: Retained<AnyObject> = msg_send![root_bottom, constraintEqualToAnchor: safe_bottom];
-
-                            let _: () = msg_send![&*c1, setActive: true];
-                            let _: () = msg_send![&*c2, setActive: true];
-                            let _: () = msg_send![&*c3, setActive: true];
-                            let _: () = msg_send![&*c4, setActive: true];
-                        }
-                    }
-                });
-
-                window.setRootViewController(Some(&vc));
-                window.makeKeyAndVisible();
-
-                APPS.with(|a| {
-                    a.borrow_mut().push(AppEntry { window });
-                });
-            }
+            // Window creation is handled by PerrySceneDelegate
             true
         }
     }
 );
 
+/// Scene delegate callback: creates the UIWindow and attaches the root widget.
+/// Called by UIKit when the scene connects.
+unsafe extern "C" fn scene_will_connect(
+    _this: *mut AnyObject,
+    _sel: *const std::ffi::c_void,
+    scene: *mut AnyObject,
+    _session: *mut AnyObject,
+    _options: *mut AnyObject,
+) {
+    let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+
+    // Create UIWindow attached to the scene (UIWindowScene)
+    let window_cls = AnyClass::get(c"UIWindow").unwrap();
+    let window_alloc: *mut AnyObject = msg_send![window_cls, alloc];
+    let window_raw: *mut AnyObject = msg_send![window_alloc, initWithWindowScene: scene];
+    let window: Retained<UIWindow> = Retained::cast_unchecked(Retained::retain(window_raw as *mut AnyObject).unwrap());
+
+    // Create root UIViewController
+    let vc: Retained<UIViewController> = msg_send![
+        AnyClass::get(c"UIViewController").unwrap(),
+        new
+    ];
+
+    // Set white background
+    let white: Retained<AnyObject> = msg_send![
+        AnyClass::get(c"UIColor").unwrap(),
+        whiteColor
+    ];
+    let vc_view: Retained<UIView> = msg_send![&*vc, view];
+    let _: () = msg_send![&*vc_view, setBackgroundColor: &*white];
+
+    // Attach the root widget if set
+    PENDING_BODY.with(|b| {
+        if let Some(root_handle) = b.borrow().as_ref() {
+            if let Some(root_view) = widgets::get_widget(*root_handle) {
+                let _: () = msg_send![&*root_view, setTranslatesAutoresizingMaskIntoConstraints: false];
+
+                vc_view.addSubview(&root_view);
+
+                // Pin root widget to safe area layout guide
+                let safe_area: *const AnyObject = msg_send![&*vc_view, safeAreaLayoutGuide];
+
+                let root_leading: *const AnyObject = msg_send![&*root_view, leadingAnchor];
+                let root_trailing: *const AnyObject = msg_send![&*root_view, trailingAnchor];
+                let root_top: *const AnyObject = msg_send![&*root_view, topAnchor];
+                let root_bottom: *const AnyObject = msg_send![&*root_view, bottomAnchor];
+
+                let safe_leading: *const AnyObject = msg_send![safe_area, leadingAnchor];
+                let safe_trailing: *const AnyObject = msg_send![safe_area, trailingAnchor];
+                let safe_top: *const AnyObject = msg_send![safe_area, topAnchor];
+                let safe_bottom: *const AnyObject = msg_send![safe_area, bottomAnchor];
+
+                let c1: Retained<AnyObject> = msg_send![root_leading, constraintEqualToAnchor: safe_leading];
+                let c2: Retained<AnyObject> = msg_send![root_trailing, constraintEqualToAnchor: safe_trailing];
+                let c3: Retained<AnyObject> = msg_send![root_top, constraintEqualToAnchor: safe_top];
+                let c4: Retained<AnyObject> = msg_send![root_bottom, constraintEqualToAnchor: safe_bottom];
+
+                let _: () = msg_send![&*c1, setActive: true];
+                let _: () = msg_send![&*c2, setActive: true];
+                let _: () = msg_send![&*c3, setActive: true];
+                let _: () = msg_send![&*c4, setActive: true];
+            }
+        }
+    });
+
+    window.setRootViewController(Some(&vc));
+    window.makeKeyAndVisible();
+
+    APPS.with(|a| {
+        a.borrow_mut().push(AppEntry { window });
+    });
+}
+
+// Raw ObjC runtime FFI for dynamic class registration
+extern "C" {
+    fn objc_allocateClassPair(superclass: *const std::ffi::c_void, name: *const i8, extra_bytes: usize) -> *mut std::ffi::c_void;
+    fn objc_registerClassPair(cls: *mut std::ffi::c_void);
+    fn class_addMethod(cls: *mut std::ffi::c_void, sel: *const std::ffi::c_void, imp: *const std::ffi::c_void, types: *const i8) -> bool;
+    fn class_addProtocol(cls: *mut std::ffi::c_void, protocol: *const std::ffi::c_void) -> bool;
+    fn sel_registerName(name: *const i8) -> *const std::ffi::c_void;
+    fn objc_getClass(name: *const i8) -> *const std::ffi::c_void;
+    fn objc_getProtocol(name: *const i8) -> *const std::ffi::c_void;
+}
+
+/// Register the PerrySceneDelegate class dynamically at runtime.
+fn register_scene_delegate() {
+    unsafe {
+        let superclass = objc_getClass(c"UIResponder".as_ptr());
+        let cls = objc_allocateClassPair(superclass, c"PerrySceneDelegate".as_ptr(), 0);
+        if cls.is_null() {
+            // Class already registered
+            return;
+        }
+
+        // Declare conformance to UIWindowSceneDelegate (which inherits UISceneDelegate).
+        // iOS 26+ requires formal protocol conformance, not just method presence.
+        let proto = objc_getProtocol(c"UIWindowSceneDelegate".as_ptr());
+        if !proto.is_null() {
+            class_addProtocol(cls, proto);
+        }
+        let proto2 = objc_getProtocol(c"UISceneDelegate".as_ptr());
+        if !proto2.is_null() {
+            class_addProtocol(cls, proto2);
+        }
+
+        // Add scene:willConnectToSession:options: method
+        // ObjC type encoding: v@:@@@ (void, self, _cmd, scene, session, options)
+        let sel = sel_registerName(c"scene:willConnectToSession:options:".as_ptr());
+        class_addMethod(
+            cls,
+            sel,
+            scene_will_connect as *const std::ffi::c_void,
+            c"v@:@@@".as_ptr(),
+        );
+
+        objc_registerClassPair(cls);
+    }
+}
+
 /// Run the iOS app event loop (calls UIApplicationMain, blocks forever).
 pub fn app_run(_app_handle: i64) {
+    // Force PerryAppDelegate class registration (define_class! registers it lazily)
+    let _ = PerryAppDelegate::class();
+
+    // Register PerrySceneDelegate dynamically before UIApplicationMain
+    register_scene_delegate();
+
     unsafe {
         let argc = 0i32;
         let argv: *const *const u8 = std::ptr::null();

@@ -1,5 +1,6 @@
 use objc2::rc::Retained;
 use objc2::msg_send;
+use objc2::runtime::AnyClass;
 use objc2_ui_kit::{UILabel, UIView};
 use objc2_foundation::NSString;
 use perry_runtime::string::StringHeader;
@@ -67,29 +68,51 @@ pub fn set_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     }
 }
 
-/// Set the font size of a UILabel.
+/// Determine the correct target for font/text operations.
+/// For UIButton, returns its titleLabel; for other views, returns the view itself.
+fn font_target(view: &UIView) -> *const objc2::runtime::AnyObject {
+    if let Some(btn_cls) = AnyClass::get(c"UIButton") {
+        let is_button: bool = unsafe { msg_send![view, isKindOfClass: btn_cls] };
+        if is_button {
+            // UIButton: set font on titleLabel, not the button itself
+            unsafe {
+                let title_label: *const objc2::runtime::AnyObject = msg_send![view, titleLabel];
+                return title_label;
+            }
+        }
+    }
+    view as *const UIView as *const objc2::runtime::AnyObject
+}
+
+/// Set the font size of a UILabel (or UIButton's titleLabel).
 pub fn set_font_size(handle: i64, size: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
             let font: Retained<objc2::runtime::AnyObject> = msg_send![
-                objc2::runtime::AnyClass::get(c"UIFont").unwrap(),
+                AnyClass::get(c"UIFont").unwrap(),
                 systemFontOfSize: size as objc2_core_foundation::CGFloat
             ];
-            let _: () = msg_send![&*view, setFont: &*font];
+            let target = font_target(&view);
+            if !target.is_null() {
+                let _: () = msg_send![target, setFont: &*font];
+            }
         }
     }
 }
 
-/// Set the font weight of a UILabel.
+/// Set the font weight of a UILabel (or UIButton's titleLabel).
 pub fn set_font_weight(handle: i64, size: f64, weight: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
             let font: Retained<objc2::runtime::AnyObject> = msg_send![
-                objc2::runtime::AnyClass::get(c"UIFont").unwrap(),
+                AnyClass::get(c"UIFont").unwrap(),
                 systemFontOfSize: size as objc2_core_foundation::CGFloat,
                 weight: weight as objc2_core_foundation::CGFloat
             ];
-            let _: () = msg_send![&*view, setFont: &*font];
+            let target = font_target(&view);
+            if !target.is_null() {
+                let _: () = msg_send![target, setFont: &*font];
+            }
         }
     }
 }
