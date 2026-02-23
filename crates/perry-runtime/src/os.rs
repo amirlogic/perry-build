@@ -145,7 +145,34 @@ pub extern "C" fn js_os_totalmem() -> f64 {
             (info.totalram as u64 * info.mem_unit as u64) as f64
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MEMORYSTATUSEX {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lpBuffer: *mut MEMORYSTATUSEX) -> i32;
+        }
+        unsafe {
+            let mut statex: MEMORYSTATUSEX = std::mem::zeroed();
+            statex.dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            if GlobalMemoryStatusEx(&mut statex) != 0 {
+                statex.ull_total_phys as f64
+            } else {
+                0.0
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
     { 0.0 }
 }
 
@@ -178,7 +205,34 @@ pub extern "C" fn js_os_freemem() -> f64 {
             (info.freeram as u64 * info.mem_unit as u64) as f64
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MEMORYSTATUSEX {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lpBuffer: *mut MEMORYSTATUSEX) -> i32;
+        }
+        unsafe {
+            let mut statex: MEMORYSTATUSEX = std::mem::zeroed();
+            statex.dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            if GlobalMemoryStatusEx(&mut statex) != 0 {
+                statex.ull_avail_phys as f64
+            } else {
+                0.0
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
     { 0.0 }
 }
 
@@ -213,7 +267,14 @@ pub extern "C" fn js_os_uptime() -> f64 {
             info.uptime as f64
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetTickCount64() -> u64;
+        }
+        unsafe { (GetTickCount64() / 1000) as f64 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
     { 0.0 }
 }
 
@@ -310,7 +371,34 @@ pub extern "C" fn js_os_release() -> *mut StringHeader {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct RTL_OSVERSIONINFOW {
+            dw_os_version_info_size: u32,
+            dw_major_version: u32,
+            dw_minor_version: u32,
+            dw_build_number: u32,
+            dw_platform_id: u32,
+            sz_csd_version: [u16; 128],
+        }
+        extern "system" {
+            fn RtlGetVersion(lpVersionInformation: *mut RTL_OSVERSIONINFOW) -> i32;
+        }
+        unsafe {
+            let mut info: RTL_OSVERSIONINFOW = std::mem::zeroed();
+            info.dw_os_version_info_size = std::mem::size_of::<RTL_OSVERSIONINFOW>() as u32;
+            if RtlGetVersion(&mut info) == 0 {
+                let release = format!("{}.{}.{}", info.dw_major_version, info.dw_minor_version, info.dw_build_number);
+                let bytes = release.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+            } else {
+                let fallback = "unknown";
+                js_string_from_bytes(fallback.as_ptr(), fallback.len() as u32)
+            }
+        }
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         let release = "unknown";
         js_string_from_bytes(release.as_ptr(), release.len() as u32)

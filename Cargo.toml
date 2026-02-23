@@ -16,6 +16,7 @@ members = [
     "crates/perry-ui-ios",
     "crates/perry-ui-android",
     "crates/perry-ui-gtk4",
+    "crates/perry-ui-windows",
 ]
 
 # Aggressive release optimizations for small, fast binaries

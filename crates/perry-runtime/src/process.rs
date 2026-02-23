@@ -18,7 +18,17 @@ pub extern "C" fn js_process_exit(code: f64) {
     // std::process::exit() runs atexit handlers and C++ destructors which can trigger
     // illegal instructions when exception handler state (jmp_buf), GC roots, or
     // V8 isolate state is invalid.
+    #[cfg(unix)]
     unsafe { libc::_exit(exit_code); }
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn ExitProcess(uExitCode: u32);
+        }
+        unsafe { ExitProcess(exit_code as u32); }
+    }
+    #[cfg(not(any(unix, windows)))]
+    std::process::exit(exit_code);
 }
 
 /// Get an environment variable by name (takes JS string pointer)
@@ -105,7 +115,40 @@ fn get_rss_bytes() -> u64 {
         }
         0
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct PROCESS_MEMORY_COUNTERS {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn K32GetProcessMemoryInfo(
+                process: isize,
+                ppsmemCounters: *mut PROCESS_MEMORY_COUNTERS,
+                cb: u32,
+            ) -> i32;
+        }
+        unsafe {
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
+                pmc.working_set_size as u64
+            } else {
+                0
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         0
     }

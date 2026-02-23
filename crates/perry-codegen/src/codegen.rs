@@ -225,8 +225,14 @@ fn ensure_f64(builder: &mut FunctionBuilder, val: Value) -> Value {
 
 /// Inline truthiness check: returns I8 bool (1=truthy, 0=falsy) without FFI.
 /// Covers falsy values: undefined, null, false (NaN-box tags within 2 of TAG_UNDEFINED),
-/// and ±0.0 (bit pattern with all-zero mantissa+exponent after shifting out sign).
-fn inline_truthiness_check(builder: &mut FunctionBuilder, val: Value) -> Value {
+/// ±0.0 (bit pattern with all-zero mantissa+exponent after shifting out sign),
+/// and BigInt 0n (BIGINT_TAG with all-zero limbs, checked via js_bigint_is_zero).
+fn inline_truthiness_check(
+    builder: &mut FunctionBuilder,
+    module: &mut ObjectModule,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    val: Value,
+) -> Value {
     let val_f64 = ensure_f64(builder, val);
     let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
     // Check falsy NaN-box tags: TAG_UNDEFINED(01), TAG_NULL(02), TAG_FALSE(03)
@@ -238,9 +244,44 @@ fn inline_truthiness_check(builder: &mut FunctionBuilder, val: Value) -> Value {
     // Check ±0.0: (val << 1) == 0
     let shifted = builder.ins().ishl_imm(val_i64, 1);
     let zero_i64 = builder.ins().iconst(types::I64, 0);
-    let is_zero = builder.ins().icmp(IntCC::Equal, shifted, zero_i64);
-    // Falsy = is_falsy_tag || is_zero
-    let is_falsy = builder.ins().bor(is_falsy_tag, is_zero);
+    let is_zero_float = builder.ins().icmp(IntCC::Equal, shifted, zero_i64);
+
+    // Check BigInt 0n: extract tag bits, if BIGINT_TAG call js_bigint_is_zero
+    let tag = builder.ins().ushr_imm(val_i64, 48);
+    let bigint_tag_val = builder.ins().iconst(types::I64, 0x7FFA);
+    let is_bigint = builder.ins().icmp(IntCC::Equal, tag, bigint_tag_val);
+
+    let bigint_block = builder.create_block();
+    let non_bigint_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I8); // is_falsy result
+
+    builder.ins().brif(is_bigint, bigint_block, &[], non_bigint_block, &[]);
+
+    // BigInt block: extract pointer and call js_bigint_is_zero
+    builder.switch_to_block(bigint_block);
+    builder.seal_block(bigint_block);
+    let pointer_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let ptr = builder.ins().band(val_i64, pointer_mask);
+    let is_zero_func = extern_funcs.get("js_bigint_is_zero")
+        .expect("js_bigint_is_zero not declared");
+    let is_zero_ref = module.declare_func_in_func(*is_zero_func, builder.func);
+    let call = builder.ins().call(is_zero_ref, &[ptr]);
+    let is_zero_result = builder.inst_results(call)[0]; // i32: 1=zero, 0=non-zero
+    let is_bigint_falsy = builder.ins().ireduce(types::I8, is_zero_result);
+    builder.ins().jump(merge_block, &[is_bigint_falsy]);
+
+    // Non-BigInt block: use existing tag/float checks
+    builder.switch_to_block(non_bigint_block);
+    builder.seal_block(non_bigint_block);
+    let is_falsy_non_bigint = builder.ins().bor(is_falsy_tag, is_zero_float);
+    builder.ins().jump(merge_block, &[is_falsy_non_bigint]);
+
+    // Merge block
+    builder.switch_to_block(merge_block);
+    builder.seal_block(merge_block);
+    let is_falsy = builder.block_params(merge_block)[0];
+
     // Invert to get truthy
     let one_i8 = builder.ins().iconst(types::I8, 1);
     builder.ins().bxor(is_falsy, one_i8)
@@ -333,7 +374,7 @@ fn compile_condition_to_bool(
         }
         _ => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(inline_truthiness_check(builder, val))
+            Ok(inline_truthiness_check(builder, module, extern_funcs, val))
         }
     }
 }
@@ -1137,12 +1178,26 @@ impl Compiler {
                     None
                 };
 
+                // Extract type arguments from HirType::Generic (e.g., Map<string, PoolData>)
+                // or from Expr::New { type_args } init expressions
+                let type_args = if let Some(Expr::New { type_args, .. }) = init {
+                    type_args.clone()
+                } else if let HirType::Generic { type_args, .. } = ty {
+                    type_args.clone()
+                } else {
+                    Vec::new()
+                };
+
+                // Also detect Map/Set from type annotation (not just init expression)
+                let is_map_from_type = matches!(ty, HirType::Generic { base, .. } if base == "Map");
+                let is_set_from_type = matches!(ty, HirType::Generic { base, .. } if base == "Set");
+
                 // Store the type info
                 let info = LocalInfo {
                     var: Variable::new(0), // Will be overwritten in compile_function
                     name: Some(name.clone()),
                     class_name: None,
-                    type_args: Vec::new(),
+                    type_args,
                     is_pointer: is_pointer || is_pointer_from_init,
                     is_array,
                     is_string,
@@ -1157,8 +1212,8 @@ impl Compiler {
                     },
                     is_closure,
                     is_boxed: false,
-                    is_map: matches!(init, Some(Expr::MapNew)),
-                    is_set: matches!(init, Some(Expr::SetNew)),
+                    is_map: matches!(init, Some(Expr::MapNew)) || is_map_from_type,
+                    is_set: matches!(init, Some(Expr::SetNew)) || is_set_from_type,
                     is_buffer,
                     is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
                     is_union: matches!(ty, HirType::Union(_) | HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown),
@@ -4834,6 +4889,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_bigint_neg".to_string(), func_id);
+        }
+
+        // js_bigint_is_zero(a: *const BigIntHeader) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // a pointer
+            sig.returns.push(AbiParam::new(types::I32)); // 1=zero, 0=non-zero
+            let func_id = self.module.declare_function(
+                "js_bigint_is_zero",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_bigint_is_zero".to_string(), func_id);
         }
 
         // js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader
@@ -33460,6 +33528,8 @@ fn compile_expr(
                             None // Need runtime check for union types
                         } else if info.is_pointer {
                             Some("object")
+                        } else if info.is_bigint {
+                            Some("bigint")
                         } else {
                             Some("number")
                         }
@@ -33469,6 +33539,7 @@ fn compile_expr(
                 }
                 Expr::String(_) => Some("string"),
                 Expr::Number(_) | Expr::Integer(_) => Some("number"),
+                Expr::BigInt(_) => Some("bigint"),
                 Expr::Bool(_) => Some("boolean"),
                 Expr::Undefined => Some("undefined"),
                 Expr::Null => Some("object"), // typeof null === "object"
@@ -34386,6 +34457,13 @@ pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbol
                 .map_err(|e| anyhow!("Bad triple: {}", e))?;
             let isa_builder = cranelift::codegen::isa::lookup(triple)
                 .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
+            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
+        }
+        Some("windows") => {
+            let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
+                .map_err(|e| anyhow!("Bad triple: {}", e))?;
+            let isa_builder = cranelift::codegen::isa::lookup(triple)
+                .map_err(|e| anyhow!("Failed to create Windows ISA: {}", e))?;
             isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
         }
         _ => {
