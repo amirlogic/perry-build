@@ -41,7 +41,7 @@ pub fn create(spacing: f64) -> i64 {
         ];
         let _: () = msg_send![&*stack, setAxis: 1i64]; // UILayoutConstraintAxisVertical = 1
         let _: () = msg_send![&*stack, setSpacing: spacing as objc2_core_foundation::CGFloat];
-        let _: () = msg_send![&*stack, setAlignment: 4i64]; // UIStackViewAlignmentCenter = 4
+        let _: () = msg_send![&*stack, setAlignment: 0i64]; // UIStackViewAlignmentFill = 0
         let _: () = msg_send![&*stack, setTranslatesAutoresizingMaskIntoConstraints: false];
 
         // Set layout margins for padding
@@ -63,7 +63,7 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
         ];
         let _: () = msg_send![&*stack, setAxis: 1i64];
         let _: () = msg_send![&*stack, setSpacing: spacing as objc2_core_foundation::CGFloat];
-        let _: () = msg_send![&*stack, setAlignment: 4i64];
+        let _: () = msg_send![&*stack, setAlignment: 0i64]; // UIStackViewAlignmentFill = 0
         let _: () = msg_send![&*stack, setTranslatesAutoresizingMaskIntoConstraints: false];
 
         let insets = UIEdgeInsets { top, left, bottom, right };

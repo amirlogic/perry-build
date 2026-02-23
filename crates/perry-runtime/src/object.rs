@@ -881,6 +881,10 @@ pub unsafe extern "C" fn js_native_call_method(
         "toString" => {
             if jsval.is_string() {
                 return object;
+            } else if jsval.is_bigint() {
+                let ptr = jsval.as_bigint_ptr();
+                let str_ptr = crate::bigint::js_bigint_to_string(ptr);
+                return f64::from_bits(JSValue::string_ptr(str_ptr).bits());
             } else if jsval.is_number() {
                 let n = jsval.as_number();
                 let s = if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {

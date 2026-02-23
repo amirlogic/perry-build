@@ -665,7 +665,7 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
 
         // Allocate result array with same capacity (might be smaller)
-        let result = js_array_alloc(length);
+        let mut result = js_array_alloc(length);
         let mut result_len = 0u32;
 
         for i in 0..length as usize {
@@ -673,7 +673,7 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
             let keep = js_closure_call1(callback, element);
             // Truthy check: non-zero value
             if keep != 0.0 {
-                let result = js_array_push_f64(result, element);
+                result = js_array_push_f64(result, element);
                 result_len += 1;
             }
         }
