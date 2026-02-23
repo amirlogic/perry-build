@@ -1,0 +1,18 @@
+[package]
+name = "perry-ui-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Perry UI backend for Android (JNI bridge to Android Views)"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+perry-ui = { path = "../perry-ui" }
+perry-runtime = { path = "../perry-runtime", default-features = false }
+libc = "0.2"
+jni = "0.21"
+serde_json = "1"
+itoa = "1"
+ryu = "1"
