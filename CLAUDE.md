@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.155
+**Current Version:** 0.2.157
 
 ## Workflow Requirements
 
@@ -134,6 +134,16 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.157
+- 12 new UI/system features: saveFileDialog, Alert, Sheet, Toolbar, LazyVStack, Window (multi-window), State↔TextField binding
+- App lifecycle hooks (onTerminate, onActivate), Keychain (Security.framework), local notifications (UNUserNotificationCenter)
+- setFontFamily implementation (monospaced + named fonts), string-aware preferencesSet/Get (NSString ↔ NaN-boxed strings)
+
+### v0.2.156
+- `--target web`: new perry-codegen-js crate emits JavaScript from HIR, producing self-contained HTML files
+- Web runtime maps perry/ui widgets to DOM elements (flexbox, CSS), State to reactive JS objects
+- Skips Cranelift/inline/generator transforms for web; JS engines handle closures, async, generators natively
 
 ### v0.2.155
 - 20+ new UI widgets and APIs: SecureField, ProgressView, Image, Picker, Form/Section, NavigationStack, ZStack (both macOS + iOS)

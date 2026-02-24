@@ -1,0 +1,11 @@
+[package]
+name = "perry-codegen-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JavaScript code generation backend for Perry (--target web)"
+
+[dependencies]
+perry-hir.workspace = true
+perry-types.workspace = true
+anyhow.workspace = true

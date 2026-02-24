@@ -526,6 +526,25 @@ fn inline_calls_in_expr(
                 inline_calls_in_expr(elem, func_candidates, method_candidates, local_types, next_local_id);
             }
         }
+        Expr::ArraySpread(elements) => {
+            for elem in elements {
+                match elem {
+                    perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
+                        inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id);
+                    }
+                }
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            inline_calls_in_expr(callee, func_candidates, method_candidates, local_types, next_local_id);
+            for arg in args {
+                match arg {
+                    perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
+                        inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id);
+                    }
+                }
+            }
+        }
         Expr::IndexGet { object, index } => {
             inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id);
             inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id);
@@ -824,6 +843,25 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::Array(elements) => {
             for elem in elements {
                 substitute_locals(elem, param_map, next_local_id);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for elem in elements {
+                match elem {
+                    perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
+                        substitute_locals(e, param_map, next_local_id);
+                    }
+                }
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            substitute_locals(callee, param_map, next_local_id);
+            for arg in args {
+                match arg {
+                    perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
+                        substitute_locals(e, param_map, next_local_id);
+                    }
+                }
             }
         }
         Expr::IndexGet { object, index } => {
@@ -1180,6 +1218,25 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         Expr::Array(elements) => {
             for elem in elements {
                 substitute_this(elem, obj_id);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for elem in elements {
+                match elem {
+                    perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
+                        substitute_this(e, obj_id);
+                    }
+                }
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            substitute_this(callee, obj_id);
+            for arg in args {
+                match arg {
+                    perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
+                        substitute_this(e, obj_id);
+                    }
+                }
             }
         }
         Expr::IndexGet { object, index } => {

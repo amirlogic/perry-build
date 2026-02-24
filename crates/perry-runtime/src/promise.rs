@@ -607,6 +607,17 @@ extern "C" fn promise_all_reject_handler(closure: *const crate::closure::Closure
     0.0
 }
 
+/// Await any promise value.
+/// In native-only mode (no V8), all promises are native POINTER_TAG promises.
+/// The Cranelift-generated busy-wait loop handles polling the promise state,
+/// so we just return the value as-is.
+/// In V8 mode (perry-jsruntime), this function is overridden by the V8-aware
+/// version that can also handle JS_HANDLE_TAG promises.
+#[no_mangle]
+pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
+    value
+}
+
 /// GC root scanner: mark all values reachable from promise task queues
 pub fn scan_promise_roots(mark: &mut dyn FnMut(f64)) {
     // Scan TASK_QUEUE entries

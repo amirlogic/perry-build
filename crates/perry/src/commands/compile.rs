@@ -569,6 +569,7 @@ fn collect_modules(
     enable_js_runtime: bool,
     format: OutputFormat,
     next_class_id: &mut perry_hir::ClassId,
+    skip_transforms: bool,
 ) -> Result<()> {
     let canonical = entry_path
         .canonicalize()
@@ -645,11 +646,13 @@ fn collect_modules(
     let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id(&ast_module, &module_name, &source_file_path, *next_class_id)?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
-    // Apply function inlining optimization
-    inline_functions(&mut hir_module);
+    if !skip_transforms {
+        // Apply function inlining optimization
+        inline_functions(&mut hir_module);
 
-    // Transform generator functions into state machines
-    transform_generators(&mut hir_module);
+        // Transform generator functions into state machines
+        transform_generators(&mut hir_module);
+    }
 
     // Process imports and update their resolved paths and module kinds
     for import in &mut hir_module.imports {
@@ -674,7 +677,7 @@ fn collect_modules(
             match kind {
                 ModuleKind::NativeCompiled => {
                     // Recursively collect TypeScript modules
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
                 }
                 ModuleKind::Interpreted => {
                     // Skip declaration files (.d.ts) - they only contain type information
@@ -698,7 +701,7 @@ fn collect_modules(
                     }
 
                     // Collect JS module
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
                 }
                 ModuleKind::NativeRust => {
                     // Native Rust modules are handled by stdlib
@@ -729,11 +732,11 @@ fn collect_modules(
             if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root) {
                 match kind {
                     ModuleKind::NativeCompiled => {
-                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
+                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
                     }
                     ModuleKind::Interpreted => {
                         if enable_js_runtime {
-                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id)?;
+                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
                         }
                     }
                     ModuleKind::NativeRust => {}
@@ -791,6 +794,110 @@ fn generate_js_bundle(ctx: &CompilationContext, output_dir: &Path) -> Result<Pat
     Ok(bundle_path)
 }
 
+/// Compile for web target: emit JavaScript + HTML instead of native code
+fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Text => println!("Generating JavaScript for web target..."),
+        OutputFormat::Json => {}
+    }
+
+    let entry_path = args.input.canonicalize().unwrap_or_else(|_| args.input.clone());
+
+    // Build topologically sorted module list (dependencies before dependents)
+    let mut sorted_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut path_to_deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let mut deps = Vec::new();
+            for import in &hir_module.imports {
+                if let Some(ref resolved) = import.resolved_path {
+                    let resolved_path = PathBuf::from(resolved);
+                    if ctx.native_modules.contains_key(&resolved_path) {
+                        deps.push(resolved_path);
+                    }
+                }
+            }
+            path_to_deps.insert(path.clone(), deps);
+        }
+
+        let mut visited_set: HashSet<PathBuf> = HashSet::new();
+        let mut visiting_set: HashSet<PathBuf> = HashSet::new();
+
+        fn topo_visit(
+            path: &PathBuf,
+            deps: &HashMap<PathBuf, Vec<PathBuf>>,
+            visited: &mut HashSet<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<PathBuf>,
+        ) {
+            if visited.contains(path) || visiting.contains(path) { return; }
+            visiting.insert(path.clone());
+            if let Some(module_deps) = deps.get(path) {
+                for dep in module_deps {
+                    topo_visit(dep, deps, visited, visiting, sorted);
+                }
+            }
+            visiting.remove(path);
+            visited.insert(path.clone());
+            sorted.push(path.clone());
+        }
+
+        let mut all: Vec<PathBuf> = ctx.native_modules.keys().cloned().collect();
+        all.sort();
+        for path in &all {
+            topo_visit(path, &path_to_deps, &mut visited_set, &mut visiting_set, &mut sorted_paths);
+        }
+    }
+
+    // Ensure entry module is last
+    if let Some(pos) = sorted_paths.iter().position(|p| *p == entry_path) {
+        sorted_paths.remove(pos);
+    }
+    sorted_paths.push(entry_path.clone());
+
+    // Build module list for JS codegen
+    let modules: Vec<(String, perry_hir::Module)> = sorted_paths.iter()
+        .filter_map(|path| {
+            ctx.native_modules.get(path).map(|m| (m.name.clone(), m.clone()))
+        })
+        .collect();
+
+    // Determine output title from entry filename
+    let title = args.input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Perry App");
+
+    let html = perry_codegen_js::compile_modules_to_html(&modules, title)?;
+
+    // Determine output path
+    let output_path = if let Some(ref out) = args.output {
+        if out.extension().is_none() {
+            out.with_extension("html")
+        } else {
+            out.clone()
+        }
+    } else {
+        let stem = args.input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        PathBuf::from(format!("{}.html", stem))
+    };
+
+    fs::write(&output_path, &html)?;
+
+    let file_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+    match format {
+        OutputFormat::Text => {
+            println!("Web output: {} ({:.1} KB)", output_path.display(), file_size as f64 / 1024.0);
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"size\": {}, \"target\": \"web\"}}",
+                output_path.display(), file_size);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: u8) -> Result<()> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
@@ -806,8 +913,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let mut ctx = CompilationContext::new(project_root);
     let mut visited = HashSet::new();
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
+    let skip_transforms = args.target.as_deref() == Some("web");
 
-    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, &mut next_class_id)?;
+    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, &mut next_class_id, skip_transforms)?;
 
     // Bundle extensions if --bundle-extensions specified
     let mut bundled_extensions: Vec<(PathBuf, String)> = Vec::new();
@@ -823,7 +931,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 OutputFormat::Json => {}
             }
             collect_modules(entry_path, &mut ctx, &mut visited,
-                           args.enable_js_runtime, format, &mut next_class_id)?;
+                           args.enable_js_runtime, format, &mut next_class_id, skip_transforms)?;
             bundled_extensions.push((entry_path.canonicalize()?, plugin_id.clone()));
         }
     }
@@ -884,6 +992,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             );
         }
         OutputFormat::Json => {}
+    }
+
+    // --- Web target: emit JavaScript instead of native code ---
+    if args.target.as_deref() == Some("web") {
+        return compile_for_web(&ctx, &args, format);
     }
 
     // Transform JS imports into runtime calls
@@ -1594,27 +1707,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         };
 
-        // Generate a unique object file name to handle files with same basename in different directories
-        // e.g., routes/auth.ts -> routes_auth.o, middleware/auth.ts -> middleware_auth.o
-        let obj_name = {
-            // Try to get a unique name by including parent directory
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
-            let expected_obj_name = format!("{}.o", stem);
-            if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
-                // Check if there might be a conflict (another file with same stem exists)
-                let simple_obj = PathBuf::from(&expected_obj_name);
-                let has_conflict = simple_obj.exists() || obj_paths.iter().any(|p: &PathBuf| {
-                    p.file_name().and_then(|s: &std::ffi::OsStr| s.to_str()) == Some(&expected_obj_name)
-                });
-                if has_conflict {
-                    format!("{}_{}", parent, stem)
-                } else {
-                    stem.to_string()
-                }
-            } else {
-                stem.to_string()
-            }
-        };
+        // Generate a unique object file name using the full sanitized module name.
+        // Module names are derived from relative paths and are guaranteed unique,
+        // so this avoids collisions like channels/plugins/types.ts vs plugins/types.ts.
+        let obj_name = hir_module.name
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+            .trim_matches('_')
+            .to_string();
         let obj_path = PathBuf::from(format!("{}.o", obj_name));
 
         fs::write(&obj_path, &object_code)?;
@@ -1671,10 +1770,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
         let missing: Vec<String> = undefined_syms.difference(&defined_syms).cloned().collect();
         if !missing.is_empty() {
-            let (mut md, mut mf) = (Vec::new(), Vec::new());
-            for s in &missing { if s.starts_with("__export_") { md.push(s.clone()); } else { mf.push(s.clone()); } }
-            if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions)", missing.len(), md.len(), mf.len()); for s in &missing { eprintln!("    - {}", s); } }
-            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf, target.as_deref())?;
+            let (mut md, mut mf, mut mi) = (Vec::new(), Vec::new(), Vec::new());
+            for s in &missing {
+                if s.starts_with("__export_") {
+                    md.push(s.clone());
+                } else if s == "js_await_any_promise" {
+                    // Identity stub: takes f64, returns it as-is (pass-through for standalone builds)
+                    mi.push(s.clone());
+                } else {
+                    mf.push(s.clone());
+                }
+            }
+            if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions, {} identity)", missing.len(), md.len(), mf.len(), mi.len()); for s in &missing { eprintln!("    - {}", s); } }
+            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf, &mi, target.as_deref())?;
             let stub_path = PathBuf::from("_perry_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);
@@ -1723,7 +1831,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             format!("_perry_init_{}", sanitized)
         }).collect();
         if !stub_init_names.is_empty() {
-            let stub_bytes = perry_codegen::generate_stub_object(&[], &stub_init_names, target.as_deref())?;
+            let stub_bytes = perry_codegen::generate_stub_object(&[], &stub_init_names, &[], target.as_deref())?;
             let stub_path = PathBuf::from("_perry_failed_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);

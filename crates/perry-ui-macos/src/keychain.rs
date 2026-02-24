@@ -1,0 +1,134 @@
+use std::ffi::c_void;
+
+extern "C" {
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_nanbox_string(ptr: i64) -> f64;
+}
+
+fn str_from_header(ptr: *const u8) -> &'static str {
+    if ptr.is_null() { return ""; }
+    unsafe {
+        let header = ptr as *const crate::string_header::StringHeader;
+        let len = (*header).length as usize;
+        let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
+// Security framework functions
+extern "C" {
+    fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
+    fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
+    fn SecItemDelete(query: *const c_void) -> i32;
+}
+
+/// Create a keychain query dictionary for a given key.
+unsafe fn make_query(key: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject> {
+    let dict_cls = objc2::runtime::AnyClass::get(c"NSMutableDictionary").unwrap();
+    let dict: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![dict_cls, new];
+
+    // kSecClass = kSecClassGenericPassword
+    let sec_class_key: *const c_void = *CoreFoundation_kSecClass();
+    let sec_class_val: *const c_void = *CoreFoundation_kSecClassGenericPassword();
+    let _: () = objc2::msg_send![&*dict, setObject: sec_class_val as *const objc2::runtime::AnyObject, forKey: sec_class_key as *const objc2::runtime::AnyObject];
+
+    // kSecAttrAccount = key
+    let attr_account_key: *const c_void = *CoreFoundation_kSecAttrAccount();
+    let ns_key = objc2_foundation::NSString::from_str(key);
+    let _: () = objc2::msg_send![&*dict, setObject: &*ns_key, forKey: attr_account_key as *const objc2::runtime::AnyObject];
+
+    // kSecAttrService = "perry"
+    let attr_service_key: *const c_void = *CoreFoundation_kSecAttrService();
+    let ns_service = objc2_foundation::NSString::from_str("perry");
+    let _: () = objc2::msg_send![&*dict, setObject: &*ns_service, forKey: attr_service_key as *const objc2::runtime::AnyObject];
+
+    dict
+}
+
+// Link against Security framework constants
+extern "C" {
+    #[link_name = "kSecClass"]
+    fn CoreFoundation_kSecClass() -> &'static *const c_void;
+    #[link_name = "kSecClassGenericPassword"]
+    fn CoreFoundation_kSecClassGenericPassword() -> &'static *const c_void;
+    #[link_name = "kSecAttrAccount"]
+    fn CoreFoundation_kSecAttrAccount() -> &'static *const c_void;
+    #[link_name = "kSecAttrService"]
+    fn CoreFoundation_kSecAttrService() -> &'static *const c_void;
+    #[link_name = "kSecValueData"]
+    fn CoreFoundation_kSecValueData() -> &'static *const c_void;
+    #[link_name = "kSecReturnData"]
+    fn CoreFoundation_kSecReturnData() -> &'static *const c_void;
+    #[link_name = "kSecMatchLimit"]
+    fn CoreFoundation_kSecMatchLimit() -> &'static *const c_void;
+    #[link_name = "kSecMatchLimitOne"]
+    fn CoreFoundation_kSecMatchLimitOne() -> &'static *const c_void;
+}
+
+/// Save a key-value pair to the keychain.
+pub fn save(key_ptr: *const u8, value_ptr: *const u8) {
+    let key = str_from_header(key_ptr);
+    let value = str_from_header(value_ptr);
+
+    unsafe {
+        // Delete existing entry first
+        let query = make_query(key);
+        SecItemDelete(&*query as *const _ as *const c_void);
+
+        // Add new entry
+        let dict = make_query(key);
+        let value_data: objc2::rc::Retained<objc2::runtime::AnyObject> = {
+            let ns_str = objc2_foundation::NSString::from_str(value);
+            objc2::msg_send![&*ns_str, dataUsingEncoding: 4u64] // NSUTF8StringEncoding = 4
+        };
+        let value_data_key: *const c_void = *CoreFoundation_kSecValueData();
+        let _: () = objc2::msg_send![&*dict, setObject: &*value_data, forKey: value_data_key as *const objc2::runtime::AnyObject];
+
+        SecItemAdd(&*dict as *const _ as *const c_void, std::ptr::null_mut());
+    }
+}
+
+/// Get a value from the keychain. Returns NaN-boxed string or TAG_UNDEFINED.
+pub fn get(key_ptr: *const u8) -> f64 {
+    let key = str_from_header(key_ptr);
+
+    unsafe {
+        let dict = make_query(key);
+
+        // Add kSecReturnData = true
+        let return_data_key: *const c_void = *CoreFoundation_kSecReturnData();
+        let cf_true: *const objc2::runtime::AnyObject = objc2::msg_send![
+            objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithBool: true
+        ];
+        let _: () = objc2::msg_send![&*dict, setObject: cf_true, forKey: return_data_key as *const objc2::runtime::AnyObject];
+
+        // Add kSecMatchLimit = kSecMatchLimitOne
+        let limit_key: *const c_void = *CoreFoundation_kSecMatchLimit();
+        let limit_one: *const c_void = *CoreFoundation_kSecMatchLimitOne();
+        let _: () = objc2::msg_send![&*dict, setObject: limit_one as *const objc2::runtime::AnyObject, forKey: limit_key as *const objc2::runtime::AnyObject];
+
+        let mut result: *const c_void = std::ptr::null();
+        let status = SecItemCopyMatching(&*dict as *const _ as *const c_void, &mut result);
+
+        if status == 0 && !result.is_null() {
+            // Result is NSData
+            let data = result as *const objc2::runtime::AnyObject;
+            let bytes: *const u8 = objc2::msg_send![data, bytes];
+            let length: usize = objc2::msg_send![data, length];
+
+            let str_ptr = js_string_from_bytes(bytes, length as i64);
+            js_nanbox_string(str_ptr as i64)
+        } else {
+            f64::from_bits(0x7FFC_0000_0000_0001) // TAG_UNDEFINED
+        }
+    }
+}
+
+/// Delete a value from the keychain.
+pub fn delete(key_ptr: *const u8) {
+    let key = str_from_header(key_ptr);
+    unsafe {
+        let query = make_query(key);
+        SecItemDelete(&*query as *const _ as *const c_void);
+    }
+}

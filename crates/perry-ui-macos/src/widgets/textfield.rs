@@ -159,3 +159,14 @@ pub fn set_string_value(handle: i64, text_ptr: *const u8) {
         }
     }
 }
+
+/// Set the text of a textfield from a Rust &str (used by state binding).
+pub fn set_text_str(handle: i64, text: &str) {
+    if let Some(view) = super::get_widget(handle) {
+        let ns_string = NSString::from_str(text);
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            tf.setStringValue(&ns_string);
+        }
+    }
+}

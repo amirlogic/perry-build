@@ -17,6 +17,7 @@ perry-transform.workspace = true
 perry-codegen.workspace = true
 perry-runtime.workspace = true
 perry-diagnostics.workspace = true
+perry-codegen-js.workspace = true
 
 clap.workspace = true
 anyhow.workspace = true

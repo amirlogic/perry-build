@@ -26,6 +26,10 @@ struct ToggleBinding {
     toggle_handle: i64,
 }
 
+struct TextFieldBinding {
+    textfield_handle: i64,
+}
+
 enum TextPart {
     Literal(String),
     StateRef(i64),
@@ -51,6 +55,7 @@ thread_local! {
     static TEXT_BINDINGS: RefCell<HashMap<i64, Vec<TextBinding>>> = RefCell::new(HashMap::new());
     static SLIDER_BINDINGS: RefCell<HashMap<i64, Vec<SliderBinding>>> = RefCell::new(HashMap::new());
     static TOGGLE_BINDINGS: RefCell<HashMap<i64, Vec<ToggleBinding>>> = RefCell::new(HashMap::new());
+    static TEXTFIELD_BINDINGS: RefCell<HashMap<i64, Vec<TextFieldBinding>>> = RefCell::new(HashMap::new());
     static MULTI_TEXT_BINDINGS: RefCell<Vec<MultiTextBinding>> = RefCell::new(Vec::new());
     static MULTI_TEXT_INDEX: RefCell<HashMap<i64, Vec<usize>>> = RefCell::new(HashMap::new());
     static VISIBILITY_BINDINGS: RefCell<HashMap<i64, Vec<VisibilityBinding>>> = RefCell::new(HashMap::new());
@@ -160,6 +165,15 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 let on = if value != 0.0 && !value.is_nan() { 1 } else { 0 };
                 widgets::toggle::set_state(binding.toggle_handle, on);
+            }
+        }
+    });
+
+    // Update textfield bindings (two-way)
+    TEXTFIELD_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                widgets::textfield::set_text_str(binding.textfield_handle, &formatted);
             }
         }
     });
@@ -319,6 +333,16 @@ pub fn for_each_init(container_handle: i64, state_handle: i64, render_closure: f
             .entry(state_handle)
             .or_default()
             .push(ForEachBinding { container_handle, render_closure });
+    });
+}
+
+/// Bind a textfield to a state cell (two-way binding).
+pub fn bind_textfield(state_handle: i64, textfield_handle: i64) {
+    TEXTFIELD_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(TextFieldBinding { textfield_handle });
     });
 }
 

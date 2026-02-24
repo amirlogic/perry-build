@@ -1120,8 +1120,14 @@ fn lower_module_decl(
                                         }
                                         // Check if this is a named import that returns a handle (e.g., State from perry/ui)
                                         if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
-                                            if module_name == "perry/ui" && method_name == "State" {
-                                                ctx.register_native_instance(name.clone(), module_name.to_string(), "State".to_string());
+                                            if module_name == "perry/ui" {
+                                                match method_name {
+                                                    "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                                    | "NavigationStack" | "Picker" => {
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                                    }
+                                                    _ => {}
+                                                }
                                             }
                                         }
                                     }
@@ -2172,6 +2178,10 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
                 constructor = Some(lower_constructor(ctx, &name, ctor)?);
             }
             ast::ClassMember::Method(method) => {
+                // Skip TypeScript overload declarations (no body)
+                if method.function.body.is_none() {
+                    continue;
+                }
                 // Get the property name for getters/setters
                 let prop_name = match &method.key {
                     ast::PropName::Ident(ident) => ident.sym.to_string(),
@@ -2325,6 +2335,10 @@ fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &st
                 constructor = Some(lower_constructor(ctx, name, ctor)?);
             }
             ast::ClassMember::Method(method) => {
+                // Skip TypeScript overload declarations (no body)
+                if method.function.body.is_none() {
+                    continue;
+                }
                 let prop_name = match &method.key {
                     ast::PropName::Ident(ident) => ident.sym.to_string(),
                     ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
@@ -7938,8 +7952,14 @@ fn lower_var_decl_with_destructuring(
                             }
                             // Check if this is a named import that returns a handle (e.g., State from perry/ui)
                             if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
-                                if module_name == "perry/ui" && method_name == "State" {
-                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "State".to_string());
+                                if module_name == "perry/ui" {
+                                    match method_name {
+                                        "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                        | "NavigationStack" | "Picker" => {
+                                            ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                         }
@@ -8471,8 +8491,11 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(left, refs);
             collect_local_refs_expr(right, refs);
         }
-        Expr::GlobalGet(_) | Expr::GlobalSet(_, _) => {
+        Expr::GlobalGet(_) => {
             // Global variables are not captures
+        }
+        Expr::GlobalSet(_, value) => {
+            collect_local_refs_expr(value, refs);
         }
         Expr::Object(fields) => {
             for (_, value) in fields {
@@ -8964,6 +8987,45 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         }
         Expr::JsCreateCallback { closure, .. } => {
             collect_local_refs_expr(closure, refs);
+        }
+        // Spread call expressions
+        Expr::CallSpread { callee, args, .. } => {
+            collect_local_refs_expr(callee, refs);
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_local_refs_expr(e, refs),
+                }
+            }
+        }
+        // Void operator
+        Expr::Void(inner) => {
+            collect_local_refs_expr(inner, refs);
+        }
+        // Yield expression
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value {
+                collect_local_refs_expr(v, refs);
+            }
+        }
+        // Dynamic new expression
+        Expr::NewDynamic { callee, args } => {
+            collect_local_refs_expr(callee, refs);
+            for arg in args {
+                collect_local_refs_expr(arg, refs);
+            }
+        }
+        // Object rest destructuring
+        Expr::ObjectRest { object, .. } => {
+            collect_local_refs_expr(object, refs);
+        }
+        // Fetch with options
+        Expr::FetchWithOptions { url, method, body, headers } => {
+            collect_local_refs_expr(url, refs);
+            collect_local_refs_expr(method, refs);
+            collect_local_refs_expr(body, refs);
+            for (_, v) in headers {
+                collect_local_refs_expr(v, refs);
+            }
         }
         // Catch-all for any other terminal expressions
         _ => {}
@@ -9540,8 +9602,11 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::UrlSearchParamsToString(params) => {
             collect_assigned_locals_expr(params, assigned);
         }
+        Expr::GlobalSet(_, value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
         // Terminal expressions that don't have children or don't assign
-        Expr::LocalGet(_) | Expr::GlobalGet(_) | Expr::GlobalSet(_, _) |
+        Expr::LocalGet(_) | Expr::GlobalGet(_) |
         Expr::FuncRef(_) | Expr::ExternFuncRef { .. } | Expr::ClassRef(_) |
         Expr::Number(_) | Expr::Integer(_) | Expr::Bool(_) | Expr::String(_) | Expr::BigInt(_) |
         Expr::Object(_) | Expr::TypeOf(_) | Expr::InstanceOf { .. } |
@@ -9671,6 +9736,45 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         }
         Expr::JsCreateCallback { closure, .. } => {
             collect_assigned_locals_expr(closure, assigned);
+        }
+        // Spread call expressions
+        Expr::CallSpread { callee, args, .. } => {
+            collect_assigned_locals_expr(callee, assigned);
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_assigned_locals_expr(e, assigned),
+                }
+            }
+        }
+        // Void operator
+        Expr::Void(inner) => {
+            collect_assigned_locals_expr(inner, assigned);
+        }
+        // Yield expression
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value {
+                collect_assigned_locals_expr(v, assigned);
+            }
+        }
+        // Dynamic new expression
+        Expr::NewDynamic { callee, args } => {
+            collect_assigned_locals_expr(callee, assigned);
+            for arg in args {
+                collect_assigned_locals_expr(arg, assigned);
+            }
+        }
+        // Object rest destructuring
+        Expr::ObjectRest { object, .. } => {
+            collect_assigned_locals_expr(object, assigned);
+        }
+        // Fetch with options
+        Expr::FetchWithOptions { url, method, body, headers } => {
+            collect_assigned_locals_expr(url, assigned);
+            collect_assigned_locals_expr(method, assigned);
+            collect_assigned_locals_expr(body, assigned);
+            for (_, v) in headers {
+                collect_assigned_locals_expr(v, assigned);
+            }
         }
         // Catch-all for any other terminal expressions
         _ => {}

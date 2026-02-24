@@ -16,6 +16,10 @@ pub mod picker;
 pub mod form;
 pub mod navstack;
 pub mod zstack;
+pub mod alert;
+pub mod sheet;
+pub mod toolbar;
+pub mod lazyvstack;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;

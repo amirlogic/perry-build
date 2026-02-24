@@ -577,15 +577,26 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
     }
+    extern "C" {
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+    }
     let key = str_from_header(key_ptr as *const u8);
+    let bits = value.to_bits();
     unsafe {
         let defaults_cls = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
         let defaults: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults_cls, standardUserDefaults];
         let ns_key = objc2_foundation::NSString::from_str(key);
-        let ns_num: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
-            objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: value
-        ];
-        let _: () = objc2::msg_send![defaults, setObject: &*ns_num, forKey: &*ns_key];
+        if (bits >> 48) == 0x7FFF {
+            let str_ptr = js_nanbox_get_pointer(value) as *const u8;
+            let s = str_from_header(str_ptr);
+            let ns_str = objc2_foundation::NSString::from_str(s);
+            let _: () = objc2::msg_send![defaults, setObject: &*ns_str, forKey: &*ns_key];
+        } else {
+            let ns_num: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: value
+            ];
+            let _: () = objc2::msg_send![defaults, setObject: &*ns_num, forKey: &*ns_key];
+        }
     }
 }
 
@@ -601,19 +612,191 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
     }
+    extern "C" {
+        fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+        fn js_nanbox_string(ptr: i64) -> f64;
+    }
     let key = str_from_header(key_ptr as *const u8);
     unsafe {
         let defaults_cls = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
         let defaults: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults_cls, standardUserDefaults];
         let ns_key = objc2_foundation::NSString::from_str(key);
-        let val: f64 = objc2::msg_send![defaults, doubleForKey: &*ns_key];
-        val
+        let obj: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults, objectForKey: &*ns_key];
+        if obj.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001);
+        }
+        if let Some(str_cls) = objc2::runtime::AnyClass::get(c"NSString") {
+            let is_string: bool = objc2::msg_send![obj, isKindOfClass: str_cls];
+            if is_string {
+                let ns_str: &objc2_foundation::NSString = &*(obj as *const objc2_foundation::NSString);
+                let rust_str = ns_str.to_string();
+                let bytes = rust_str.as_bytes();
+                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+                return js_nanbox_string(str_ptr as i64);
+            }
+        }
+        if let Some(num_cls) = objc2::runtime::AnyClass::get(c"NSNumber") {
+            let is_number: bool = objc2::msg_send![obj, isKindOfClass: num_cls];
+            if is_number {
+                let val: f64 = objc2::msg_send![obj, doubleValue];
+                return val;
+            }
+        }
+        f64::from_bits(0x7FFC_0000_0000_0001)
     }
 }
 
 /// Set the font family on a Text widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
-    // TODO: implement font family setting
-    let _ = (handle, family_ptr);
+    fn str_from_header(ptr: *const u8) -> &'static str {
+        if ptr.is_null() { return ""; }
+        unsafe {
+            let header = ptr as *const perry_runtime::string::StringHeader;
+            let len = (*header).length as usize;
+            let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+        }
+    }
+    let family = str_from_header(family_ptr as *const u8);
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let size: f64 = objc2::msg_send![&*view, font];
+            let size = 13.0f64; // Default size for iOS
+            let font: objc2::rc::Retained<objc2::runtime::AnyObject> = if family == "monospaced" || family == "monospace" {
+                objc2::msg_send![
+                    objc2::runtime::AnyClass::get(c"UIFont").unwrap(),
+                    monospacedSystemFontOfSize: size,
+                    weight: 0.0f64
+                ]
+            } else {
+                let ns_name = objc2_foundation::NSString::from_str(family);
+                objc2::msg_send![
+                    objc2::runtime::AnyClass::get(c"UIFont").unwrap(),
+                    fontWithName: &*ns_name,
+                    size: size
+                ]
+            };
+            let _: () = objc2::msg_send![&*view, setFont: &*font];
+        }
+    }
 }
+
+// =============================================================================
+// Save File Dialog
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_save_file_dialog(_callback: f64, _default_name: i64, _allowed_types: i64) {
+    // iOS: UIDocumentPickerViewController needed — stub for now
+}
+
+// =============================================================================
+// State TextField Binding
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_handle: i64) {
+    state::bind_textfield(state_handle, textfield_handle);
+}
+
+// =============================================================================
+// Alert Dialog
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_alert(_title: i64, _message: i64, _buttons: i64, _callback: f64) {
+    // iOS: UIAlertController — stub for now
+}
+
+// =============================================================================
+// Sheet
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_create(_width: f64, _height: f64, _title: i64) -> i64 {
+    0 // stub
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_present(_sheet: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_dismiss(_sheet: i64) {}
+
+// =============================================================================
+// App Lifecycle
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_terminate(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_activate(_callback: f64) {}
+
+// =============================================================================
+// Toolbar
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_create() -> i64 {
+    0 // stub
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_add_item(_toolbar: i64, _label: i64, _icon: i64, _callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_attach(_toolbar: i64) {}
+
+// =============================================================================
+// Keychain
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_save(_key: i64, _value: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_get(_key: i64) -> f64 {
+    f64::from_bits(0x7FFC_0000_0000_0001) // TAG_UNDEFINED
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_delete(_key: i64) {}
+
+// =============================================================================
+// Notifications
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+
+// =============================================================================
+// Multi-Window
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_create(_title: i64, _width: f64, _height: f64) -> i64 {
+    0 // stub — iOS uses UIScene for multi-window
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_body(_window: i64, _widget: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_show(_window: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_close(_window: i64) {}
+
+// =============================================================================
+// LazyVStack
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_create(_count: i64, _render: f64) -> i64 {
+    0 // stub
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_update(_handle: i64, _count: i64) {}

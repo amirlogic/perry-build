@@ -25,6 +25,16 @@ struct PendingShortcut {
     callback: f64,
 }
 
+thread_local! {
+    static ON_TERMINATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
+    static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
+    static WINDOWS: RefCell<Vec<WindowEntry>> = RefCell::new(Vec::new());
+}
+
+struct WindowEntry {
+    window: Retained<NSWindow>,
+}
+
 struct AppEntry {
     window: Retained<NSWindow>,
     _root_widget: Option<i64>,
@@ -398,4 +408,97 @@ pub fn set_timer(interval_ms: f64, callback: f64) {
         // Keep the target alive
         std::mem::forget(target);
     }
+}
+
+// ============================================
+// Lifecycle Hooks
+// ============================================
+
+/// Register an onTerminate callback.
+pub fn register_on_terminate(callback: f64) {
+    ON_TERMINATE_CALLBACK.with(|cb| {
+        *cb.borrow_mut() = Some(callback);
+    });
+}
+
+/// Register an onActivate callback.
+pub fn register_on_activate(callback: f64) {
+    ON_ACTIVATE_CALLBACK.with(|cb| {
+        *cb.borrow_mut() = Some(callback);
+    });
+}
+
+// ============================================
+// Multi-Window
+// ============================================
+
+/// Create a new window. Returns 1-based handle.
+pub fn window_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
+    let title = if title_ptr.is_null() { "Window" } else { str_from_header(title_ptr) };
+    let w = if width > 0.0 { width } else { 400.0 };
+    let h = if height > 0.0 { height } else { 300.0 };
+
+    let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+
+    unsafe {
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
+
+        let frame = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(w, h));
+
+        let window = NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+
+        let ns_title = NSString::from_str(title);
+        window.setTitle(&ns_title);
+
+        WINDOWS.with(|w| {
+            let mut windows = w.borrow_mut();
+            windows.push(WindowEntry { window });
+            windows.len() as i64
+        })
+    }
+}
+
+/// Set the root widget of a window.
+pub fn window_set_body(window_handle: i64, widget_handle: i64) {
+    WINDOWS.with(|w| {
+        let windows = w.borrow();
+        let idx = (window_handle - 1) as usize;
+        if idx < windows.len() {
+            if let Some(view) = crate::widgets::get_widget(widget_handle) {
+                windows[idx].window.setContentView(Some(&view));
+            }
+        }
+    });
+}
+
+/// Show a window (make key and order front).
+pub fn window_show(window_handle: i64) {
+    WINDOWS.with(|w| {
+        let windows = w.borrow();
+        let idx = (window_handle - 1) as usize;
+        if idx < windows.len() {
+            windows[idx].window.center();
+            windows[idx].window.makeKeyAndOrderFront(None);
+        }
+    });
+}
+
+/// Close a window.
+pub fn window_close(window_handle: i64) {
+    WINDOWS.with(|w| {
+        let windows = w.borrow();
+        let idx = (window_handle - 1) as usize;
+        if idx < windows.len() {
+            windows[idx].window.close();
+        }
+    });
 }

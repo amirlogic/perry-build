@@ -26,6 +26,10 @@ struct ToggleBinding {
     toggle_handle: i64,
 }
 
+struct TextFieldBinding {
+    textfield_handle: i64,
+}
+
 /// A part of a multi-state text template.
 enum TextPart {
     Literal(String),
@@ -55,6 +59,8 @@ thread_local! {
     static SLIDER_BINDINGS: RefCell<HashMap<i64, Vec<SliderBinding>>> = RefCell::new(HashMap::new());
     /// Map from state_handle -> toggle bindings (two-way)
     static TOGGLE_BINDINGS: RefCell<HashMap<i64, Vec<ToggleBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> textfield bindings (two-way)
+    static TEXTFIELD_BINDINGS: RefCell<HashMap<i64, Vec<TextFieldBinding>>> = RefCell::new(HashMap::new());
     /// All multi-state text bindings
     static MULTI_TEXT_BINDINGS: RefCell<Vec<MultiTextBinding>> = RefCell::new(Vec::new());
     /// Map from state_handle -> indices into MULTI_TEXT_BINDINGS
@@ -181,6 +187,15 @@ pub fn state_set(handle: i64, value: f64) {
         }
     });
 
+    // Update textfield bindings (two-way)
+    TEXTFIELD_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                widgets::textfield::set_text_str(binding.textfield_handle, &formatted);
+            }
+        }
+    });
+
     // Update visibility bindings (conditional rendering)
     VISIBILITY_BINDINGS.with(|b| {
         if let Some(bindings) = b.borrow().get(&handle) {
@@ -286,6 +301,16 @@ pub fn bind_toggle(state_handle: i64, toggle_handle: i64) {
             .entry(state_handle)
             .or_default()
             .push(ToggleBinding { toggle_handle });
+    });
+}
+
+/// Bind a textfield to a state cell (two-way binding).
+pub fn bind_textfield(state_handle: i64, textfield_handle: i64) {
+    TEXTFIELD_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(TextFieldBinding { textfield_handle });
     });
 }
 

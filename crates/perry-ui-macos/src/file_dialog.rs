@@ -46,3 +46,52 @@ pub fn open_dialog(callback: f64) {
         }
     }
 }
+
+/// Save file dialog. Calls callback with selected path (NaN-boxed string) or TAG_UNDEFINED.
+pub fn save_dialog(callback: f64, default_name_ptr: *const u8, _allowed_types_ptr: *const u8) {
+    fn str_from_header(ptr: *const u8) -> &'static str {
+        if ptr.is_null() { return ""; }
+        unsafe {
+            let header = ptr as *const crate::string_header::StringHeader;
+            let len = (*header).length as usize;
+            let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+        }
+    }
+
+    let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+    unsafe {
+        let panel_cls = objc2::runtime::AnyClass::get(c"NSSavePanel").unwrap();
+        let panel: objc2::rc::Retained<objc2::runtime::AnyObject> = msg_send![panel_cls, savePanel];
+
+        // Set default filename if provided
+        if !default_name_ptr.is_null() {
+            let name = str_from_header(default_name_ptr);
+            if !name.is_empty() {
+                let ns_name = NSString::from_str(name);
+                let _: () = msg_send![&*panel, setNameFieldStringValue: &*ns_name];
+            }
+        }
+
+        // Run modal
+        let response: isize = msg_send![&*panel, runModal];
+        let closure_ptr = js_nanbox_get_pointer(callback) as *const u8;
+
+        if response == 1 {
+            // NSModalResponseOK = 1
+            let url: *mut objc2::runtime::AnyObject = msg_send![&*panel, URL];
+            if !url.is_null() {
+                let path_str: objc2::rc::Retained<NSString> = msg_send![url, path];
+                let rust_str = path_str.to_string();
+                let bytes = rust_str.as_bytes();
+                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+                let nanboxed = js_nanbox_string(str_ptr as i64);
+                js_closure_call1(closure_ptr, nanboxed);
+            } else {
+                js_closure_call1(closure_ptr, f64::from_bits(0x7FFC_0000_0000_0001));
+            }
+        } else {
+            js_closure_call1(closure_ptr, f64::from_bits(0x7FFC_0000_0000_0001));
+        }
+    }
+}

@@ -1,7 +1,9 @@
 pub mod app;
 pub mod clipboard;
 pub mod file_dialog;
+pub mod keychain;
 pub mod menu;
+pub mod notifications;
 pub mod state;
 pub mod string_header;
 pub mod widgets;
@@ -639,7 +641,7 @@ pub extern "C" fn perry_system_is_dark_mode() -> i64 {
     }
 }
 
-/// Set a preference value (UserDefaults).
+/// Set a preference value (UserDefaults). Supports strings and numbers.
 #[no_mangle]
 pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
     fn str_from_header(ptr: *const u8) -> &'static str {
@@ -651,19 +653,31 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
     }
+    extern "C" {
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+    }
     let key = str_from_header(key_ptr as *const u8);
+    let bits = value.to_bits();
     unsafe {
         let defaults_cls = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
         let defaults: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults_cls, standardUserDefaults];
         let ns_key = objc2_foundation::NSString::from_str(key);
-        let ns_num: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
-            objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: value
-        ];
-        let _: () = objc2::msg_send![defaults, setObject: &*ns_num, forKey: &*ns_key];
+        if (bits >> 48) == 0x7FFF {
+            // NaN-boxed string — extract string pointer
+            let str_ptr = js_nanbox_get_pointer(value) as *const u8;
+            let s = str_from_header(str_ptr);
+            let ns_str = objc2_foundation::NSString::from_str(s);
+            let _: () = objc2::msg_send![defaults, setObject: &*ns_str, forKey: &*ns_key];
+        } else {
+            let ns_num: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: value
+            ];
+            let _: () = objc2::msg_send![defaults, setObject: &*ns_num, forKey: &*ns_key];
+        }
     }
 }
 
-/// Get a preference value (UserDefaults). Returns NaN-boxed value or TAG_UNDEFINED.
+/// Get a preference value (UserDefaults). Returns NaN-boxed string, number, or TAG_UNDEFINED.
 #[no_mangle]
 pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
     fn str_from_header(ptr: *const u8) -> &'static str {
@@ -675,19 +689,252 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
     }
+    extern "C" {
+        fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+        fn js_nanbox_string(ptr: i64) -> f64;
+    }
     let key = str_from_header(key_ptr as *const u8);
     unsafe {
         let defaults_cls = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
         let defaults: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults_cls, standardUserDefaults];
         let ns_key = objc2_foundation::NSString::from_str(key);
-        let val: f64 = objc2::msg_send![defaults, doubleForKey: &*ns_key];
-        val
+        let obj: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults, objectForKey: &*ns_key];
+        if obj.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001); // TAG_UNDEFINED
+        }
+        // Check if it's an NSString
+        if let Some(str_cls) = objc2::runtime::AnyClass::get(c"NSString") {
+            let is_string: bool = objc2::msg_send![obj, isKindOfClass: str_cls];
+            if is_string {
+                let ns_str: &objc2_foundation::NSString = &*(obj as *const objc2_foundation::NSString);
+                let rust_str = ns_str.to_string();
+                let bytes = rust_str.as_bytes();
+                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+                return js_nanbox_string(str_ptr as i64);
+            }
+        }
+        // Check if it's an NSNumber
+        if let Some(num_cls) = objc2::runtime::AnyClass::get(c"NSNumber") {
+            let is_number: bool = objc2::msg_send![obj, isKindOfClass: num_cls];
+            if is_number {
+                let val: f64 = objc2::msg_send![obj, doubleValue];
+                return val;
+            }
+        }
+        f64::from_bits(0x7FFC_0000_0000_0001) // TAG_UNDEFINED
     }
 }
 
 /// Set the font family on a Text widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
-    // TODO: implement font family setting
-    let _ = (handle, family_ptr);
+    fn str_from_header(ptr: *const u8) -> &'static str {
+        if ptr.is_null() { return ""; }
+        unsafe {
+            let header = ptr as *const crate::string_header::StringHeader;
+            let len = (*header).length as usize;
+            let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+        }
+    }
+    let family = str_from_header(family_ptr as *const u8);
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let tf: &objc2_app_kit::NSTextField = &*(objc2::rc::Retained::as_ptr(&view) as *const objc2_app_kit::NSTextField);
+            // Get current font size (default 13.0 if none)
+            let current_font: Option<objc2::rc::Retained<objc2_app_kit::NSFont>> = tf.font();
+            let size = current_font.as_ref().map(|f| f.pointSize()).unwrap_or(13.0);
+
+            let font: objc2::rc::Retained<objc2_app_kit::NSFont> = if family == "monospaced" || family == "monospace" {
+                objc2::msg_send![
+                    objc2::runtime::AnyClass::get(c"NSFont").unwrap(),
+                    monospacedSystemFontOfSize: size as objc2_core_foundation::CGFloat,
+                    weight: 0.0 as objc2_core_foundation::CGFloat
+                ]
+            } else {
+                let ns_name = objc2_foundation::NSString::from_str(family);
+                let result: *mut objc2_app_kit::NSFont = objc2::msg_send![
+                    objc2::runtime::AnyClass::get(c"NSFont").unwrap(),
+                    fontWithName: &*ns_name,
+                    size: size as objc2_core_foundation::CGFloat
+                ];
+                if result.is_null() {
+                    // Fallback to system font
+                    objc2::msg_send![
+                        objc2::runtime::AnyClass::get(c"NSFont").unwrap(),
+                        systemFontOfSize: size as objc2_core_foundation::CGFloat
+                    ]
+                } else {
+                    objc2::rc::Retained::retain(result).unwrap()
+                }
+            };
+            tf.setFont(Some(&font));
+        }
+    }
+}
+
+// =============================================================================
+// Save File Dialog
+// =============================================================================
+
+/// Open a save file dialog. Calls callback with selected path or undefined.
+#[no_mangle]
+pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64, allowed_types_ptr: i64) {
+    file_dialog::save_dialog(callback, default_name_ptr as *const u8, allowed_types_ptr as *const u8);
+}
+
+// =============================================================================
+// State TextField Binding (two-way)
+// =============================================================================
+
+/// Bind a TextField to a state cell (two-way binding).
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_handle: i64) {
+    state::bind_textfield(state_handle, textfield_handle);
+}
+
+// =============================================================================
+// Alert Dialog
+// =============================================================================
+
+/// Show an alert dialog. Returns button index.
+#[no_mangle]
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
+    widgets::alert::show(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr, callback);
+}
+
+// =============================================================================
+// Sheet (Modal Panel)
+// =============================================================================
+
+/// Create a sheet (panel). Returns handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_create(width: f64, height: f64, title_ptr: i64) -> i64 {
+    widgets::sheet::create(width, height, title_ptr as *const u8)
+}
+
+/// Present a sheet on the key window.
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_present(sheet_handle: i64) {
+    widgets::sheet::present(sheet_handle);
+}
+
+/// Dismiss a sheet.
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_dismiss(sheet_handle: i64) {
+    widgets::sheet::dismiss(sheet_handle);
+}
+
+// =============================================================================
+// App Lifecycle Hooks
+// =============================================================================
+
+/// Register an onTerminate callback.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
+    app::register_on_terminate(callback);
+}
+
+/// Register an onActivate callback.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_activate(callback: f64) {
+    app::register_on_activate(callback);
+}
+
+// =============================================================================
+// Toolbar
+// =============================================================================
+
+/// Create a toolbar. Returns handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_create() -> i64 {
+    widgets::toolbar::create()
+}
+
+/// Add an item to a toolbar.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_add_item(toolbar_handle: i64, label_ptr: i64, icon_ptr: i64, callback: f64) {
+    widgets::toolbar::add_item(toolbar_handle, label_ptr as *const u8, icon_ptr as *const u8, callback);
+}
+
+/// Attach a toolbar to the key window.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_attach(toolbar_handle: i64) {
+    widgets::toolbar::attach(toolbar_handle);
+}
+
+// =============================================================================
+// Keychain (perry/system)
+// =============================================================================
+
+/// Save a value to the keychain.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_save(key_ptr: i64, value_ptr: i64) {
+    crate::keychain::save(key_ptr as *const u8, value_ptr as *const u8);
+}
+
+/// Get a value from the keychain. Returns NaN-boxed string or TAG_UNDEFINED.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_get(key_ptr: i64) -> f64 {
+    crate::keychain::get(key_ptr as *const u8)
+}
+
+/// Delete a value from the keychain.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
+    crate::keychain::delete(key_ptr as *const u8);
+}
+
+// =============================================================================
+// Notifications (perry/system)
+// =============================================================================
+
+/// Send a local notification.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
+    crate::notifications::send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+// =============================================================================
+// Multi-Window
+// =============================================================================
+
+/// Create a new window. Returns window handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_create(title_ptr: i64, width: f64, height: f64) -> i64 {
+    app::window_create(title_ptr as *const u8, width, height)
+}
+
+/// Set the root widget of a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_body(window_handle: i64, widget_handle: i64) {
+    app::window_set_body(window_handle, widget_handle);
+}
+
+/// Show a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_show(window_handle: i64) {
+    app::window_show(window_handle);
+}
+
+/// Close a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_close(window_handle: i64) {
+    app::window_close(window_handle);
+}
+
+// =============================================================================
+// LazyVStack (Virtualized List)
+// =============================================================================
+
+/// Create a LazyVStack with row count and render closure. Returns handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_create(count: i64, render_closure: f64) -> i64 {
+    widgets::lazyvstack::create(count, render_closure)
+}
+
+/// Update the row count of a LazyVStack.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
+    widgets::lazyvstack::update_count(handle, count);
 }

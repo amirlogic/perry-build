@@ -123,3 +123,13 @@ pub fn set_string_value(handle: i64, text_ptr: *const u8) {
         }
     }
 }
+
+/// Set the text of a UITextField from a Rust string slice.
+pub fn set_text_str(handle: i64, text: &str) {
+    if let Some(view) = super::get_widget(handle) {
+        let ns_string = NSString::from_str(text);
+        unsafe {
+            let _: () = msg_send![&*view, setText: &*ns_string];
+        }
+    }
+}

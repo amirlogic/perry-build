@@ -37,6 +37,7 @@ pub mod child_process;
 pub mod net;
 pub mod json;
 pub mod static_plugins;
+pub mod stdlib_stubs;
 #[cfg(feature = "full")]
 pub mod redis_client;
 #[cfg(feature = "full")]

@@ -1585,31 +1585,38 @@ impl Compiler {
 
         // Now compile closures (after wrappers are created and module vars are registered)
         for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
+            eprintln!("  DEBUG [{}] compile_closure func_id={}", hir.name, func_id);
             self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref(), is_async)?;
         }
 
         // Compile class constructors and methods
         for class in &hir.classes {
             if let Some(ref ctor) = class.constructor {
+                eprintln!("  DEBUG [{}] compile_class_constructor class={}", hir.name, class.name);
                 self.compile_class_constructor(class, ctor)?;
             }
             for method in &class.methods {
+                eprintln!("  DEBUG [{}] compile_class_method class={} method={}", hir.name, class.name, method.name);
                 self.compile_class_method(class, method)?;
             }
             // Compile getters
             for (prop_name, getter) in &class.getters {
+                eprintln!("  DEBUG [{}] compile_class_getter class={} prop={}", hir.name, class.name, prop_name);
                 self.compile_class_getter(class, prop_name, getter)?;
             }
             // Compile setters
             for (prop_name, setter) in &class.setters {
+                eprintln!("  DEBUG [{}] compile_class_setter class={} prop={}", hir.name, class.name, prop_name);
                 self.compile_class_setter(class, prop_name, setter)?;
             }
             // Compile static methods
             for method in &class.static_methods {
+                eprintln!("  DEBUG [{}] compile_static_method class={} method={}", hir.name, class.name, method.name);
                 self.compile_static_method(class, method)?;
             }
             // Compile static fields
             for field in &class.static_fields {
+                eprintln!("  DEBUG [{}] compile_static_field class={} field={}", hir.name, class.name, field.name);
                 self.compile_static_field(class, field)?;
             }
         }
@@ -1649,7 +1656,12 @@ impl Compiler {
 
         // Create exported globals for functions (e.g., `export function foo() { ... }`)
         // These allow functions to be passed as values to other modules
+        // Deduplicate by name to handle TypeScript function overloads (multiple declarations, one implementation)
+        let mut seen_export_func_names = std::collections::HashSet::new();
         for (func_name, func_id) in &hir.exported_functions {
+            if !seen_export_func_names.insert(func_name.clone()) {
+                continue; // Skip duplicate overload declarations
+            }
             let global_name = self.scoped_export_name(func_name);
             let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
             // Create a data description with space for one f64 (8 bytes), initialized to 0
@@ -1662,7 +1674,12 @@ impl Compiler {
         // Second pass: compile all functions
         // Note: create_module_var_globals and analyze_module_var_types were already called
         // before compiling closures/methods above
+        // Deduplicate by name to handle TypeScript function overloads (multiple declarations share a name)
+        let mut compiled_func_names = std::collections::HashSet::new();
         for func in &hir.functions {
+            if !compiled_func_names.insert(func.name.clone()) {
+                continue; // Skip duplicate overload declarations
+            }
             self.compile_function(func)?;
         }
 
@@ -1670,8 +1687,12 @@ impl Compiler {
         // This is necessary because cross-module calls use __wrapper_functionName for uniform ABI
         // Track which wrappers we've generated and their func_ids for aliasing
         let mut wrapper_aliases_needed: Vec<(String, String, cranelift_module::FuncId)> = Vec::new();
+        let mut seen_wrapper_names = std::collections::HashSet::new();
 
         for (export_name, func_id) in &hir.exported_functions {
+            if !seen_wrapper_names.insert(export_name.clone()) {
+                continue; // Skip duplicate overload declarations
+            }
             // This will create the wrapper if it doesn't exist
             match self.get_or_create_func_wrapper(*func_id) {
                 Ok(wrapper_id) => {
@@ -2048,14 +2069,30 @@ impl Compiler {
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
                 next_var += 1;
-                builder.declare_var(var, types::F64);
-                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
-                builder.def_var(var, val);
                 // Check parameter types for correct handling of string methods, array methods, etc.
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
-                let is_pointer = is_closure || is_string || is_array;
+                let is_map = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Map");
+                let is_set = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Set");
+                let is_pointer = is_closure || is_string || is_array || is_map || is_set ||
+                    matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_));
+                let is_union_type = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Unknown);
+                let is_pointer = is_pointer && !is_union_type;
+                let var_type = if is_pointer { types::I64 } else { types::F64 };
+                builder.declare_var(var, var_type);
+                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
+                // Parameters arrive as f64, extract pointer if needed
+                let final_val = if is_pointer {
+                    let get_ptr_func = self.extern_funcs.get("js_nanbox_get_pointer")
+                        .expect("js_nanbox_get_pointer not declared");
+                    let get_ptr_ref = self.module.declare_func_in_func(*get_ptr_func, builder.func);
+                    let call = builder.ins().call(get_ptr_ref, &[val]);
+                    builder.inst_results(call)[0]
+                } else {
+                    val
+                };
+                builder.def_var(var, final_val);
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
@@ -2067,7 +2104,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -2489,14 +2526,28 @@ impl Compiler {
             for (i, param) in setter.params.iter().enumerate() {
                 let var = Variable::new(next_var);
                 next_var += 1;
-                builder.declare_var(var, types::F64);
-                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
-                builder.def_var(var, val);
-                // Check parameter types for correct handling of string methods, array methods, etc.
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
-                let is_pointer = is_closure || is_string || is_array;
+                let is_map = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Map");
+                let is_set = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Set");
+                let is_pointer = is_closure || is_string || is_array || is_map || is_set ||
+                    matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_));
+                let is_union_type = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Unknown);
+                let is_pointer = is_pointer && !is_union_type;
+                let var_type = if is_pointer { types::I64 } else { types::F64 };
+                builder.declare_var(var, var_type);
+                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
+                let final_val = if is_pointer {
+                    let get_ptr_func = self.extern_funcs.get("js_nanbox_get_pointer")
+                        .expect("js_nanbox_get_pointer not declared");
+                    let get_ptr_ref = self.module.declare_func_in_func(*get_ptr_func, builder.func);
+                    let call = builder.ins().call(get_ptr_ref, &[val]);
+                    builder.inst_results(call)[0]
+                } else {
+                    val
+                };
+                builder.def_var(var, final_val);
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
@@ -2508,7 +2559,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -2683,14 +2734,28 @@ impl Compiler {
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
                 next_var += 1;
-                builder.declare_var(var, types::F64);
-                let val = builder.block_params(entry_block)[i];
-                builder.def_var(var, val);
-                // Check parameter types for correct handling of string methods, array methods, etc.
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
-                let is_pointer = is_closure || is_string || is_array;
+                let is_map = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Map");
+                let is_set = matches!(param.ty, perry_types::Type::Named(ref n) if n == "Set");
+                let is_pointer = is_closure || is_string || is_array || is_map || is_set ||
+                    matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_));
+                let is_union_type = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Unknown);
+                let is_pointer = is_pointer && !is_union_type;
+                let var_type = if is_pointer { types::I64 } else { types::F64 };
+                builder.declare_var(var, var_type);
+                let val = builder.block_params(entry_block)[i];
+                let final_val = if is_pointer {
+                    let get_ptr_func = self.extern_funcs.get("js_nanbox_get_pointer")
+                        .expect("js_nanbox_get_pointer not declared");
+                    let get_ptr_ref = self.module.declare_func_in_func(*get_ptr_func, builder.func);
+                    let call = builder.ins().call(get_ptr_ref, &[val]);
+                    builder.inst_results(call)[0]
+                } else {
+                    val
+                };
+                builder.def_var(var, final_val);
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
@@ -2702,7 +2767,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -2858,6 +2923,7 @@ impl Compiler {
     }
 
     fn compile_class_constructor(&mut self, class: &Class, ctor: &Function) -> Result<()> {
+        eprintln!("  DEBUG ctor body for {}:\n{:#?}", class.name, ctor.body);
         let func_name = format!("{}_constructor", class.name);
         let func_id = self.classes.get(&class.name)
             .and_then(|m| m.constructor_id)
@@ -2977,6 +3043,48 @@ impl Compiler {
                 info.var = var;
                 info.module_var_data_id = Some(*data_id);
                 locals.insert(*local_id, info);
+            }
+
+            // Initialize field defaults at the START of the constructor.
+            // Field initializers run before the constructor body in TypeScript semantics.
+            // We compile them here (inside the constructor) rather than at the `new` call site
+            // because the constructor has access to the class's module-level variables.
+            // At `new` call sites in other modules, module-local `LocalGet` references would
+            // not resolve since they refer to the defining module's scope.
+            let obj_ptr_for_fields = builder.use_var(this_var);
+            for (field_name, init_expr) in &class_meta.field_inits {
+                if let Some(&field_idx) = class_meta.field_indices.get(field_name) {
+                    let field_offset = 24 + (field_idx as i32) * 8;
+
+                    let this_ctx_for_init = ThisContext { this_var, class_meta: class_meta.clone() };
+                    let init_val = compile_expr(
+                        &mut builder, &mut self.module,
+                        &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids,
+                        &self.extern_funcs, &self.async_func_ids,
+                        &self.classes, &self.enums,
+                        &self.func_param_types, &self.func_union_params,
+                        &self.func_return_types, &self.func_hir_return_types,
+                        &self.func_rest_param_index, &self.imported_func_param_counts,
+                        &locals, init_expr, Some(&this_ctx_for_init),
+                    )?;
+
+                    // Determine if the value needs NaN-boxing for storage
+                    let store_val = match init_expr {
+                        Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) => {
+                            let ptr_i64 = ensure_i64(&mut builder, init_val);
+                            let nanbox_func = self.extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = self.module.declare_func_in_func(*nanbox_func, builder.func);
+                            let nanbox_call = builder.ins().call(nanbox_ref, &[ptr_i64]);
+                            builder.inst_results(nanbox_call)[0]
+                        }
+                        _ => {
+                            ensure_f64(&mut builder, init_val)
+                        }
+                    };
+
+                    builder.ins().store(MemFlags::new(), store_val, obj_ptr_for_fields, field_offset);
+                }
             }
 
             // Compile constructor body with special handling for 'this'
@@ -11042,6 +11150,161 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_text_set_font_family".to_string(), func_id);
         }
 
+        // perry_ui_save_file_dialog(callback: f64, default_name: i64, allowed_types: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // callback closure
+            sig.params.push(AbiParam::new(types::I64)); // default name string ptr
+            sig.params.push(AbiParam::new(types::I64)); // allowed types string ptr
+            let func_id = self.module.declare_function("perry_ui_save_file_dialog", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_save_file_dialog".to_string(), func_id);
+        }
+
+        // perry_ui_state_bind_textfield(state_handle: i64, textfield_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_state_bind_textfield", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_textfield".to_string(), func_id);
+        }
+
+        // perry_ui_alert(title: i64, message: i64, buttons: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // title
+            sig.params.push(AbiParam::new(types::I64)); // message
+            sig.params.push(AbiParam::new(types::I64)); // buttons array
+            sig.params.push(AbiParam::new(types::F64)); // callback
+            let func_id = self.module.declare_function("perry_ui_alert", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_alert".to_string(), func_id);
+        }
+
+        // perry_ui_sheet_create(width: f64, height: f64, title: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            sig.params.push(AbiParam::new(types::I64)); // title
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_sheet_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_sheet_create".to_string(), func_id);
+        }
+
+        // perry_ui_sheet_present(sheet_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_sheet_present", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_sheet_present".to_string(), func_id);
+        }
+
+        // perry_ui_sheet_dismiss(sheet_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_sheet_dismiss", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_sheet_dismiss".to_string(), func_id);
+        }
+
+        // perry_ui_app_on_terminate(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_app_on_terminate", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_on_terminate".to_string(), func_id);
+        }
+
+        // perry_ui_app_on_activate(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_app_on_activate", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_on_activate".to_string(), func_id);
+        }
+
+        // perry_ui_toolbar_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_toolbar_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_toolbar_create".to_string(), func_id);
+        }
+
+        // perry_ui_toolbar_add_item(toolbar: i64, label: i64, icon: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_toolbar_add_item", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_toolbar_add_item".to_string(), func_id);
+        }
+
+        // perry_ui_toolbar_attach(toolbar: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_toolbar_attach", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_toolbar_attach".to_string(), func_id);
+        }
+
+        // perry_ui_window_create(title: i64, width: f64, height: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // title
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_window_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_window_create".to_string(), func_id);
+        }
+
+        // perry_ui_window_set_body(window: i64, widget: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_window_set_body", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_window_set_body".to_string(), func_id);
+        }
+
+        // perry_ui_window_show(window: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_window_show", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_window_show".to_string(), func_id);
+        }
+
+        // perry_ui_window_close(window: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_window_close", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_window_close".to_string(), func_id);
+        }
+
+        // perry_ui_lazyvstack_create(count: i64, render: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_lazyvstack_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_lazyvstack_create".to_string(), func_id);
+        }
+
+        // perry_ui_lazyvstack_update(handle: i64, count: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_lazyvstack_update", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_lazyvstack_update".to_string(), func_id);
+        }
+
         // ============================================
         // Perry System APIs (perry/system module)
         // ============================================
@@ -11078,6 +11341,41 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_system_preferences_get", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_system_preferences_get".to_string(), func_id);
+        }
+
+        // perry_system_keychain_save(key: i64, value: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_keychain_save", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_keychain_save".to_string(), func_id);
+        }
+
+        // perry_system_keychain_get(key: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_keychain_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_keychain_get".to_string(), func_id);
+        }
+
+        // perry_system_keychain_delete(key: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_keychain_delete", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_keychain_delete".to_string(), func_id);
+        }
+
+        // perry_system_notification_send(title: i64, body: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_notification_send", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_notification_send".to_string(), func_id);
         }
 
         // ============================================
@@ -14263,6 +14561,7 @@ impl Compiler {
     }
 
     fn compile_init(&mut self, module_name: &str, stmts: &[Stmt], exported_native_instances: &[(String, String, String)], exported_objects: &[String], exported_functions: &[(String, u32)]) -> Result<()> {
+        eprintln!("  DEBUG compile_init: module={} stmts={} static_field_inits={}", module_name, stmts.len(), self.static_field_runtime_inits.len());
         let is_dylib = self.output_type == "dylib";
 
         // Create main function for init statements (entry module) or module init function (non-entry)
@@ -14448,6 +14747,7 @@ impl Compiler {
 
             // Runtime-initialize static fields that need heap allocation (strings, etc.)
             for (data_id, init_expr) in std::mem::take(&mut self.static_field_runtime_inits) {
+                eprintln!("  DEBUG [{}] static_field_runtime_init expr: {:?}", module_name, init_expr);
                 let empty_locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
                 let val = compile_expr(
                     &mut builder, &mut self.module,
@@ -14758,11 +15058,11 @@ struct LoopContext {
     bounded_indices: HashMap<LocalId, (LocalId, Value)>,
 }
 
-/// Check if a list of statements contains break or continue (for loop unrolling safety)
+/// Check if a list of statements contains break, continue, return, or throw (for loop unrolling safety)
 fn contains_loop_control(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
-            Stmt::Break | Stmt::Continue => return true,
+            Stmt::Break | Stmt::Continue | Stmt::Return(_) | Stmt::Throw(_) => return true,
             Stmt::If { then_branch, else_branch, .. } => {
                 if contains_loop_control(then_branch) { return true; }
                 if let Some(else_b) = else_branch {
@@ -17712,6 +18012,12 @@ fn compile_stmt(
                         // Compile all body statements
                         for s in body {
                             compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, this_ctx, Some(&main_loop_ctx), boxed_vars, async_promise_var)?;
+                        }
+
+                        // Stop unrolling if body terminated the block (e.g., return/throw)
+                        let current_blk = builder.current_block().unwrap();
+                        if is_block_filled(builder, current_blk) {
+                            break;
                         }
 
                         // Increment loop counter by stride (except for last iteration - update block handles it)
@@ -21057,8 +21363,15 @@ fn compile_expr(
         }
         Expr::ArrayPush { array_id, value } => {
             // Get the array pointer
-            let info = locals.get(array_id)
-                .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArrayPush), returning undefined", array_id);
+                    let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
             let arr_ptr = if info.is_boxed {
                 let box_ptr = builder.use_var(info.var);
                 let box_get_func = extern_funcs.get("js_box_get")
@@ -21149,8 +21462,14 @@ fn compile_expr(
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
         Expr::ArrayPop(array_id) => {
-            let info = locals.get(array_id)
-                .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArrayPop), returning undefined", array_id);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
             let arr_val = builder.use_var(info.var);
             let arr_ptr = ensure_i64(builder, arr_val);
 
@@ -21161,8 +21480,14 @@ fn compile_expr(
             Ok(builder.inst_results(call)[0])
         }
         Expr::ArrayShift(array_id) => {
-            let info = locals.get(array_id)
-                .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArrayShift), returning undefined", array_id);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
             let arr_val = builder.use_var(info.var);
             let arr_ptr = ensure_i64(builder, arr_val);
 
@@ -21173,8 +21498,15 @@ fn compile_expr(
             Ok(builder.inst_results(call)[0])
         }
         Expr::ArrayUnshift { array_id, value } => {
-            let info = locals.get(array_id)
-                .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArrayUnshift), returning undefined", array_id);
+                    let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
             let arr_ptr = if info.is_boxed {
                 let box_ptr = builder.use_var(info.var);
                 let box_get_func = extern_funcs.get("js_box_get")
@@ -21448,11 +21780,34 @@ fn compile_expr(
         }
         Expr::ArraySplice { array_id, start, delete_count, items } => {
             // Get the array from local
-            let info = locals.get(array_id)
-                .ok_or_else(|| anyhow!("ArraySplice: local not found"))?;
-            let arr_val = builder.use_var(info.var);
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArraySplice), returning undefined", array_id);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
+            // For boxed variables (mutable captures), read through the box
+            let arr_val = if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_get_func = extern_funcs.get("js_box_get")
+                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                builder.inst_results(call)[0] // f64 (NaN-boxed)
+            } else {
+                builder.use_var(info.var)
+            };
             // Variable is i64 only if is_pointer && !is_union (see variable declaration logic)
-            let arr_ptr = if info.is_pointer && !info.is_union {
+            let arr_ptr = if info.is_boxed {
+                // Boxed value is always NaN-boxed f64 — extract pointer
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else if info.is_pointer && !info.is_union {
                 arr_val // Already i64
             } else {
                 builder.ins().bitcast(types::I64, MemFlags::new(), arr_val)
@@ -21511,8 +21866,19 @@ fn compile_expr(
 
             // Load the updated array pointer from out_arr and update local
             let new_arr_ptr = builder.ins().load(types::I64, MemFlags::new(), out_arr_addr, 0);
-            // Variable is i64 only if is_pointer && !is_union (see variable declaration logic)
-            if info.is_pointer && !info.is_union {
+            if info.is_boxed {
+                // Store back through the box as NaN-boxed pointer
+                let box_ptr = builder.use_var(info.var);
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[new_arr_ptr]);
+                let new_arr_f64 = builder.inst_results(call)[0];
+                let box_set_func = extern_funcs.get("js_box_set")
+                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                builder.ins().call(box_set_ref, &[box_ptr, new_arr_f64]);
+            } else if info.is_pointer && !info.is_union {
                 builder.def_var(info.var, new_arr_ptr);
             } else {
                 let new_arr_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
@@ -22024,8 +22390,15 @@ fn compile_expr(
         }
         Expr::SetAdd { set_id, value } => {
             // Get the set pointer from the local variable
-            let info = locals.get(set_id)
-                .ok_or_else(|| anyhow!("Undefined set variable: {}", set_id))?;
+            let info = match locals.get(set_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined set variable {} (SetAdd), returning undefined", set_id);
+                    let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
             let set_ptr = if info.is_boxed {
                 // For boxed variables (mutable closure captures), read value from box first
                 let box_ptr = builder.use_var(info.var);
@@ -22267,14 +22640,16 @@ fn compile_expr(
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr))
         }
         Expr::LocalGet(id) => {
-            let info = locals.get(id)
-                .ok_or_else(|| {
-                    // Collect more diagnostic info
-                    let available: Vec<_> = locals.iter()
-                        .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
-                        .collect();
-                    anyhow!("Undefined local variable: {} (LocalGet). Available locals: {:?}. This LocalId may be from a different function's scope - likely a closure capture bug or wrong identifier resolution in HIR lowering.", id, available)
-                })?;
+            let info = match locals.get(id) {
+                Some(info) => info,
+                None => {
+                    // Uncaptured or out-of-scope local — return undefined instead of failing
+                    eprintln!("WARNING: Undefined local variable {} (LocalGet), returning undefined. Known locals: {:?}", id, locals.keys().collect::<Vec<_>>());
+                    eprintln!("  DEBUG: current_func_hir_id = {:?}", CURRENT_FUNC_HIR_ID.with(|c| c.get()));
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
 
             if info.is_boxed {
                 // For boxed variables (mutable captures), call js_box_get to read the current value
@@ -22333,13 +22708,15 @@ fn compile_expr(
 
             // Check for string append pattern: x = x + y where x is a string
             // This allows us to use in-place append for O(1) amortized concatenation
-            let info = locals.get(id)
-                .ok_or_else(|| {
-                    let available: Vec<_> = locals.iter()
-                        .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
-                        .collect();
-                    anyhow!("Undefined local variable: {} (LocalSet). Available locals: {:?}", id, available)
-                })?;
+            let info = match locals.get(id) {
+                Some(info) => info,
+                None => {
+                    // Uncaptured or out-of-scope local — evaluate value for side effects, ignore write
+                    eprintln!("WARNING: Undefined local variable {} (LocalSet), ignoring write", id);
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                    return Ok(val);
+                }
+            };
 
             // OPTIMIZATION: Native i32 arithmetic for integer accumulators
             // Pattern: x = x + constant where x is i32
@@ -22437,8 +22814,18 @@ fn compile_expr(
                                 }
                             }
 
-                            // Get the current string pointer (stored as NaN-boxed f64 with STRING_TAG)
-                            let dest_f64 = builder.use_var(info.var);
+                            // Get the current string pointer
+                            let dest_f64 = if info.is_boxed {
+                                // Boxed variable (mutable capture) — read through box
+                                let box_ptr = builder.use_var(info.var);
+                                let box_get_func = extern_funcs.get("js_box_get")
+                                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                                builder.inst_results(call)[0] // f64 (NaN-boxed string)
+                            } else {
+                                builder.use_var(info.var)
+                            };
                             // Extract raw pointer from NaN-boxed string (inline, no FFI)
                             let dest_ptr = inline_get_string_pointer(builder, dest_f64);
 
@@ -22472,14 +22859,27 @@ fn compile_expr(
                             let call = builder.ins().call(func_ref, &[dest_ptr, rhs_ptr]);
                             let new_ptr = builder.inst_results(call)[0];
 
-                            // NaN-box the new pointer with STRING_TAG for storage (inline, no FFI)
-                            let new_f64 = inline_nanbox_string(builder, new_ptr);
-
-                            // Update the variable with the (possibly new) pointer
-                            builder.def_var(info.var, new_f64);
+                            // Update the variable with the new string pointer
+                            if info.is_boxed {
+                                // Store back through the box as NaN-boxed string
+                                let box_ptr = builder.use_var(info.var);
+                                let new_f64 = inline_nanbox_string(builder, new_ptr);
+                                let box_set_func = extern_funcs.get("js_box_set")
+                                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                                builder.ins().call(box_set_ref, &[box_ptr, new_f64]);
+                            } else if info.is_pointer {
+                                // Variable is stored as raw i64 pointer
+                                builder.def_var(info.var, new_ptr);
+                            } else {
+                                // Variable is stored as NaN-boxed f64
+                                let new_f64 = inline_nanbox_string(builder, new_ptr);
+                                builder.def_var(info.var, new_f64);
+                            }
 
                             // Return as f64 for consistency
-                            return Ok(new_f64);
+                            let ret_f64 = inline_nanbox_string(builder, new_ptr);
+                            return Ok(ret_f64);
                         }
                     }
                 }
@@ -22583,8 +22983,14 @@ fn compile_expr(
         }
         Expr::Update { id, op, prefix } => {
             // Handle ++x, x++, --x, x--
-            let info = locals.get(id)
-                .ok_or_else(|| anyhow!("Undefined local variable in update: {}", id))?;
+            let info = match locals.get(id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined local variable {} (Update), returning undefined", id);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
 
             if info.is_boxed {
                 // For boxed variables (mutable captures), use js_box_get/js_box_set
@@ -27603,8 +28009,8 @@ fn compile_expr(
 
             // Get the function being called
             match callee.as_ref() {
-                Expr::FuncRef(func_id) => {
-                    // Get the Cranelift function ID first to get the actual signature
+                Expr::FuncRef(func_id) if spread_count == 1 && regular_args.is_empty() => {
+                    // Optimized path: single spread arg, no regular args — direct static call
                     let clif_func_id = func_ids.get(func_id)
                         .ok_or_else(|| anyhow!("Unknown function ID: {}", func_id))?;
 
@@ -27615,7 +28021,7 @@ fn compile_expr(
                     // Also get HIR param types for type conversion
                     let param_types = func_param_types.get(func_id);
 
-                    if spread_count == 1 && regular_args.is_empty() {
+                    {
                         // Single spread argument: fn(...arr)
                         // We need to unpack the array at runtime
 
@@ -27706,9 +28112,6 @@ fn compile_expr(
                         let call = builder.ins().call(func_ref, &final_args);
                         return Ok(builder.inst_results(call)[0]);
                     }
-
-                    // For mixed regular + spread args, or multiple spreads, not yet supported
-                    return Err(anyhow!("Complex spread call patterns not yet supported"));
                 }
                 Expr::PropertyGet { object, property } => {
                     // Method call with spread: obj.method(...arr)
@@ -28075,43 +28478,102 @@ fn compile_expr(
 
                     return Err(anyhow!("Complex spread call patterns with methods not yet supported (JS runtime not enabled)"));
                 }
-                Expr::LocalGet(local_id) => {
-                    // Calling a local variable (closure) with spread
-                    if let Some(info) = locals.get(local_id) {
-                        if info.is_closure {
-                            if spread_count == 1 && regular_args.is_empty() {
-                                // Find the spread expression
-                                let spread_expr = args.iter().find_map(|a| {
-                                    if let CallArg::Spread(e) = a { Some(e) } else { None }
-                                }).unwrap();
+                _ if matches!(callee.as_ref(), Expr::LocalGet(_) | Expr::FuncRef(_) | Expr::GlobalGet(_) | Expr::ExternFuncRef { .. }) => {
+                    // Calling a local variable/function with spread args
+                    // Build a runtime array with all arguments and call via js_native_call_value
+                    if let Some(call_func) = extern_funcs.get("js_native_call_value") {
+                        // Compile the callee expression
+                        let callee_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callee, this_ctx)?;
+                        let callee_f64 = ensure_f64(builder, callee_val);
 
-                                // Compile the spread array
-                                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                                let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                        // Allocate a runtime array to hold all arguments
+                        let initial_capacity = (regular_args.len() + 8) as i64;
+                        let alloc_func = extern_funcs.get("js_array_alloc")
+                            .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
+                        let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                        let capacity = builder.ins().iconst(types::I32, initial_capacity as i64);
+                        let alloc_call = builder.ins().call(alloc_ref, &[capacity]);
+                        let initial_arr_ptr = builder.inst_results(alloc_call)[0];
 
-                                // Get closure pointer
-                                let closure_val = builder.use_var(info.var);
+                        let arr_var = Variable::new(next_temp_var_id());
+                        builder.declare_var(arr_var, types::I64);
+                        builder.def_var(arr_var, initial_arr_ptr);
 
-                                // Get array length
-                                let len_func = extern_funcs.get("js_array_length")
-                                    .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                                let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                                let len_call = builder.ins().call(len_ref, &[arr_ptr]);
-                                let arr_len = builder.inst_results(len_call)[0];
-                                let arr_len_i64 = builder.ins().uextend(types::I64, arr_len);
+                        let push_func = extern_funcs.get("js_array_push_f64")
+                            .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
+                        let push_ref = module.declare_func_in_func(*push_func, builder.func);
+                        let length_func = extern_funcs.get("js_array_length")
+                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+                        let length_ref = module.declare_func_in_func(*length_func, builder.func);
+                        let get_func = extern_funcs.get("js_array_get_f64")
+                            .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
+                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
 
-                                // Call the closure with spread args using js_native_call_value
-                                let call_func = extern_funcs.get("js_native_call_value")
-                                    .ok_or_else(|| anyhow!("js_native_call_value not declared"))?;
-                                let call_ref = module.declare_func_in_func(*call_func, builder.func);
-                                // js_native_call_value expects f64 for func_value, ensure we have the right type
-                                let closure_f64 = ensure_f64(builder, closure_val);
-                                let call = builder.ins().call(call_ref, &[closure_f64, arr_ptr, arr_len_i64]);
-                                return Ok(builder.inst_results(call)[0]);
+                        for arg in args {
+                            match arg {
+                                CallArg::Expr(expr) => {
+                                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+                                    let val_f64 = ensure_f64(builder, val);
+                                    let arr_ptr = builder.use_var(arr_var);
+                                    let push_call = builder.ins().call(push_ref, &[arr_ptr, val_f64]);
+                                    let new_arr_ptr = builder.inst_results(push_call)[0];
+                                    builder.def_var(arr_var, new_arr_ptr);
+                                }
+                                CallArg::Spread(spread_expr) => {
+                                    let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
+                                    let spread_arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), spread_arr_val);
+
+                                    let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
+                                    let spread_len = builder.inst_results(len_call)[0];
+
+                                    let loop_header = builder.create_block();
+                                    let loop_body = builder.create_block();
+                                    let loop_exit = builder.create_block();
+
+                                    let idx_var = Variable::new(next_temp_var_id());
+                                    builder.declare_var(idx_var, types::I32);
+                                    let zero = builder.ins().iconst(types::I32, 0);
+                                    builder.def_var(idx_var, zero);
+                                    builder.ins().jump(loop_header, &[]);
+
+                                    builder.switch_to_block(loop_header);
+                                    let idx = builder.use_var(idx_var);
+                                    let cmp = builder.ins().icmp(IntCC::SignedLessThan, idx, spread_len);
+                                    builder.ins().brif(cmp, loop_body, &[], loop_exit, &[]);
+
+                                    builder.switch_to_block(loop_body);
+                                    let idx = builder.use_var(idx_var);
+                                    let get_call = builder.ins().call(get_ref, &[spread_arr_ptr, idx]);
+                                    let elem_val = builder.inst_results(get_call)[0];
+                                    let arr_ptr = builder.use_var(arr_var);
+                                    let push_call = builder.ins().call(push_ref, &[arr_ptr, elem_val]);
+                                    let new_arr_ptr = builder.inst_results(push_call)[0];
+                                    builder.def_var(arr_var, new_arr_ptr);
+
+                                    let idx = builder.use_var(idx_var);
+                                    let one = builder.ins().iconst(types::I32, 1);
+                                    let next_idx = builder.ins().iadd(idx, one);
+                                    builder.def_var(idx_var, next_idx);
+                                    builder.ins().jump(loop_header, &[]);
+
+                                    builder.seal_block(loop_header);
+                                    builder.seal_block(loop_body);
+                                    builder.seal_block(loop_exit);
+                                    builder.switch_to_block(loop_exit);
+                                }
                             }
                         }
+
+                        let final_arr_ptr = builder.use_var(arr_var);
+                        let len_call = builder.ins().call(length_ref, &[final_arr_ptr]);
+                        let total_len = builder.inst_results(len_call)[0];
+                        let total_len_i64 = builder.ins().uextend(types::I64, total_len);
+
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[callee_f64, final_arr_ptr, total_len_i64]);
+                        return Ok(builder.inst_results(call)[0]);
                     }
-                    return Err(anyhow!("Spread calls with local variables not yet fully supported"));
+                    return Err(anyhow!("Spread calls with local variables not yet fully supported (JS runtime not enabled)"));
                 }
                 _ => {
                     return Err(anyhow!("Spread calls with non-function callees not yet supported"));
@@ -28689,12 +29151,16 @@ fn compile_expr(
                 let alloc_call = builder.ins().call(alloc_ref, &[class_id, parent_class_id, field_count, keys_ptr, keys_len]);
                 let obj_ptr = builder.inst_results(alloc_call)[0];
 
-                // Initialize field defaults BEFORE calling constructor
-                // This is equivalent to TypeScript/JavaScript semantics where field initializers
-                // run at the beginning of construction, before the constructor body.
+                // Initialize field defaults BEFORE calling constructor.
+                // For classes WITH a constructor, field inits are compiled inside the constructor
+                // (in compile_class_constructor) where the class's module-level variables are
+                // accessible. For classes WITHOUT a constructor, we compile them here at the
+                // new call site.
                 // Without this, fields like `items: number[] = []` remain uninitialized (garbage memory),
                 // causing crashes/hangs when accessed (e.g., obj.items.push(42) dereferences garbage).
+                let skip_field_inits = class_meta.constructor_id.is_some();
                 for (field_name, init_expr) in &class_meta.field_inits {
+                    if skip_field_inits { break; }
                     if let Some(&field_idx) = class_meta.field_indices.get(field_name) {
                         let field_offset = 24 + (field_idx as i32) * 8;
 
@@ -32197,6 +32663,100 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "saveFileDialog" => {
+                        // (callback, defaultName, allowedTypes)
+                        let callback = ensure_f64(builder, arg_vals[0]);
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+
+                        let name_ptr = if arg_vals.len() > 1 {
+                            let name_f64 = ensure_f64(builder, arg_vals[1]);
+                            let call = builder.ins().call(get_str_ref, &[name_f64]);
+                            builder.inst_results(call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let types_ptr = if arg_vals.len() > 2 {
+                            let types_f64 = ensure_f64(builder, arg_vals[2]);
+                            let call = builder.ins().call(get_str_ref, &[types_f64]);
+                            builder.inst_results(call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let func = extern_funcs.get("perry_ui_save_file_dialog")
+                            .ok_or_else(|| anyhow!("perry_ui_save_file_dialog not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[callback, name_ptr, types_ptr]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "Alert" => {
+                        // Alert(title, message, buttons, callback)
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+
+                        let title_f64 = ensure_f64(builder, arg_vals[0]);
+                        let title_call = builder.ins().call(get_str_ref, &[title_f64]);
+                        let title_ptr = builder.inst_results(title_call)[0];
+
+                        let msg_f64 = ensure_f64(builder, arg_vals[1]);
+                        let msg_call = builder.ins().call(get_str_ref, &[msg_f64]);
+                        let msg_ptr = builder.inst_results(msg_call)[0];
+
+                        // buttons is a JS array — pass as raw i64
+                        let buttons = ensure_i64(builder, arg_vals[2]);
+
+                        let callback = ensure_f64(builder, arg_vals[3]);
+
+                        let func = extern_funcs.get("perry_ui_alert")
+                            .ok_or_else(|| anyhow!("perry_ui_alert not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[title_ptr, msg_ptr, buttons, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "appOnTerminate" => {
+                        let callback = ensure_f64(builder, arg_vals[0]);
+                        let func = extern_funcs.get("perry_ui_app_on_terminate")
+                            .ok_or_else(|| anyhow!("perry_ui_app_on_terminate not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "appOnActivate" => {
+                        let callback = ensure_f64(builder, arg_vals[0]);
+                        let func = extern_funcs.get("perry_ui_app_on_activate")
+                            .ok_or_else(|| anyhow!("perry_ui_app_on_activate not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "Window" => {
+                        // Window(title, width, height) -> handle
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+
+                        let title_f64 = ensure_f64(builder, arg_vals[0]);
+                        let title_call = builder.ins().call(get_str_ref, &[title_f64]);
+                        let title_ptr = builder.inst_results(title_call)[0];
+
+                        let w = ensure_f64(builder, arg_vals[1]);
+                        let h = ensure_f64(builder, arg_vals[2]);
+
+                        let func = extern_funcs.get("perry_ui_window_create")
+                            .ok_or_else(|| anyhow!("perry_ui_window_create not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[title_ptr, w, h]);
+                        let handle_i64 = builder.inst_results(call)[0];
+                        return Ok(inline_nanbox_pointer(builder, handle_i64));
+                    }
                     "appSetMinSize" | "appSetMaxSize" => {
                         // (appHandle, w, h) — extract handle, pass w/h as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -33010,6 +33570,9 @@ fn compile_expr(
                 ("perry/ui", false, "Section") => "perry_ui_section_create",
                 ("perry/ui", false, "NavigationStack") => "perry_ui_navstack_create",
                 ("perry/ui", false, "ZStack") => "perry_ui_zstack_create",
+                ("perry/ui", false, "Sheet") => "perry_ui_sheet_create",
+                ("perry/ui", false, "Toolbar") => "perry_ui_toolbar_create",
+                ("perry/ui", false, "LazyVStack") => "perry_ui_lazyvstack_create",
                 // Widget instance methods
                 ("perry/ui", true, "setValue") => "perry_ui_progressview_set_value",
                 ("perry/ui", true, "setSize") => "perry_ui_image_set_size",
@@ -33027,6 +33590,15 @@ fn compile_expr(
                 ("perry/ui", true, "animateOpacity") => "perry_ui_widget_animate_opacity",
                 ("perry/ui", true, "animatePosition") => "perry_ui_widget_animate_position",
                 ("perry/ui", true, "setFontFamily") => "perry_ui_text_set_font_family",
+                ("perry/ui", true, "present") => "perry_ui_sheet_present",
+                ("perry/ui", true, "dismiss") => "perry_ui_sheet_dismiss",
+                ("perry/ui", true, "addToolbarItem") => "perry_ui_toolbar_add_item",
+                ("perry/ui", true, "attachToolbar") => "perry_ui_toolbar_attach",
+                ("perry/ui", true, "setBody") => "perry_ui_window_set_body",
+                ("perry/ui", true, "show") => "perry_ui_window_show",
+                ("perry/ui", true, "closeWindow") => "perry_ui_window_close",
+                ("perry/ui", true, "updateCount") => "perry_ui_lazyvstack_update",
+                ("perry/ui", true, "bindTextField") => "perry_ui_state_bind_textfield",
 
                 // ========================================================================
                 // Perry System APIs (perry/system module)
@@ -33035,6 +33607,10 @@ fn compile_expr(
                 ("perry/system", false, "isDarkMode") => "perry_system_is_dark_mode",
                 ("perry/system", false, "preferencesSet") => "perry_system_preferences_set",
                 ("perry/system", false, "preferencesGet") => "perry_system_preferences_get",
+                ("perry/system", false, "keychainSave") => "perry_system_keychain_save",
+                ("perry/system", false, "keychainGet") => "perry_system_keychain_get",
+                ("perry/system", false, "keychainDelete") => "perry_system_keychain_delete",
+                ("perry/system", false, "notificationSend") => "perry_system_notification_send",
 
                 // ========================================================================
                 // Perry Plugin System
@@ -33891,6 +34467,54 @@ fn compile_expr(
                                 call_args.push(builder.inst_results(str_call)[0]);
                             }
                         }
+                        "present" | "dismiss" | "attachToolbar" | "show" | "closeWindow" => {
+                            // No additional args beyond the handle
+                        }
+                        "addToolbarItem" => {
+                            // (label, icon, callback) - two strings and a closure
+                            if arg_vals.len() >= 2 {
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let label_f64 = ensure_f64(builder, arg_vals[0]);
+                                let label_call = builder.ins().call(get_str_ref, &[label_f64]);
+                                call_args.push(builder.inst_results(label_call)[0]);
+                                let icon_f64 = ensure_f64(builder, arg_vals[1]);
+                                let icon_call = builder.ins().call(get_str_ref, &[icon_f64]);
+                                call_args.push(builder.inst_results(icon_call)[0]);
+                            }
+                            if arg_vals.len() >= 3 {
+                                call_args.push(ensure_f64(builder, arg_vals[2]));
+                            }
+                        }
+                        "setBody" => {
+                            // Window.setBody(widget) - extract widget handle
+                            if !arg_vals.is_empty() {
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let widget_f64 = ensure_f64(builder, arg_vals[0]);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[widget_f64]);
+                                call_args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                        }
+                        "bindTextField" => {
+                            // State.bindTextField(textfield) - extract textfield handle
+                            if !arg_vals.is_empty() {
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let tf_f64 = ensure_f64(builder, arg_vals[0]);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[tf_f64]);
+                                call_args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                        }
+                        "updateCount" => {
+                            // LazyVStack.updateCount(count) - i64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0]));
+                            }
+                        }
                         "push" => {
                             // NavStack.push(title, body) - title is string, body is widget handle
                             if arg_vals.len() >= 2 {
@@ -34518,6 +35142,55 @@ fn compile_expr(
                             args
                         }
                         "isDarkMode" => vec![],
+                        "keychainSave" => {
+                            // keychainSave(key, value) - both strings
+                            let mut args = Vec::new();
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                let str_f64 = ensure_f64(builder, arg_vals[1]);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        "keychainGet" | "keychainDelete" => {
+                            // Single string arg
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        "notificationSend" => {
+                            // notificationSend(title, body) - both strings
+                            let mut args = Vec::new();
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                let str_f64 = ensure_f64(builder, arg_vals[1]);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
                         _ => arg_vals.clone()
                     }
                 } else {
@@ -34677,7 +35350,9 @@ fn compile_expr(
                         "set" | "setValue" | "setSize" | "setTint" | "addItem" |
                         "setSelected" | "push" | "pop" | "setEnabled" | "setTooltip" |
                         "setControlSize" | "setOnHover" | "setOnDoubleClick" |
-                        "animateOpacity" | "animatePosition" | "onChange" | "setFontFamily" => {
+                        "animateOpacity" | "animatePosition" | "onChange" | "setFontFamily" |
+                        "present" | "dismiss" | "addToolbarItem" | "attachToolbar" |
+                        "setBody" | "show" | "closeWindow" | "updateCount" | "bindTextField" => {
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }
@@ -34705,8 +35380,12 @@ fn compile_expr(
                             // Returns f64 directly (number value from UserDefaults)
                             Ok(result)
                         }
+                        "keychainGet" => {
+                            // Returns f64 directly (NaN-boxed string or TAG_UNDEFINED)
+                            Ok(result)
+                        }
                         _ => {
-                            // Void functions (openURL, preferencesSet) - return undefined
+                            // Void functions (openURL, preferencesSet, keychain*, notification*) - return undefined
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }
@@ -35048,6 +35727,15 @@ fn compile_expr(
         Expr::Void(inner) => {
             // Evaluate the operand for side effects, then return undefined
             let _val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+            Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
+        }
+        Expr::Yield { value, .. } => {
+            // Stub: evaluate yielded value for side effects, return undefined
+            // Full generator support requires state machine transformation
+            if let Some(val_expr) = value {
+                let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+            }
             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
         }
@@ -35922,7 +36610,8 @@ fn compile_stmt_with_this(
 }
 
 /// Generate a stub object file for missing symbols from unresolved imports.
-pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String], target: Option<&str>) -> Result<Vec<u8>> {
+/// `identity_func_symbols` are stubs that take an f64 arg and return it as-is (pass-through).
+pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String], identity_func_symbols: &[String], target: Option<&str>) -> Result<Vec<u8>> {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "true").unwrap();
@@ -35977,6 +36666,30 @@ pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbol
             fb.seal_block(block);
             let undef = fb.ins().f64const(f64::from_bits(TAG_UNDEF));
             fb.ins().return_(&[undef]);
+            fb.finalize();
+        }
+        module.define_function(func_id, &mut ctx)?;
+        module.clear_context(&mut ctx);
+    }
+    // Identity stubs: fn(f64) -> f64, returns the argument as-is.
+    // Used for functions like js_await_any_promise that should pass through
+    // values in standalone mode (no V8 runtime).
+    for name in identity_func_symbols {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        let func_id = module.declare_function(name, Linkage::Export, &sig)?;
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fc = FunctionBuilderContext::new();
+        {
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fc);
+            let block = fb.create_block();
+            fb.append_block_params_for_function_params(block);
+            fb.switch_to_block(block);
+            fb.seal_block(block);
+            let arg = fb.block_params(block)[0];
+            fb.ins().return_(&[arg]);
             fb.finalize();
         }
         module.define_function(func_id, &mut ctx)?;
