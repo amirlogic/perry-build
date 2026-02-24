@@ -1352,9 +1352,23 @@ fn lower_module_decl(
             let source = export_all.src.value.as_str().unwrap_or("").to_string();
             module.exports.push(Export::ExportAll { source });
         }
-        ast::ModuleDecl::ExportDefaultExpr(_) => {
-            // export default expr
-            // TODO: handle this case
+        ast::ModuleDecl::ExportDefaultExpr(export_default_expr) => {
+            // export default <expr>
+            // Lower the expression and create a synthetic "default" variable
+            let lowered = lower_expr(ctx, &export_default_expr.expr)?;
+            let id = ctx.define_local("default".to_string(), Type::Any);
+            module.init.push(Stmt::Let {
+                id,
+                name: "default".to_string(),
+                ty: Type::Any,
+                mutable: false,
+                init: Some(lowered),
+            });
+            module.exported_objects.push("default".to_string());
+            module.exports.push(Export::Named {
+                local: "default".to_string(),
+                exported: "default".to_string(),
+            });
         }
         _ => {
             // TsImportEquals, TsExportAssignment, TsNamespaceExport - TypeScript specific
@@ -2041,6 +2055,7 @@ fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Fun
         return_type,
         body,
         is_async: fn_decl.function.is_async,
+        is_generator: fn_decl.function.is_generator,
         is_exported: false,
         captures: Vec::new(),
         decorators: Vec::new(),
@@ -2495,6 +2510,7 @@ fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, ctor: &ast::Co
         return_type: Type::Void,
         body,
         is_async: false,
+        is_generator: false,
         is_exported: false,
         captures: Vec::new(),
         decorators: Vec::new(),
@@ -2570,6 +2586,7 @@ fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassMethod) -> R
         return_type,
         body,
         is_async: method.function.is_async,
+        is_generator: method.function.is_generator,
         is_exported: false,
         captures: Vec::new(),
         decorators,
@@ -2613,6 +2630,7 @@ fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::ClassMethod) -> 
         return_type,
         body,
         is_async: false,
+        is_generator: false,
         is_exported: false,
         captures: Vec::new(),
         decorators: Vec::new(),
@@ -2664,6 +2682,7 @@ fn lower_setter_method(ctx: &mut LoweringContext, method: &ast::ClassMethod) -> 
         return_type: Type::Void,
         body,
         is_async: false,
+        is_generator: false,
         is_exported: false,
         captures: Vec::new(),
         decorators: Vec::new(),
@@ -3372,6 +3391,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 ast::UnaryOp::Tilde => Ok(Expr::Unary { op: UnaryOp::BitNot, operand }),
                 ast::UnaryOp::TypeOf => Ok(Expr::TypeOf(operand)),
                 ast::UnaryOp::Delete => Ok(Expr::Delete(operand)),
+                ast::UnaryOp::Void => Ok(Expr::Void(operand)),
                 _ => Err(anyhow!("Unsupported unary operator: {:?}", unary.op)),
             }
         }
@@ -5762,8 +5782,6 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             }
                             ast::Prop::Method(method) => {
                                 // Inline method: { help(): string { ... } }
-                                // Lower as a named function and reference via FuncRef
-                                // This avoids closure compilation complexity (async try-catch etc.)
                                 let key = match &method.key {
                                     ast::PropName::Ident(ident) => ident.sym.to_string(),
                                     ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
@@ -5772,7 +5790,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 let func_id = ctx.fresh_func();
                                 // Use a unique synthetic name to avoid collisions
                                 let func_name = format!("__obj_method_{}_{}", key, func_id);
-                                ctx.functions.push((func_name.clone(), func_id));
+
+                                // Snapshot outer locals for capture analysis
+                                let outer_locals: Vec<(String, LocalId)> = ctx.locals.iter()
+                                    .map(|(name, id, _)| (name.clone(), *id))
+                                    .collect();
+
                                 let scope_mark = ctx.enter_scope();
                                 let mut params = Vec::new();
                                 for param in method.function.params.iter() {
@@ -5797,24 +5820,73 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     Vec::new()
                                 };
                                 ctx.exit_scope(scope_mark);
-                                // Store parameter defaults for call-site resolution
-                                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
-                                let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
-                                ctx.func_defaults.push((func_id, defaults, param_ids));
-                                // Add as pending function to be flushed to the module
-                                ctx.pending_functions.push(Function {
-                                    id: func_id,
-                                    name: func_name,
-                                    type_params: Vec::new(),
-                                    params,
-                                    return_type,
-                                    body,
-                                    is_async: method.function.is_async,
-                                    is_exported: false,
-                                    captures: Vec::new(),
-                                    decorators: Vec::new(),
-                                });
-                                props.push((key, Expr::FuncRef(func_id)));
+
+                                // Capture analysis (same pattern as arrow/function expressions)
+                                let mut all_refs = Vec::new();
+                                for stmt in &body {
+                                    collect_local_refs_stmt(stmt, &mut all_refs);
+                                }
+                                let outer_local_ids: std::collections::HashSet<LocalId> = outer_locals.iter()
+                                    .map(|(_, id)| *id)
+                                    .collect();
+                                let method_param_ids: std::collections::HashSet<LocalId> = params.iter()
+                                    .map(|p| p.id)
+                                    .collect();
+                                let mut captures: Vec<LocalId> = all_refs.into_iter()
+                                    .filter(|id| outer_local_ids.contains(id) && !method_param_ids.contains(id))
+                                    .collect();
+                                captures.sort();
+                                captures.dedup();
+
+                                if captures.is_empty() {
+                                    // No captures: keep as standalone Function + FuncRef
+                                    ctx.functions.push((func_name.clone(), func_id));
+                                    let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                                    let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
+                                    ctx.func_defaults.push((func_id, defaults, param_ids));
+                                    ctx.pending_functions.push(Function {
+                                        id: func_id,
+                                        name: func_name,
+                                        type_params: Vec::new(),
+                                        params,
+                                        return_type,
+                                        body,
+                                        is_async: method.function.is_async,
+                                        is_generator: false,
+                                        is_exported: false,
+                                        captures: Vec::new(),
+                                        decorators: Vec::new(),
+                                    });
+                                    props.push((key, Expr::FuncRef(func_id)));
+                                } else {
+                                    // Has captures: emit as Closure
+                                    let mut all_assigned = Vec::new();
+                                    for stmt in &body {
+                                        collect_assigned_locals_stmt(stmt, &mut all_assigned);
+                                    }
+                                    let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
+                                    let mutable_captures: Vec<LocalId> = captures.iter()
+                                        .filter(|id| assigned_set.contains(id))
+                                        .copied()
+                                        .collect();
+                                    let captures_this = closure_uses_this(&body);
+                                    let enclosing_class = if captures_this {
+                                        ctx.current_class.clone()
+                                    } else {
+                                        None
+                                    };
+                                    props.push((key, Expr::Closure {
+                                        func_id,
+                                        params,
+                                        return_type,
+                                        body,
+                                        captures,
+                                        mutable_captures,
+                                        captures_this,
+                                        enclosing_class,
+                                        is_async: method.function.is_async,
+                                    }));
+                                }
                             }
                             _ => {}
                         }
@@ -6403,6 +6475,69 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 }
             }
         }
+        ast::Expr::Yield(y) => {
+            let value = match &y.arg {
+                Some(arg) => Some(Box::new(lower_expr(ctx, arg)?)),
+                None => None,
+            };
+            Ok(Expr::Yield { value, delegate: y.delegate })
+        }
+        ast::Expr::TaggedTpl(tagged) => {
+            // Tagged template literals: tag`...`
+            // Currently only String.raw is supported — it returns the raw string
+            // without escape processing (backslashes kept literal).
+            let is_string_raw = match &*tagged.tag {
+                ast::Expr::Member(member) => {
+                    let obj_is_string = match &member.obj.as_ref() {
+                        ast::Expr::Ident(id) => id.sym.as_ref() == "String",
+                        _ => false,
+                    };
+                    let prop_is_raw = match &member.prop {
+                        ast::MemberProp::Ident(id) => id.sym.as_ref() == "raw",
+                        _ => false,
+                    };
+                    obj_is_string && prop_is_raw
+                }
+                _ => false,
+            };
+
+            if !is_string_raw {
+                return Err(anyhow!("Unsupported tagged template literal (only String.raw is supported): {:?}", tagged.tag));
+            }
+
+            let tpl = &*tagged.tpl;
+            if tpl.quasis.is_empty() {
+                return Ok(Expr::String(String::new()));
+            }
+
+            // For String.raw, use raw strings directly (no escape processing)
+            let first_raw = tpl.quasis.first()
+                .map(|q| q.raw.as_ref())
+                .unwrap_or("");
+            let mut result = Expr::String(first_raw.to_string());
+
+            for (i, expr) in tpl.exprs.iter().enumerate() {
+                let lowered = lower_expr(ctx, expr)?;
+                result = Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(result),
+                    right: Box::new(lowered),
+                };
+
+                if let Some(quasi) = tpl.quasis.get(i + 1) {
+                    let quasi_str: &str = quasi.raw.as_ref();
+                    if !quasi_str.is_empty() {
+                        result = Expr::Binary {
+                            op: BinaryOp::Add,
+                            left: Box::new(result),
+                            right: Box::new(Expr::String(quasi_str.to_string())),
+                        };
+                    }
+                }
+            }
+
+            Ok(result)
+        }
         _ => Err(anyhow!("Unsupported expression type: {:?}", expr)),
     }
 }
@@ -6500,7 +6635,10 @@ fn lower_assign_target_to_expr(ctx: &mut LoweringContext, target: &ast::AssignTa
                     let index = Box::new(lower_expr(ctx, &computed.expr)?);
                     Ok(Expr::IndexGet { object, index })
                 }
-                _ => Err(anyhow!("Unsupported member property in compound assignment")),
+                ast::MemberProp::PrivateName(private) => {
+                    let property = format!("#{}", private.name.to_string());
+                    Ok(Expr::PropertyGet { object, property })
+                }
             }
         }
         _ => Err(anyhow!("Unsupported target in compound assignment")),

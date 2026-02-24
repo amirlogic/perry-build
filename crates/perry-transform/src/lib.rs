@@ -6,8 +6,10 @@
 //! - Optimization passes (function inlining)
 
 pub mod closure;
+pub mod generator;
 pub mod inline;
 
 // Re-export main transformation functions
 pub use closure::convert_closures;
+pub use generator::transform_generators;
 pub use inline::inline_functions;

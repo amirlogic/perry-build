@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.152
+**Current Version:** 0.2.153
 
 ## Workflow Requirements
 
@@ -134,6 +134,12 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.153
+- Automatic binary size reduction: detect stdlib needs from imports, link runtime-only when possible (0.3MB vs 48MB for hello world)
+- Move JSON functions (parse/stringify) from perry-stdlib to perry-runtime so JSON works without stdlib
+- Dead code stripping (`-Wl,-dead_strip` / `--gc-sections`) and automatic `strip` on final binary
+- `requires_stdlib()` in ir.rs maps native module imports to stdlib vs runtime-only
 
 ### v0.2.151
 - Generic plugin system v2: hook priority (lower=first), 3 hook modes (filter/action/waterfall), ABI v2

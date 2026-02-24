@@ -845,6 +845,12 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::TypeOf(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        Expr::Void(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { substitute_locals(v, param_map, next_local_id); }
+        }
         // Set operations
         Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
             substitute_locals(set, param_map, next_local_id);
@@ -1190,6 +1196,12 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         }
         Expr::TypeOf(inner) => {
             substitute_this(inner, obj_id);
+        }
+        Expr::Void(inner) => {
+            substitute_this(inner, obj_id);
+        }
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { substitute_this(v, obj_id); }
         }
         _ => {}
     }

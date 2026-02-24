@@ -367,6 +367,7 @@ pub struct Function {
     pub return_type: Type,
     pub body: Vec<Stmt>,
     pub is_async: bool,
+    pub is_generator: bool,
     pub is_exported: bool,
     /// Captured variables (for closures)
     pub captures: Vec<LocalId>,
@@ -602,6 +603,8 @@ pub enum Expr {
 
     // Type operations
     TypeOf(Box<Expr>),
+    // Void operator: evaluate operand for side effects, return undefined
+    Void(Box<Expr>),
     InstanceOf {
         expr: Box<Expr>,
         ty: String,
@@ -615,6 +618,9 @@ pub enum Expr {
 
     // Await expression (for async functions)
     Await(Box<Expr>),
+
+    // Yield expression (for generator functions)
+    Yield { value: Option<Box<Expr>>, delegate: bool },
 
     // New expression (class instantiation)
     New {

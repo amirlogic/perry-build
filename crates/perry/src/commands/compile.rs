@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_hir::{Module as HirModule, ModuleKind};
-use perry_transform::inline_functions;
+use perry_transform::{inline_functions, transform_generators};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -580,11 +580,18 @@ fn collect_modules(
     visited.insert(canonical.clone());
 
     // Check if this file should be handled by JS runtime instead of native compilation
-    // This includes: JS files, declaration files (.d.ts), or any file in node_modules when JS runtime is enabled
+    // This includes: JS files, declaration files (.d.ts), JSON files, or any file in node_modules when JS runtime is enabled
+    let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
     let is_in_node_modules = canonical.to_string_lossy().contains("node_modules");
     let should_use_js_runtime = is_js_file(&canonical)
         || is_declaration_file(&canonical)
+        || is_json
         || (enable_js_runtime && is_in_node_modules);
+
+    // Skip JSON files — they're data, not code (imported via `with { type: "json" }`)
+    if is_json {
+        return Ok(());
+    }
 
     if should_use_js_runtime {
         if !enable_js_runtime {
@@ -632,13 +639,17 @@ fn collect_modules(
         .map(|s| s.to_string())
         .unwrap_or_else(|| filename.to_string());
 
-    let ast_module = perry_parser::parse_typescript(&source, filename)?;
+    let ast_module = perry_parser::parse_typescript(&source, filename)
+        .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
     let source_file_path = canonical.to_string_lossy().to_string();
     let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id(&ast_module, &module_name, &source_file_path, *next_class_id)?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
     // Apply function inlining optimization
     inline_functions(&mut hir_module);
+
+    // Transform generator functions into state machines
+    transform_generators(&mut hir_module);
 
     // Process imports and update their resolved paths and module kinds
     for import in &mut hir_module.imports {
@@ -1870,11 +1881,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Dead code stripping — remove unused functions from the linked binary
     if !is_windows {
-        if is_ios || is_android || is_linux {
+        if is_android || is_linux {
             // ELF targets
             cmd.arg("-Wl,--gc-sections");
         } else {
-            // macOS
+            // macOS / iOS (Mach-O targets)
             cmd.arg("-Wl,-dead_strip");
         }
     }

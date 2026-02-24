@@ -315,6 +315,9 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
         // TypeOf always returns string
         Expr::TypeOf(_) => Some(Type::String),
 
+        // Void always returns undefined
+        Expr::Void(_) => Some(Type::Void),
+
         // InstanceOf always returns boolean
         Expr::InstanceOf { .. } => Some(Type::Boolean),
 
@@ -963,6 +966,11 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
 
         // Type operations
         Expr::TypeOf(inner) => Expr::TypeOf(Box::new(substitute_expr(inner, substitutions))),
+        Expr::Void(inner) => Expr::Void(Box::new(substitute_expr(inner, substitutions))),
+        Expr::Yield { value, delegate } => Expr::Yield {
+            value: value.as_ref().map(|v| Box::new(substitute_expr(v, substitutions))),
+            delegate: *delegate,
+        },
         Expr::InstanceOf { expr, ty } => Expr::InstanceOf {
             expr: Box::new(substitute_expr(expr, substitutions)),
             ty: ty.clone(),
@@ -1378,6 +1386,7 @@ pub fn specialize_function(
         return_type: substitute_type(&func.return_type, &substitutions),
         body: substitute_stmts(&func.body, &substitutions),
         is_async: func.is_async,
+        is_generator: func.is_generator,
         is_exported: false, // Specialized versions are internal
         captures: func.captures.clone(),
         decorators: func.decorators.clone(),
@@ -1430,6 +1439,7 @@ pub fn specialize_class(
                 return_type: Type::Void,
                 body: substitute_stmts(&ctor.body, &substitutions),
                 is_async: false,
+                is_generator: false,
                 is_exported: false,
                 captures: ctor.captures.clone(),
                 decorators: ctor.decorators.clone(),
@@ -1450,6 +1460,7 @@ pub fn specialize_class(
                 return_type: substitute_type(&m.return_type, &substitutions),
                 body: substitute_stmts(&m.body, &substitutions),
                 is_async: m.is_async,
+                is_generator: m.is_generator,
                 is_exported: false,
                 captures: m.captures.clone(),
                 decorators: m.decorators.clone(),
@@ -1464,6 +1475,7 @@ pub fn specialize_class(
                 return_type: substitute_type(&f.return_type, &substitutions),
                 body: substitute_stmts(&f.body, &substitutions),
                 is_async: false,
+                is_generator: false,
                 is_exported: false,
                 captures: f.captures.clone(),
                 decorators: f.decorators.clone(),
@@ -1484,6 +1496,7 @@ pub fn specialize_class(
                 return_type: Type::Void,
                 body: substitute_stmts(&f.body, &substitutions),
                 is_async: false,
+                is_generator: false,
                 is_exported: false,
                 captures: f.captures.clone(),
                 decorators: f.decorators.clone(),
@@ -1765,6 +1778,10 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(else_expr, ctx, module);
         }
         Expr::TypeOf(inner) => collect_instantiations_in_expr(inner, ctx, module),
+        Expr::Void(inner) => collect_instantiations_in_expr(inner, ctx, module),
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { collect_instantiations_in_expr(v, ctx, module); }
+        }
         Expr::InstanceOf { expr, .. } => collect_instantiations_in_expr(expr, ctx, module),
         Expr::Await(inner) => collect_instantiations_in_expr(inner, ctx, module),
         Expr::SuperCall(args) => {
@@ -2164,6 +2181,10 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(else_expr, ctx, lookup);
         }
         Expr::TypeOf(inner) => update_call_sites_in_expr(inner, ctx, lookup),
+        Expr::Void(inner) => update_call_sites_in_expr(inner, ctx, lookup),
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { update_call_sites_in_expr(v, ctx, lookup); }
+        }
         Expr::InstanceOf { expr, .. } => update_call_sites_in_expr(expr, ctx, lookup),
         Expr::Await(inner) => update_call_sites_in_expr(inner, ctx, lookup),
         Expr::SuperCall(args) => {
@@ -2449,6 +2470,7 @@ fn infer_expr_type_from_lookup(expr: &Expr, lookup: &InferenceLookup) -> Option<
         }
 
         Expr::TypeOf(_) => Some(Type::String),
+        Expr::Void(_) => Some(Type::Void),
         Expr::InstanceOf { .. } => Some(Type::Boolean),
 
         Expr::Conditional { then_expr, .. } => infer_expr_type_from_lookup(then_expr, lookup),
@@ -2643,6 +2665,12 @@ fn fill_defaults_in_expr(expr: &mut Expr, ctor_defaults: &HashMap<String, Vec<Op
         }
         Expr::TypeOf(inner) => {
             fill_defaults_in_expr(inner, ctor_defaults);
+        }
+        Expr::Void(inner) => {
+            fill_defaults_in_expr(inner, ctor_defaults);
+        }
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { fill_defaults_in_expr(v, ctor_defaults); }
         }
         Expr::InstanceOf { expr, .. } => {
             fill_defaults_in_expr(expr, ctor_defaults);

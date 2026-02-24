@@ -12437,6 +12437,14 @@ impl Compiler {
             Expr::TypeOf(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
             }
+            Expr::Void(expr) => {
+                self.collect_closures_from_expr(expr, closures, enclosing_class);
+            }
+            Expr::Yield { value, .. } => {
+                if let Some(v) = value {
+                    self.collect_closures_from_expr(v, closures, enclosing_class);
+                }
+            }
             Expr::InstanceOf { expr, .. } => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
             }
@@ -12784,6 +12792,12 @@ impl Compiler {
             Expr::ParseFloat(s) | Expr::NumberCoerce(s) | Expr::BigIntCoerce(s) | Expr::StringCoerce(s) |
             Expr::IsNaN(s) | Expr::IsFinite(s) | Expr::StaticPluginResolve(s) => {
                 self.collect_closures_from_expr(s, closures, enclosing_class);
+            }
+            // Yield expression
+            Expr::Yield { value, .. } => {
+                if let Some(val) = value {
+                    self.collect_closures_from_expr(val, closures, enclosing_class);
+                }
             }
             // Expressions with no inner expressions to traverse
             Expr::Undefined | Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::Integer(_) |
@@ -34417,6 +34431,12 @@ fn compile_expr(
                 // NaN-box the string pointer so it's recognized as a string
                 Ok(inline_nanbox_string(builder, str_ptr))
             }
+        }
+        Expr::Void(inner) => {
+            // Evaluate the operand for side effects, then return undefined
+            let _val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+            Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
         }
         Expr::InstanceOf { expr, ty } => {
             // Check if value is an instance of a class
