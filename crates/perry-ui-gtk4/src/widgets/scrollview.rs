@@ -3,6 +3,7 @@ use gtk4::ScrolledWindow;
 
 /// Create a GtkScrolledWindow with vertical scrollbar. Returns widget handle.
 pub fn create() -> i64 {
+    crate::app::ensure_gtk_init();
     let scrolled = ScrolledWindow::new();
     scrolled.set_vexpand(true);
     scrolled.set_hexpand(true);

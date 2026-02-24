@@ -1642,11 +1642,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-Wl,-z,separate-loadable-segments");
         c
     } else if is_linux {
-        // Cross-compile for Linux x86_64
-        // When building on Linux natively, "cc" will work fine.
-        // When cross-compiling from macOS, use a cross-compilation toolchain.
+        // Linux target: when running on Linux natively, just use "cc".
+        // When cross-compiling from macOS, pass -target for clang.
         let mut c = Command::new("cc");
-        c.arg("-target").arg("x86_64-unknown-linux-gnu");
+        #[cfg(not(target_os = "linux"))]
+        {
+            c.arg("-target").arg("x86_64-unknown-linux-gnu");
+        }
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)
@@ -1669,7 +1671,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // When UI lib is also linked, it bundles its own copy of perry-runtime.
     // For Android (ELF), ld.lld errors on duplicate symbols, so skip the standalone
     // runtime when the UI library will provide it.
-    let skip_runtime = (is_android || is_linux) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -1772,6 +1774,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             } else if is_android {
                 // Android UI uses JNI - no additional system libs needed
             } else if is_linux {
+                // Allow multiple definitions from perry-runtime in both stdlib and UI lib
+                cmd.arg("-Wl,--allow-multiple-definition");
                 // GTK4 libraries via pkg-config
                 if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
                     if output.status.success() {

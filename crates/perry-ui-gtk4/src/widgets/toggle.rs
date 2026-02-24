@@ -45,6 +45,7 @@ pub fn set_state(handle: i64, on: i64) {
 /// Create a CheckButton with a label and onChange callback.
 /// Returns a widget handle for an HStack containing the label and checkbox.
 pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let label_text = str_from_header(label_ptr);
 
     let check = CheckButton::new();

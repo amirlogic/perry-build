@@ -29,6 +29,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 
 /// Create a GtkButton with a label and closure callback.
 pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let label = str_from_header(label_ptr);
     let button = Button::with_label(label);
 

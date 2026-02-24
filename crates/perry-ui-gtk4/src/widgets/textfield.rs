@@ -31,6 +31,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 
 /// Create an editable GtkEntry with a placeholder string and onChange callback.
 pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let placeholder = str_from_header(placeholder_ptr);
     let entry = Entry::new();
     entry.set_placeholder_text(Some(placeholder));

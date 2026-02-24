@@ -4,6 +4,7 @@ use gtk4::Orientation;
 
 /// Create a horizontal separator line.
 pub fn create() -> i64 {
+    crate::app::ensure_gtk_init();
     let separator = Separator::new(Orientation::Horizontal);
     super::register_widget(separator.upcast())
 }

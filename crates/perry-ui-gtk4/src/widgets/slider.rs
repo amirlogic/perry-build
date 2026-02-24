@@ -25,6 +25,7 @@ pub fn set_value(handle: i64, value: f64) {
 
 /// Create a horizontal GtkScale with min, max, initial values and onChange callback.
 pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let adjustment = Adjustment::new(initial, min, max, 1.0, 10.0, 0.0);
     let scale = Scale::new(Orientation::Horizontal, Some(&adjustment));
     scale.set_draw_value(false);

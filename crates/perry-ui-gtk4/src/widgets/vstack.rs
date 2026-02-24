@@ -3,6 +3,7 @@ use gtk4::Orientation;
 
 /// Create a GtkBox with vertical orientation.
 pub fn create(spacing: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let vbox = gtk4::Box::new(Orientation::Vertical, spacing as i32);
     // Default padding matching macOS VStack (20px all sides)
     vbox.set_margin_top(20);
@@ -14,6 +15,7 @@ pub fn create(spacing: f64) -> i64 {
 
 /// Create a GtkBox with vertical orientation and custom edge insets.
 pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
+    crate::app::ensure_gtk_init();
     let vbox = gtk4::Box::new(Orientation::Vertical, spacing as i32);
     vbox.set_margin_top(top as i32);
     vbox.set_margin_bottom(bottom as i32);

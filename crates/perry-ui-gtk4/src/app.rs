@@ -5,8 +5,18 @@ use gtk4::{Application, ApplicationWindow, EventControllerKey};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Once;
 
 use crate::widgets;
+
+static GTK_INIT: Once = Once::new();
+
+/// Ensure GTK is initialized (safe to call multiple times).
+pub(crate) fn ensure_gtk_init() {
+    GTK_INIT.call_once(|| {
+        gtk4::init().expect("Failed to initialize GTK4");
+    });
+}
 
 thread_local! {
     static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
@@ -59,6 +69,8 @@ pub(crate) fn str_from_header(ptr: *const u8) -> &'static str {
 
 /// Create an app with title, width, height.
 pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
+    ensure_gtk_init();
+
     let title = if title_ptr.is_null() {
         "Perry App".to_string()
     } else {

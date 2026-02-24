@@ -20,6 +20,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 
 /// Create a GtkLabel widget.
 pub fn create(text_ptr: *const u8) -> i64 {
+    crate::app::ensure_gtk_init();
     let text = str_from_header(text_ptr);
     let label = Label::new(Some(text));
     label.set_xalign(0.0); // Left-align text like macOS labels
