@@ -236,6 +236,11 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
             candidates.push(PathBuf::from(format!("target/release/{}", name)));
             candidates.push(PathBuf::from(format!("target/debug/{}", name)));
         }
+        #[cfg(target_os = "linux")]
+        if matches!(target, Some("linux")) {
+            candidates.push(PathBuf::from(format!("target/release/{}", name)));
+            candidates.push(PathBuf::from(format!("target/debug/{}", name)));
+        }
     } else {
         // Host build: search host directories
         candidates.push(PathBuf::from(format!("target/release/{}", name)));
@@ -294,7 +299,13 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         Some("android") => "libperry_ui_android.a",
         Some("linux") => "libperry_ui_gtk4.a",
         Some("windows") => "perry_ui_windows.lib",
-        _ => "libperry_ui_macos.a",
+        _ => {
+            if cfg!(target_os = "linux") {
+                "libperry_ui_gtk4.a"
+            } else {
+                "libperry_ui_macos.a"
+            }
+        }
     };
     find_library(lib_name, target)
 }
@@ -1976,7 +1987,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
     let is_android = matches!(target.as_deref(), Some("android"));
-    let is_linux = matches!(target.as_deref(), Some("linux"));
+    let is_linux = matches!(target.as_deref(), Some("linux"))
+        || (target.is_none() && cfg!(target_os = "linux"));
     let is_windows = matches!(target.as_deref(), Some("windows"));
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
