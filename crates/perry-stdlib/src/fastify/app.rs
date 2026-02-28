@@ -144,13 +144,19 @@ pub unsafe extern "C" fn js_fastify_route(app_handle: Handle, method: i64, path:
 unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i64) -> bool {
     let path_str = match string_from_nanboxed(path) {
         Some(p) => p,
-        None => return false,
+        None => {
+            eprintln!("[DEBUG] register_route: failed to extract path string");
+            return false;
+        }
     };
 
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
+        let full = if app.prefix.is_empty() { path_str.clone() } else { format!("{}{}", app.prefix, path_str) };
+        eprintln!("[DEBUG] register_route: {} {} (handle={})", method, full, app_handle);
         app.add_route(method, &path_str, handler);
         return true;
     }
+    eprintln!("[DEBUG] register_route: handle {} not found", app_handle);
     false
 }
 
@@ -221,13 +227,20 @@ pub unsafe extern "C" fn js_fastify_register(app_handle: Handle, plugin: i64, op
         let scoped_app = FastifyApp::with_prefix(scoped_prefix);
         let scoped_handle = register_handle(scoped_app);
 
-        // Call the plugin function with the scoped app
+        // Call the plugin function with the scoped app.
+        // NaN-box the scoped handle with POINTER_TAG so Perry's runtime can dispatch
+        // method calls on it (e.g. fastify.get, fastify.post, etc.).
+        let nanboxed_scoped = f64::from_bits(0x7FFD_0000_0000_0000 | (scoped_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
+        eprintln!("[DEBUG] js_fastify_register: calling plugin with scoped_handle={} prefix={:?} nanboxed={:#018x}",
+            scoped_handle, app.prefix, nanboxed_scoped.to_bits());
         let closure_ptr = plugin as *const perry_runtime::ClosureHeader;
-        perry_runtime::js_closure_call2(closure_ptr, scoped_handle as f64, opts);
+        perry_runtime::js_closure_call2(closure_ptr, nanboxed_scoped, opts);
 
         // Merge routes from scoped app back into main app
         if let Some(scoped) = get_handle::<FastifyApp>(scoped_handle) {
+            eprintln!("[DEBUG] js_fastify_register: scoped app has {} routes", scoped.routes.len());
             for route in &scoped.routes {
+                eprintln!("[DEBUG] js_fastify_register: merging route {} {}", route.method, route.pattern.raw);
                 app.routes.push(route.clone());
             }
             // Merge hooks

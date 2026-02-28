@@ -55,49 +55,50 @@ unsafe fn dispatch_fastify_app(handle: i64, method: &str, args: &[f64]) -> f64 {
     match method {
         "get" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            // Support 3-arg form: fastify.get(path, options, handler) — skip options object
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_get(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "post" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_post(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "put" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_put(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "delete" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_delete(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "patch" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_patch(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "head" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_head(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "options" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_options(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
         "all" if args.len() >= 2 => {
             let path = args[0].to_bits() as i64;
-            let handler = args[1].to_bits() as i64;
+            let handler = if args.len() >= 3 { args[2].to_bits() as i64 } else { args[1].to_bits() as i64 };
             let result = crate::fastify::js_fastify_all(handle, path, handler);
             if result { 1.0 } else { 0.0 }
         }
@@ -140,7 +141,7 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
             let result = crate::fastify::js_fastify_reply_send(handle, args[0]);
             if result { 1.0 } else { 0.0 }
         }
-        "status" if args.len() >= 1 => {
+        "status" | "code" if args.len() >= 1 => {
             let result = crate::fastify::js_fastify_reply_status(handle, args[0]);
             // Return the handle as NaN-boxed pointer for chaining (reply.status(200).send(...))
             f64::from_bits(0x7FFD_0000_0000_0000 | (result as u64 & 0x0000_FFFF_FFFF_FFFF))
