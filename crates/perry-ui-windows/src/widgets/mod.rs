@@ -27,6 +27,10 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{CreateFontW, CreateRoundRectRgn, SetWindowRgn, InvalidateRect, HBRUSH};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WidgetKind {
@@ -64,6 +68,8 @@ pub struct WidgetEntry {
     pub hidden: bool,
     /// Win32 control ID (for WM_COMMAND routing)
     pub control_id: u16,
+    /// When true, this widget absorbs remaining space in a VStack/HStack (like a Spacer).
+    pub fills_remaining: bool,
 }
 
 /// Info returned by get_widget_info (clone-safe subset)
@@ -73,6 +79,7 @@ pub struct WidgetInfo {
     pub spacing: f64,
     pub insets: (f64, f64, f64, f64),
     pub hidden: bool,
+    pub fills_remaining: bool,
 }
 
 thread_local! {
@@ -97,6 +104,7 @@ pub fn get_parking_hwnd() -> HWND {
         }
         unsafe {
             let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            let hinstance_h = HINSTANCE(hinstance.0 as _);
             // HWND_MESSAGE creates a message-only window (invisible, no UI)
             let class = to_wide("STATIC");
             let hwnd = CreateWindowExW(
@@ -106,8 +114,8 @@ pub fn get_parking_hwnd() -> HWND {
                 WINDOW_STYLE::default(),
                 0, 0, 0, 0,
                 HWND_MESSAGE,
-                None,
-                HINSTANCE::from(hinstance),
+                HMENU::default(),
+                hinstance_h,
                 None,
             ).unwrap();
             *opt = Some(hwnd);
@@ -139,6 +147,7 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             insets: (0.0, 0.0, 0.0, 0.0),
             hidden: false,
             control_id,
+            fills_remaining: false,
         });
         widgets.len() as i64
     })
@@ -156,6 +165,7 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
             insets: (0.0, 0.0, 0.0, 0.0),
             hidden: false,
             control_id,
+            fills_remaining: false,
         });
         widgets.len() as i64
     })
@@ -175,6 +185,7 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             insets,
             hidden: false,
             control_id,
+            fills_remaining: false,
         });
         widgets.len() as i64
     })
@@ -193,6 +204,7 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
             insets,
             hidden: false,
             control_id,
+            fills_remaining: false,
         });
         widgets.len() as i64
     })
@@ -237,6 +249,7 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
                 spacing: widgets[idx].spacing,
                 insets: widgets[idx].insets,
                 hidden: widgets[idx].hidden,
+                fills_remaining: widgets[idx].fills_remaining,
             })
         } else {
             None
@@ -346,6 +359,17 @@ pub fn clear_children(handle: i64) {
     }
 
     let _ = children;
+}
+
+/// Mark a widget as filling remaining space in its parent VStack/HStack.
+pub fn set_fills_remaining(handle: i64, fills: bool) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].fills_remaining = fills;
+        }
+    });
 }
 
 /// Set the hidden state of a widget.
@@ -535,7 +559,7 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
                     rect.right + 1, rect.bottom + 1,
                     radius as i32, radius as i32,
                 );
-                SetWindowRgn(hwnd, Some(rgn), true);
+                SetWindowRgn(hwnd, rgn, true);
             }
         }
     }

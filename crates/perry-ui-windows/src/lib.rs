@@ -801,3 +801,53 @@ pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle:
     widgets::add_child_at(parent_handle, child_handle, index as i64);
     app::request_layout();
 }
+
+// =============================================================================
+// Stubs for symbols referenced by codegen but not yet implemented on Windows
+// =============================================================================
+
+/// Set button text color (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_text_color(_handle: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+
+/// Set widget width (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_width(_handle: i64, _width: f64) {}
+
+/// Set widget hugging priority (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hugging(_handle: i64, _priority: f64) {}
+
+/// Set on-click callback (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_click(_handle: i64, _callback: f64) {}
+
+/// Embed a native HWND into the Perry widget system.
+/// Takes the HWND pointer value and returns a 1-based widget handle.
+/// The widget is marked as fills_remaining so it absorbs remaining space in VStack/HStack.
+#[no_mangle]
+pub extern "C" fn perry_ui_embed_nsview(hwnd_ptr: i64) -> i64 {
+    if hwnd_ptr == 0 {
+        return 0;
+    }
+    let hwnd = windows::Win32::Foundation::HWND(hwnd_ptr as *mut std::ffi::c_void);
+    let handle = widgets::register_widget(hwnd, widgets::WidgetKind::Canvas, 0);
+    widgets::set_fills_remaining(handle, true);
+    handle
+}
+
+/// Request location permission (stub — not available on Windows desktop).
+#[no_mangle]
+pub extern "C" fn perry_system_request_location(_callback: f64) {}
+
+/// Load a plugin (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_plugin_load(_path_ptr: i64) -> i64 { 0 }
+
+/// Unload a plugin (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn perry_plugin_unload(_handle: i64) {}
+
+/// Exponential backoff utility (stub — not yet implemented on Windows).
+#[no_mangle]
+pub extern "C" fn backOff(_func: f64, _opts: f64) -> f64 { 0.0 }

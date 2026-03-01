@@ -73,7 +73,7 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
                 continue;
             }
             visible_children.push(child);
-            if matches!(ci.kind, WidgetKind::Spacer) {
+            if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
                 spacer_count += 1;
             }
         }
@@ -96,7 +96,7 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
 
     for &child in &visible_children {
         let ci = widgets::get_widget_info(child).unwrap();
-        if matches!(ci.kind, WidgetKind::Spacer) {
+        if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
             child_sizes.push(0); // placeholder, will be computed below
         } else {
             let size = measure_intrinsic(child, &ci.kind, vertical, available_cross);
@@ -115,7 +115,7 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
 
     for (i, &child) in visible_children.iter().enumerate() {
         if let Some(ci) = widgets::get_widget_info(child) {
-            if matches!(ci.kind, WidgetKind::Spacer) {
+            if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
                 child_sizes[i] = spacer_size;
             }
         }
