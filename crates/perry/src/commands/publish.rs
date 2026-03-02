@@ -36,7 +36,7 @@ pub struct PublishArgs {
     pub linux: bool,
 
     /// Build server URL
-    #[arg(long, default_value = "http://localhost:3456")]
+    #[arg(long, default_value = "https://hub.perryts.com")]
     pub server: Option<String>,
 
     /// License key (or set PERRY_LICENSE_KEY env)
@@ -395,7 +395,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .clone()
         .or_else(|| saved.server.clone())
         .or_else(|| config.publish.as_ref().and_then(|p| p.server.clone()))
-        .unwrap_or_else(|| "http://localhost:3456".into());
+        .unwrap_or_else(|| "https://hub.perryts.com".into());
 
     // --- Resolve entry point ---
     let entry = if is_android {
@@ -717,7 +717,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     // --- Save non-sensitive config ---
     saved.license_key = Some(license_key.clone());
     saved.default_target = Some(target_name.clone());
-    if server_url != "http://localhost:3456" {
+    if server_url != "https://hub.perryts.com" {
         saved.server = Some(server_url.clone());
     }
     if !is_android {
@@ -814,27 +814,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         std::io::stdout().flush().ok();
     }
 
-    // Write tarball to temp file and send path (avoids binary corruption in hub's text-based body parsing)
-    let upload_id = format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let tarball_tmp_dir = std::env::temp_dir().join("perry-uploads");
-    std::fs::create_dir_all(&tarball_tmp_dir)
-        .context("Failed to create upload temp directory")?;
-    let tarball_tmp_path = tarball_tmp_dir.join(format!("{upload_id}.tar.gz"));
-    std::fs::write(&tarball_tmp_path, &tarball)
-        .context("Failed to write tarball to temp file")?;
+    // Base64-encode tarball for safe transmission (perry hub uses text-based multipart parsing,
+    // which corrupts raw binary. Base64 is pure ASCII and round-trips safely.)
+    use base64::Engine;
+    let tarball_b64 = base64::engine::general_purpose::STANDARD.encode(&tarball);
 
     let client = reqwest::Client::new();
     let form = multipart::Form::new()
         .text("license_key", license_key)
         .text("manifest", serde_json::to_string(&manifest)?)
         .text("credentials", serde_json::to_string(&credentials)?)
-        .text("project_path", tarball_tmp_path.to_string_lossy().to_string());
+        .text("tarball_b64", tarball_b64);
 
     let resp = client
         .post(format!("{server_url}/api/v1/build"))
