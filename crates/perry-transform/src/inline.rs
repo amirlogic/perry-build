@@ -934,7 +934,7 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(map, param_map, next_local_id);
         }
         // Array operations
-        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
             substitute_locals(value, param_map, next_local_id);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {

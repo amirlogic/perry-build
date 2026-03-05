@@ -682,7 +682,7 @@ fn transform_expr(
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         // Array methods
-        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
             transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {

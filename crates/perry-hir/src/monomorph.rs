@@ -1057,6 +1057,10 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             array_id: *array_id,
             value: Box::new(substitute_expr(value, substitutions)),
         },
+        Expr::ArrayPushSpread { array_id, source } => Expr::ArrayPushSpread {
+            array_id: *array_id,
+            source: Box::new(substitute_expr(source, substitutions)),
+        },
         Expr::ArrayPop(id) => Expr::ArrayPop(*id),
         Expr::ArrayShift(id) => Expr::ArrayShift(*id),
         Expr::ArrayUnshift { array_id, value } => Expr::ArrayUnshift {
@@ -1823,7 +1827,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
         Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) | Expr::PathIsAbsolute(p) => {
             collect_instantiations_in_expr(p, ctx, module);
         }
-        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
             collect_instantiations_in_expr(value, ctx, module);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
@@ -2240,7 +2244,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
         Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) | Expr::PathResolve(p) | Expr::PathIsAbsolute(p) => {
             update_call_sites_in_expr(p, ctx, lookup);
         }
-        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
             update_call_sites_in_expr(value, ctx, lookup);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {

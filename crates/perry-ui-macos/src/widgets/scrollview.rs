@@ -116,7 +116,6 @@ pub fn set_child(scroll_handle: i64, child_handle: i64) {
 
                     let arranged: Retained<AnyObject> = msg_send![&*child, arrangedSubviews];
                     let n: usize = msg_send![&*arranged, count];
-                    eprintln!("[scrollview] GravityAreas, n={} children, setting min height 24", n);
                     for i in 0..n {
                         let subview: *mut AnyObject = msg_send![&*arranged, objectAtIndex: i];
                         if subview.is_null() { continue; }

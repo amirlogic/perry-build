@@ -4453,6 +4453,21 @@ impl Compiler {
             self.extern_funcs.insert("js_array_set_jsvalue".to_string(), func_id);
         }
 
+        // js_array_set_jsvalue_extend(arr: *mut ArrayHeader, index: u32, value: u64) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I32)); // index
+            sig.params.push(AbiParam::new(types::I64)); // JSValue bits (u64)
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_set_jsvalue_extend",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_set_jsvalue_extend".to_string(), func_id);
+        }
+
         // js_array_push_jsvalue(arr: *mut ArrayHeader, value: u64) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();
@@ -14329,7 +14344,7 @@ impl Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(value, closures, enclosing_class);
             }
-            Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+            Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
             }
             Expr::MapSet { map, key, value } => {
@@ -23151,6 +23166,67 @@ fn compile_expr(
             // Convert length to f64
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
+        Expr::ArrayPushSpread { array_id, source } => {
+            // arr.push(...src) — concatenate all elements from source into dest
+            let info = match locals.get(array_id) {
+                Some(info) => info,
+                None => {
+                    eprintln!("WARNING: Undefined array variable {} (ArrayPushSpread), returning undefined", array_id);
+                    let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, source, this_ctx)?;
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                }
+            };
+            let arr_ptr = if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_get_func = extern_funcs.get("js_box_get")
+                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                let val_f64 = builder.inst_results(call)[0];
+                ensure_i64(builder, val_f64)
+            } else {
+                let arr_val = builder.use_var(info.var);
+                ensure_i64(builder, arr_val)
+            };
+
+            // Compile the source array expression
+            let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, source, this_ctx)?;
+            let src_ptr = ensure_i64(builder, src_val);
+
+            // Call js_array_concat(dest, src) -> new dest pointer
+            let func = extern_funcs.get("js_array_concat")
+                .ok_or_else(|| anyhow!("js_array_concat not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr, src_ptr]);
+            let new_arr_ptr = builder.inst_results(call)[0];
+
+            // Update the local variable with the new pointer (in case of reallocation)
+            if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_set_func = extern_funcs.get("js_box_set")
+                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                let val_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                builder.ins().call(box_set_ref, &[box_ptr, val_f64]);
+            } else {
+                let store_val = if info.is_pointer && !info.is_union {
+                    new_arr_ptr
+                } else {
+                    builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
+                };
+                builder.def_var(info.var, store_val);
+            }
+
+            // Get and return the new length
+            let len_func = extern_funcs.get("js_array_length")
+                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
+            let len_ref = module.declare_func_in_func(*len_func, builder.func);
+            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
+            let length = builder.inst_results(len_call)[0];
+
+            Ok(builder.ins().fcvt_from_uint(types::F64, length))
+        }
         Expr::ArrayPop(array_id) => {
             let info = match locals.get(array_id) {
                 Some(info) => info,
@@ -30046,6 +30122,46 @@ fn compile_expr(
                         }
                     }
 
+                    // Handle number method calls on non-local expressions (e.g., (expr).toFixed(n))
+                    match property.as_str() {
+                        "toFixed" => {
+                            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let num_f64 = ensure_f64(builder, obj_val);
+                            let decimals = if !arg_vals.is_empty() {
+                                ensure_f64(builder, arg_vals[0])
+                            } else {
+                                builder.ins().f64const(0.0)
+                            };
+                            let func = extern_funcs.get("js_number_to_fixed")
+                                .ok_or_else(|| anyhow!("js_number_to_fixed not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[num_f64, decimals]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            return Ok(inline_nanbox_string(builder, result_ptr));
+                        }
+                        "toString" if !matches!(object.as_ref(), Expr::LocalGet(_)) => {
+                            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let num_f64 = ensure_f64(builder, obj_val);
+                            let result_ptr = if !arg_vals.is_empty() {
+                                let radix_f64 = ensure_f64(builder, arg_vals[0]);
+                                let radix_i32 = builder.ins().fcvt_to_sint_sat(types::I32, radix_f64);
+                                let func = extern_funcs.get("js_jsvalue_to_string_radix")
+                                    .ok_or_else(|| anyhow!("js_jsvalue_to_string_radix not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[num_f64, radix_i32]);
+                                builder.inst_results(call)[0]
+                            } else {
+                                let func = extern_funcs.get("js_jsvalue_to_string")
+                                    .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[num_f64]);
+                                builder.inst_results(call)[0]
+                            };
+                            return Ok(inline_nanbox_string(builder, result_ptr));
+                        }
+                        _ => {}
+                    }
+
                     // Fallback: If js_native_call_method is available (JS runtime enabled),
                     // use dynamic JS interop for unknown method calls
                     if extern_funcs.contains_key("js_native_call_method") {
@@ -34400,10 +34516,18 @@ fn compile_expr(
                                 builder.ins().bitcast(types::I64, MemFlags::new(), val)
                             };
 
-                            let set_func = extern_funcs.get("js_array_set_jsvalue")
-                                .ok_or_else(|| anyhow!("js_array_set_jsvalue not declared"))?;
+                            let set_func = extern_funcs.get("js_array_set_jsvalue_extend")
+                                .ok_or_else(|| anyhow!("js_array_set_jsvalue_extend not declared"))?;
                             let func_ref = module.declare_func_in_func(*set_func, builder.func);
-                            builder.ins().call(func_ref, &[arr_ptr, idx_i32, jsvalue_bits]);
+                            let call = builder.ins().call(func_ref, &[arr_ptr, idx_i32, jsvalue_bits]);
+                            let new_arr_ptr = builder.inst_results(call)[0];
+                            // Update the variable with the potentially reallocated pointer
+                            let store_val = if info.is_pointer && !info.is_union {
+                                new_arr_ptr
+                            } else {
+                                builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
+                            };
+                            builder.def_var(info.var, store_val);
                         } else {
                             // BOUNDS CHECK ELIMINATION: Check if index is bounded by this array or constant
                             let (is_bounded, has_constant_bound) = if let Expr::LocalGet(idx_id) = index.as_ref() {

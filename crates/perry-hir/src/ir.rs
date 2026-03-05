@@ -900,6 +900,7 @@ pub enum Expr {
 
     // Array methods
     ArrayPush { array_id: LocalId, value: Box<Expr> },    // arr.push(value) -> new length
+    ArrayPushSpread { array_id: LocalId, source: Box<Expr> }, // arr.push(...src) -> new length
     ArrayPop(LocalId),                                     // arr.pop() -> removed element
     ArrayShift(LocalId),                                   // arr.shift() -> removed element
     ArrayUnshift { array_id: LocalId, value: Box<Expr> }, // arr.unshift(value) -> new length

@@ -1410,6 +1410,12 @@ impl JsEmitter {
                 self.emit_expr(value);
                 self.output.push(')');
             }
+            Expr::ArrayPushSpread { array_id, source } => {
+                let name = self.get_local_name(*array_id);
+                let _ = write!(self.output, "{}.push(...", name);
+                self.emit_expr(source);
+                self.output.push(')');
+            }
             Expr::ArrayPop(id) => {
                 let name = self.get_local_name(*id);
                 let _ = write!(self.output, "{}.pop()", name);

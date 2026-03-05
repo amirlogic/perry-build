@@ -5103,6 +5103,13 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     match method_name {
                                         "push" => {
                                             if args.len() >= 1 {
+                                                // Check if the argument has spread operator
+                                                if call.args.len() >= 1 && call.args[0].spread.is_some() {
+                                                    return Ok(Expr::ArrayPushSpread {
+                                                        array_id,
+                                                        source: Box::new(args.into_iter().next().unwrap()),
+                                                    });
+                                                }
                                                 return Ok(Expr::ArrayPush {
                                                     array_id,
                                                     value: Box::new(args.into_iter().next().unwrap()),
@@ -9470,7 +9477,7 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(path, refs);
         }
         // Array methods
-        Expr::ArrayPush { array_id, value } => {
+        Expr::ArrayPush { array_id, value } | Expr::ArrayPushSpread { array_id, source: value } => {
             refs.push(*array_id);
             collect_local_refs_expr(value, refs);
         }
@@ -10238,7 +10245,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(path, assigned);
         }
         // Array methods - push/unshift may reassign the array pointer
-        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } => {
+        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } | Expr::ArrayPushSpread { array_id, source: value } => {
             assigned.push(*array_id); // These may reallocate the array
             collect_assigned_locals_expr(value, assigned);
         }

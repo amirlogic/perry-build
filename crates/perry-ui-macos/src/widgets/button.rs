@@ -72,7 +72,6 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 /// `label_ptr` is a StringHeader pointer, `on_press` is a NaN-boxed closure pointer.
 pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
     let label = str_from_header(label_ptr);
-    eprintln!("[button] create: label=\"{}\" ptr={:?}", label, label_ptr);
 
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     let ns_string = NSString::from_str(label);
@@ -144,7 +143,6 @@ pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
 
             // Create attributed string with the button's current title
             let title = btn.title();
-            eprintln!("[button] set_text_color: title=\"{}\"", title.to_string());
             let ns_title: *const AnyObject = Retained::as_ptr(&title) as *const AnyObject;
             let cls = AnyClass::get(c"NSAttributedString").unwrap();
             let alloc: *mut AnyObject = msg_send![cls, alloc];

@@ -624,6 +624,14 @@ pub extern "C" fn js_array_set_jsvalue(arr: *mut ArrayHeader, index: u32, value:
     js_array_set_f64(arr, index, bits_as_f64);
 }
 
+/// Set an element in a mixed-type array, extending the array if needed.
+/// Returns the (possibly reallocated) array pointer.
+#[no_mangle]
+pub extern "C" fn js_array_set_jsvalue_extend(arr: *mut ArrayHeader, index: u32, value: u64) -> *mut ArrayHeader {
+    let bits_as_f64 = f64::from_bits(value);
+    js_array_set_f64_extend(arr, index, bits_as_f64)
+}
+
 /// Push a JSValue (as u64 bits) to a mixed-type array
 #[no_mangle]
 pub extern "C" fn js_array_push_jsvalue(arr: *mut ArrayHeader, value: u64) -> *mut ArrayHeader {
