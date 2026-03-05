@@ -10,3 +10,4 @@ pub mod fixer;
 pub mod init;
 pub mod publish;
 pub mod typecheck;
+pub mod update;

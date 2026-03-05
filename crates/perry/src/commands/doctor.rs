@@ -6,6 +6,7 @@ use console::{style, Emoji};
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::update_checker;
 use crate::OutputFormat;
 
 #[derive(Args, Debug)]
@@ -93,6 +94,26 @@ fn check_runtime_library() -> CheckResult {
     }
 }
 
+fn check_update_available() -> CheckResult {
+    match update_checker::check_cached_status() {
+        update_checker::UpdateStatus::UpdateAvailable { latest, .. } => CheckResult {
+            name: "update status".to_string(),
+            status: CheckStatus::Warning,
+            details: Some(format!("v{} available — run `perry update`", latest)),
+        },
+        update_checker::UpdateStatus::UpToDate => CheckResult {
+            name: "update status".to_string(),
+            status: CheckStatus::Ok,
+            details: Some("up to date".to_string()),
+        },
+        update_checker::UpdateStatus::CheckFailed => CheckResult {
+            name: "update status".to_string(),
+            status: CheckStatus::Ok,
+            details: Some("no cached info (run `perry update --check-only`)".to_string()),
+        },
+    }
+}
+
 fn check_project_config() -> CheckResult {
     let config_path = PathBuf::from("perry.toml");
     if config_path.exists() {
@@ -113,6 +134,7 @@ fn check_project_config() -> CheckResult {
 pub fn run(args: DoctorArgs, format: OutputFormat, use_color: bool) -> Result<()> {
     let checks = vec![
         check_perry_version(),
+        check_update_available(),
         check_system_linker(),
         check_runtime_library(),
         check_project_config(),

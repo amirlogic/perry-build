@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.170
+**Current Version:** 0.2.171
 
 ## Workflow Requirements
 
@@ -152,6 +152,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.171
+- **Auto-update checker**: non-blocking background version check on every CLI invocation (24h cache), `perry update` for self-update (download + atomic binary replace)
+- **Update sources**: checks custom server (env/config) → Perry Hub → GitHub API; opt-out via `PERRY_NO_UPDATE_CHECK=1`, `CI=true`, or `--quiet`
+- **`perry doctor`**: now shows update status check (warning if newer version available)
 
 ### v0.2.170
 - **FFI safety**: `catch_callback_panic` helper wraps all ObjC callback methods (timer, pump, shortcut, button, textfield, securefield, picker, toggle, slider, toolbar, table, menu, click) in `catch_unwind` — prevents `abort()` from Rust panics crossing FFI boundary

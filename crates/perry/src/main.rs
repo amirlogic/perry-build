@@ -3,6 +3,7 @@
 //! CLI driver for compiling TypeScript to native executables.
 
 mod commands;
+mod update_checker;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -59,6 +60,9 @@ enum Commands {
 
     /// Build, sign, package and publish your app
     Publish(commands::publish::PublishArgs),
+
+    /// Check for updates and self-update Perry
+    Update(commands::update::UpdateArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -75,7 +79,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "help"
         ) {
             return false;
         }
@@ -116,7 +120,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    match cli.command.unwrap() {
+    // Spawn background update check (non-blocking, cached for 24h)
+    let is_update_cmd = matches!(cli.command, Some(Commands::Update(_)));
+    let bg_check = if !cli.quiet && !is_update_cmd && !update_checker::should_skip_check() {
+        if update_checker::is_cache_stale() {
+            let (_handle, rx) = update_checker::spawn_background_check();
+            Some(rx)
+        } else {
+            None // will check cache after command runs
+        }
+    } else {
+        None
+    };
+
+    let result = match cli.command.unwrap() {
         Commands::Compile(args) => {
             commands::compile::run(args, cli.format, use_color, cli.verbose)
         }
@@ -135,5 +152,26 @@ fn main() -> Result<()> {
         Commands::Publish(args) => {
             commands::publish::run(args, cli.format, use_color, cli.verbose)
         }
+        Commands::Update(args) => {
+            commands::update::run(args, cli.format, use_color, cli.verbose)
+        }
+    };
+
+    // Print update notice if available (to stderr, non-blocking)
+    if !cli.quiet && !is_update_cmd {
+        let use_stderr_color = !cli.no_color && atty::is(atty::Stream::Stderr);
+        let status = if let Some(rx) = bg_check {
+            rx.recv_timeout(std::time::Duration::from_millis(100)).ok()
+        } else if !update_checker::should_skip_check() {
+            Some(update_checker::check_cached_status())
+        } else {
+            None
+        };
+
+        if let Some(update_checker::UpdateStatus::UpdateAvailable { current, latest, release_url }) = status {
+            update_checker::print_update_notice(&current, &latest, &release_url, use_stderr_color);
+        }
     }
+
+    result
 }
