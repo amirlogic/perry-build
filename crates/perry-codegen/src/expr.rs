@@ -4117,8 +4117,8 @@ pub(crate) fn compile_expr(
                             } else {
                                 builder.use_var(info.var)
                             };
-                            // Extract raw pointer from NaN-boxed string (inline, no FFI)
-                            let dest_ptr = inline_get_string_pointer(builder, dest_f64);
+                            // Extract raw pointer from string value (handles both I64 and NaN-boxed F64)
+                            let dest_ptr = get_raw_string_ptr(builder, dest_f64);
 
                             // Compile the right side
                             let rhs_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
@@ -4135,12 +4135,44 @@ pub(crate) fn compile_expr(
                                     inline_get_string_pointer(builder, rhs_val)
                                 }
                             } else {
-                                // Number to string
+                                // RHS type is f64 but could be a NaN-boxed string
+                                // (e.g., from a function call returning string typed as `any`).
+                                // Check at runtime: if upper 16 bits == 0x7FFF (STRING_TAG),
+                                // extract the string pointer; otherwise convert number to string.
+                                let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_val);
+                                let shift_amt = builder.ins().iconst(types::I64, 48);
+                                let tag_bits = builder.ins().ushr(rhs_i64, shift_amt);
+                                let string_tag_val = builder.ins().iconst(types::I64, 0x7FFFi64);
+                                let is_nanboxed_str = builder.ins().icmp(IntCC::Equal, tag_bits, string_tag_val);
+
+                                let str_extract_block = builder.create_block();
+                                let num_convert_block = builder.create_block();
+                                let rhs_merge_block = builder.create_block();
+                                builder.append_block_param(rhs_merge_block, types::I64);
+
+                                builder.ins().brif(is_nanboxed_str, str_extract_block, &[], num_convert_block, &[]);
+
+                                // String path: extract raw pointer from NaN-boxed value
+                                builder.switch_to_block(str_extract_block);
+                                builder.seal_block(str_extract_block);
+                                let ptr_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+                                let extracted_str_ptr = builder.ins().band(rhs_i64, ptr_mask);
+                                builder.ins().jump(rhs_merge_block, &[extracted_str_ptr]);
+
+                                // Number path: convert number to string
+                                builder.switch_to_block(num_convert_block);
+                                builder.seal_block(num_convert_block);
                                 let num_to_str_func = extern_funcs.get("js_number_to_string")
                                     .ok_or_else(|| anyhow!("js_number_to_string not declared"))?;
-                                let func_ref = module.declare_func_in_func(*num_to_str_func, builder.func);
-                                let call = builder.ins().call(func_ref, &[rhs_val]);
-                                builder.inst_results(call)[0]
+                                let n2s_ref = module.declare_func_in_func(*num_to_str_func, builder.func);
+                                let n2s_call = builder.ins().call(n2s_ref, &[rhs_val]);
+                                let num_str_ptr = builder.inst_results(n2s_call)[0];
+                                builder.ins().jump(rhs_merge_block, &[num_str_ptr]);
+
+                                // Merge: rhs_ptr is the string pointer from either path
+                                builder.switch_to_block(rhs_merge_block);
+                                builder.seal_block(rhs_merge_block);
+                                builder.block_params(rhs_merge_block)[0]
                             };
 
                             // Call js_string_append for in-place append
