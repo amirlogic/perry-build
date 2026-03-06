@@ -1,0 +1,668 @@
+//! Module initialization compilation for the codegen module.
+//!
+//! Contains the `compile_init` method which generates the module initialization
+//! function that runs module-level statements, sets up exports, and registers
+//! native instances.
+
+use anyhow::{anyhow, Result};
+use cranelift::prelude::*;
+use cranelift_codegen::ir::AbiParam;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_module::{DataDescription, Init, Linkage, Module};
+use cranelift_object::ObjectModule;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use perry_hir::{
+    Expr, Stmt,
+};
+use perry_types::LocalId;
+
+use crate::types::{ClassMeta, EnumMemberValue, LocalInfo, ThisContext, LoopContext};
+use crate::util::*;
+use crate::stmt::compile_stmt;
+use crate::expr::compile_expr;
+
+impl crate::codegen::Compiler {
+    pub(crate) fn compile_init(&mut self, module_name: &str, stmts: &[Stmt], exported_native_instances: &[(String, String, String)], exported_objects: &[String], exported_functions: &[(String, u32)]) -> Result<()> {
+        let is_dylib = self.output_type == "dylib";
+
+        // Create main function for init statements (entry module) or module init function (non-entry)
+        let mut sig = self.module.make_signature();
+        if is_dylib && self.is_entry_module {
+            // plugin_activate(api_handle: i64) -> i64
+            sig.params.push(AbiParam::new(types::I64)); // api_handle
+            sig.returns.push(AbiParam::new(types::I64)); // success (1) or failure (0)
+        } else {
+            sig.returns.push(AbiParam::new(types::I32)); // returns i32
+        }
+
+        let func_id = if self.is_entry_module && is_dylib {
+            // Dylib: generate "plugin_activate" as the entry point
+            self.module.declare_function("plugin_activate", Linkage::Export, &sig)?
+        } else if self.is_entry_module {
+            // Entry module: generate "main"
+            match self.module.declare_function("main", Linkage::Export, &sig) {
+                Ok(id) => id,
+                Err(_) => {
+                    // "main" already exists (likely user function with different signature)
+                    // Use alternative name for the entry point
+                    self.module.declare_function("_perry_main", Linkage::Export, &sig)?
+                }
+            }
+        } else {
+            // Non-entry module: generate "_perry_init_<module_name>" with export linkage
+            // This function will be called by the entry module's main
+            let sanitized_name = module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+            let func_name = format!("_perry_init_{}", sanitized_name);
+            self.module.declare_function(&func_name, Linkage::Export, &sig)?
+        };
+
+        self.ctx.func.signature = sig;
+
+        // Collect all variables that will be mutably captured by closures (before borrowing self.ctx)
+        let all_boxed_vars = self.collect_mutable_captures_from_stmts(stmts);
+        // Module-level variables use global slots as their box pointer (handled after
+        // data_id assignment below). Only pass non-module-level vars for heap-boxing in Stmt::Let.
+        let boxed_vars: std::collections::HashSet<LocalId> = all_boxed_vars.iter()
+            .filter(|id| !self.module_var_data_ids.contains_key(id))
+            .copied()
+            .collect();
+
+        // Check if we need to call js_runtime_init
+        let needs_js_runtime = self.needs_js_runtime;
+        let js_runtime_init_id = if needs_js_runtime {
+            self.extern_funcs.get("js_runtime_init").copied()
+        } else {
+            None
+        };
+
+        // Collect exported native instance names for post-processing
+        let exported_native_names: HashSet<String> = exported_native_instances.iter()
+            .map(|(name, _, _)| name.clone())
+            .collect();
+        let exported_object_names: HashSet<String> = exported_objects.iter().cloned().collect();
+        // Combine all exported names
+        let exported_names: HashSet<String> = exported_native_names.iter()
+            .chain(exported_object_names.iter())
+            .cloned()
+            .collect();
+        // Collect exported function info for initializing their globals
+        // Each entry is (func_name, data_id, wrapper_or_func_id)
+        let exported_func_info: Vec<(String, cranelift_module::DataId, cranelift_module::FuncId)> = exported_functions
+            .iter()
+            .filter_map(|(func_name, hir_func_id)| {
+                // Get the data ID for this exported function
+                let (data_id, _) = self.exported_function_ids.get(func_name)?;
+                // Get the wrapper function ID if it exists, otherwise the direct function ID
+                let func_id = self.func_wrapper_ids.get(hir_func_id)
+                    .copied()
+                    .or_else(|| self.func_ids.get(hir_func_id).copied())?;
+                Some((func_name.clone(), *data_id, func_id))
+            })
+            .collect();
+
+        // Get js_closure_alloc function ID if we have exported functions
+        let closure_alloc_id = if !exported_func_info.is_empty() {
+            self.extern_funcs.get("js_closure_alloc").copied()
+        } else {
+            None
+        };
+
+        // For non-entry modules, use a runtime init guard to prevent re-entrant
+        // initialization from circular module dependencies (stack overflow).
+        // We call perry_init_guard_check_and_set(module_id) which atomically checks
+        // and sets a bit in a runtime bitset. This is an external function call that
+        // Cranelift cannot optimize away (unlike a local data flag).
+        let init_guard_module_id = if !self.is_entry_module {
+            Some(INIT_MODULE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        } else {
+            None
+        };
+
+        // Pre-collect vtable registration info for all classes (methods + getters).
+        // Must be done before the FunctionBuilder block since self.classes can't be
+        // borrowed while self.ctx.func is mutably borrowed.
+        struct VTableRegInfo {
+            class_id: u32,
+            methods: Vec<(String, cranelift_module::FuncId, usize)>, // (name, func_id, param_count)
+            getters: Vec<(String, cranelift_module::FuncId)>,        // (name, func_id)
+        }
+        let vtable_reg_info: Vec<VTableRegInfo> = self.classes.iter()
+            .map(|(_, meta)| VTableRegInfo {
+                class_id: meta.id,
+                methods: meta.method_ids.iter()
+                    .map(|(n, &fid)| (n.clone(), fid, *meta.method_param_counts.get(n).unwrap_or(&0)))
+                    .collect(),
+                getters: meta.getter_ids.iter()
+                    .map(|(n, &fid)| (n.clone(), fid))
+                    .collect(),
+            })
+            .collect();
+
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        // The shared self.func_ctx accumulates variable declarations across functions
+        let mut init_func_ctx = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut init_func_ctx);
+
+            let entry_block = builder.create_block();
+            if is_dylib && self.is_entry_module {
+                // plugin_activate receives api_handle parameter
+                builder.append_block_params_for_function_params(entry_block);
+            }
+            builder.switch_to_block(entry_block);
+
+            // Re-entrancy guard for non-entry modules: call perry_init_guard_check_and_set()
+            // in the runtime. Returns 1 if already initializing (skip), 0 to proceed.
+            // Using an external function call prevents Cranelift from optimizing the guard away.
+            if let Some(module_id) = init_guard_module_id {
+                let mut guard_sig = self.module.make_signature();
+                guard_sig.params.push(AbiParam::new(types::I64));
+                guard_sig.returns.push(AbiParam::new(types::I32));
+                let guard_func_id = self.module.declare_function(
+                    "perry_init_guard_check_and_set", Linkage::Import, &guard_sig
+                )?;
+                let guard_func_ref = self.module.declare_func_in_func(guard_func_id, builder.func);
+                let id_val = builder.ins().iconst(types::I64, module_id as i64);
+                let call = builder.ins().call(guard_func_ref, &[id_val]);
+                let already_init = builder.inst_results(call)[0];
+
+                let init_block = builder.create_block();
+                let early_ret_block = builder.create_block();
+                let zero = builder.ins().iconst(types::I32, 0);
+                let skip = builder.ins().icmp(IntCC::NotEqual, already_init, zero);
+                builder.ins().brif(skip, early_ret_block, &[], init_block, &[]);
+
+                // Early return block: return 0 (success) without re-initializing
+                builder.switch_to_block(early_ret_block);
+                builder.seal_block(early_ret_block);
+                let ret_val = builder.ins().iconst(types::I32, 0);
+                builder.ins().return_(&[ret_val]);
+
+                // Continue with actual initialization
+                builder.switch_to_block(init_block);
+                builder.seal_block(init_block);
+            }
+
+            builder.seal_block(entry_block);
+
+            // For dylib plugins, skip GC/dispatch init — the host handles those.
+            // For executables, initialize handle method dispatch and GC.
+            if self.is_entry_module && !is_dylib {
+                if let Some(init_dispatch_id) = self.extern_funcs.get("js_stdlib_init_dispatch") {
+                    let init_dispatch_ref = self.module.declare_func_in_func(*init_dispatch_id, builder.func);
+                    builder.ins().call(init_dispatch_ref, &[]);
+                }
+                // Initialize GC (registers root scanners for promises, timers, exceptions)
+                if let Some(gc_init_id) = self.extern_funcs.get("js_gc_init") {
+                    let gc_init_ref = self.module.declare_func_in_func(*gc_init_id, builder.func);
+                    builder.ins().call(gc_init_ref, &[]);
+                }
+            }
+
+            // Initialize JS runtime at the start of main() if needed
+            if let Some(init_func_id) = js_runtime_init_id {
+                let init_func_ref = self.module.declare_func_in_func(init_func_id, builder.func);
+                builder.ins().call(init_func_ref, &[]);
+            }
+
+            // Call imported native module init functions (for entry module only)
+            // This ensures exports from other modules are initialized before we use them
+            if self.is_entry_module {
+                // Declare debug trace function for init order tracing
+                let trace_func_id = {
+                    let mut trace_sig = self.module.make_signature();
+                    trace_sig.params.push(AbiParam::new(types::I64)); // index
+                    trace_sig.params.push(AbiParam::new(types::I64)); // name_ptr
+                    trace_sig.params.push(AbiParam::new(types::I64)); // name_len
+                    self.module.declare_function("perry_debug_trace_init", Linkage::Import, &trace_sig).ok()
+                };
+
+                // Declare done trace function
+                let trace_done_func_id = {
+                    let mut done_sig = self.module.make_signature();
+                    done_sig.params.push(AbiParam::new(types::I64)); // index
+                    self.module.declare_function("perry_debug_trace_init_done", Linkage::Import, &done_sig).ok()
+                };
+
+                for (i, init_func_name) in self.native_module_inits.clone().iter().enumerate() {
+                    // Emit debug trace call before each init
+                    if let Some(trace_id) = trace_func_id {
+                        let trace_ref = self.module.declare_func_in_func(trace_id, builder.func);
+                        let idx_val = builder.ins().iconst(types::I64, i as i64);
+                        // Store init function name as data and pass pointer
+                        let name_bytes = init_func_name.as_bytes();
+                        let data_name = format!("__init_trace_name_{}", i);
+                        if let Ok(data_id) = self.module.declare_data(&data_name, Linkage::Local, false, false) {
+                            let mut data_desc = DataDescription::new();
+                            data_desc.define(name_bytes.to_vec().into_boxed_slice());
+                            if self.module.define_data(data_id, &data_desc).is_ok() {
+                                let gv = self.module.declare_data_in_func(data_id, builder.func);
+                                let name_ptr = builder.ins().global_value(types::I64, gv);
+                                let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+                                builder.ins().call(trace_ref, &[idx_val, name_ptr, name_len]);
+                            }
+                        }
+                    }
+
+                    // Declare the external init function
+                    let mut init_sig = self.module.make_signature();
+                    init_sig.returns.push(AbiParam::new(types::I32));
+                    if let Ok(init_func_id) = self.module.declare_function(init_func_name, Linkage::Import, &init_sig) {
+                        let init_func_ref = self.module.declare_func_in_func(init_func_id, builder.func);
+                        builder.ins().call(init_func_ref, &[]);
+                    }
+
+                    // Emit done trace call after each init
+                    if let Some(done_id) = trace_done_func_id {
+                        let done_ref = self.module.declare_func_in_func(done_id, builder.func);
+                        let idx_val = builder.ins().iconst(types::I64, i as i64);
+                        builder.ins().call(done_ref, &[idx_val]);
+                    }
+                }
+
+                // Register bundled extensions as static plugins.
+                // After all module inits have run, each extension's default export global
+                // is populated. We read it and register it in the runtime lookup table
+                // so perryResolveStaticPlugin() can find it by source path.
+                let bundled_extensions = std::mem::take(&mut self.bundled_extensions);
+                if !bundled_extensions.is_empty() {
+                    let register_func_id = *self.extern_funcs.get("perry_register_static_plugin")
+                        .expect("perry_register_static_plugin not declared");
+                    let register_func_ref = self.module.declare_func_in_func(register_func_id, builder.func);
+
+                    let string_alloc_id = *self.extern_funcs.get("js_string_from_bytes")
+                        .expect("js_string_from_bytes not declared");
+                    let string_alloc_ref = self.module.declare_func_in_func(string_alloc_id, builder.func);
+
+                    for (ext_source_path, ext_module_prefix) in &bundled_extensions {
+                        // Load the extension's default export from __export_<prefix>__default
+                        let export_global_name = format!("__export_{}__default", ext_module_prefix);
+                        let data_id = match self.module.declare_data(&export_global_name, Linkage::Import, true, false) {
+                            Ok(id) => id,
+                            Err(_) => continue,
+                        };
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let addr = builder.ins().global_value(types::I64, gv);
+                        let export_val = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+
+                        // Create string from the source path bytes
+                        let path_bytes = ext_source_path.as_bytes();
+                        let path_data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut path_data_desc = cranelift_module::DataDescription::new();
+                        path_data_desc.define(path_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(path_data_id, &path_data_desc)?;
+                        let path_data_val = self.module.declare_data_in_func(path_data_id, builder.func);
+                        let path_ptr = builder.ins().global_value(types::I64, path_data_val);
+                        let path_len = builder.ins().iconst(types::I32, path_bytes.len() as i64);
+                        let call_inst = builder.ins().call(string_alloc_ref, &[path_ptr, path_len]);
+                        let string_ptr = builder.inst_results(call_inst)[0];
+
+                        // Call perry_register_static_plugin(string_ptr, export_val)
+                        builder.ins().call(register_func_ref, &[string_ptr, export_val]);
+                    }
+                }
+                self.bundled_extensions = bundled_extensions;
+            }
+
+            // Auto-call dotenv.config() if dotenv/config was imported (side-effect import)
+            if self.needs_dotenv_init {
+                if let Some(dotenv_func_id) = self.extern_funcs.get("js_dotenv_config") {
+                    let dotenv_func_ref = self.module.declare_func_in_func(*dotenv_func_id, builder.func);
+                    builder.ins().call(dotenv_func_ref, &[]);
+                }
+            }
+
+            // Runtime-initialize static fields that need heap allocation (strings, etc.)
+            for (data_id, init_expr) in std::mem::take(&mut self.static_field_runtime_inits) {
+                let empty_locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+                let val = compile_expr(
+                    &mut builder, &mut self.module,
+                    &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids,
+                    &self.extern_funcs, &self.async_func_ids,
+                    &self.classes, &self.enums,
+                    &self.func_param_types, &self.func_union_params,
+                    &self.func_return_types, &self.func_hir_return_types,
+                    &self.func_rest_param_index, &self.imported_func_param_counts,
+                    &empty_locals, &init_expr, None,
+                )?;
+                let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                let ptr = builder.ins().global_value(types::I64, global_val);
+                builder.ins().store(MemFlags::new(), val, ptr, 0);
+            }
+
+            // Emit vtable registration calls for every class method and getter.
+            // Using func_addr creates linker roots that prevent dead_strip from
+            // removing methods that are only reached via dynamic dispatch.
+            {
+                let register_method_id = *self.extern_funcs.get("js_register_class_method").unwrap();
+                let register_method_ref = self.module.declare_func_in_func(register_method_id, builder.func);
+
+                for info in &vtable_reg_info {
+                    let class_id_val = builder.ins().iconst(types::I64, info.class_id as i64);
+
+                    for (method_name, method_func_id, param_count) in &info.methods {
+                        // Embed method name as static data
+                        let name_bytes = method_name.as_bytes();
+                        let data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut desc = cranelift_module::DataDescription::new();
+                        desc.define(name_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(data_id, &desc)?;
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let name_ptr = builder.ins().global_value(types::I64, gv);
+                        let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                        // Get function address — this also creates a linker root
+                        let func_ref = self.module.declare_func_in_func(*method_func_id, builder.func);
+                        let func_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+                        let pc_val = builder.ins().iconst(types::I64, *param_count as i64);
+
+                        builder.ins().call(register_method_ref, &[
+                            class_id_val, name_ptr, name_len, func_ptr, pc_val,
+                        ]);
+                    }
+                }
+            }
+
+            {
+                let register_getter_id = *self.extern_funcs.get("js_register_class_getter").unwrap();
+                let register_getter_ref = self.module.declare_func_in_func(register_getter_id, builder.func);
+
+                for info in &vtable_reg_info {
+                    let class_id_val = builder.ins().iconst(types::I64, info.class_id as i64);
+
+                    for (getter_name, getter_func_id) in &info.getters {
+                        // Embed getter name as static data
+                        let name_bytes = getter_name.as_bytes();
+                        let data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut desc = cranelift_module::DataDescription::new();
+                        desc.define(name_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(data_id, &desc)?;
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let name_ptr = builder.ins().global_value(types::I64, gv);
+                        let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                        // Get function address
+                        let func_ref = self.module.declare_func_in_func(*getter_func_id, builder.func);
+                        let func_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+                        builder.ins().call(register_getter_ref, &[
+                            class_id_val, name_ptr, name_len, func_ptr,
+                        ]);
+                    }
+                }
+            }
+
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut next_var = 0;
+
+            for stmt in stmts {
+                // Check if this statement is a Let for a module-level variable
+                if let Stmt::Let { name, init: Some(_init_expr), id, .. } = stmt {
+                    // Compile the statement to get the value (this creates the local variable)
+                    compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)?;
+
+                    // Get the value from the local variable
+                    if let Some(local_info) = locals.get(id).cloned() {
+                        let val = builder.use_var(local_info.var);
+
+                        // Store to exported global if this is an exported variable
+                        if exported_names.contains(name) {
+                            let data_id = self.exported_native_instance_ids.get(name)
+                                .or_else(|| self.exported_object_ids.get(name))
+                                .copied();
+                            if let Some(data_id) = data_id {
+                                let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                                let ptr = builder.ins().global_value(types::I64, global_val);
+
+                                // For pointer types (arrays, objects), NaN-box the pointer before storing
+                                // so that importing modules can load them uniformly as f64
+                                let val_to_store = if local_info.is_pointer && !local_info.is_string {
+                                    let val_type = builder.func.dfg.value_type(val);
+                                    if val_type == types::I64 {
+                                        // Raw I64 pointer - NaN-box it
+                                        let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[val]);
+                                        builder.inst_results(call)[0]
+                                    } else if local_info.is_union {
+                                        // Union-typed F64 value that's actually a pointer (bitcast from I64)
+                                        // Extract the raw pointer bits and NaN-box properly
+                                        let i64_val = ensure_i64(&mut builder, val);
+                                        let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[i64_val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        // Already NaN-boxed F64, use as-is
+                                        val
+                                    }
+                                } else {
+                                    val
+                                };
+                                builder.ins().store(MemFlags::new(), val_to_store, ptr, 0);
+                            }
+                        }
+
+                        // Also store to module variable global for function access
+                        if let Some(data_id) = self.module_var_data_ids.get(id).copied() {
+                            let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, global_val);
+                            builder.ins().store(MemFlags::new(), val, ptr, 0);
+                            // Store the LocalInfo so compile_function knows the type
+                            self.module_level_locals.insert(*id, local_info);
+                            // Tag the local with its global slot DataId so that closures
+                            // capturing this variable mutably can use the global slot as
+                            // the box, keeping named-function reads in sync.
+                            if let Some(local_info_mut) = locals.get_mut(id) {
+                                local_info_mut.module_var_data_id = Some(data_id);
+                            }
+
+                            // For module-level variables that are mutably captured by closures,
+                            // convert to boxed access using the global slot address as the box pointer.
+                            // This ensures the outer scope always reads the latest value after
+                            // closures modify the variable via js_box_set on the global slot.
+                            if all_boxed_vars.contains(id) {
+                                let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                                let slot_addr = builder.ins().global_value(types::I64, global_val);
+
+                                let box_var = Variable::new(next_var);
+                                next_var += 1;
+                                builder.declare_var(box_var, types::I64);
+                                builder.def_var(box_var, slot_addr);
+
+                                if let Some(local_info_mut) = locals.get_mut(id) {
+                                    local_info_mut.var = box_var;
+                                    local_info_mut.is_boxed = true;
+                                }
+                            }
+                        }
+                    }
+                    // Fall through to reload module vars below
+                } else {
+                    compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)?;
+                }
+
+                // Note: Module-level Cranelift variables may be stale after function calls
+                // that modify module variables (the called function writes to the global slot
+                // but the init function's local variable isn't updated). This is handled by
+                // disabling function inlining in init statements (see inline.rs Phase 4),
+                // which ensures function calls like getIt() generate actual calls that load
+                // from the global slot at function entry. Direct module variable reads
+                // (e.g., console.log(counter) after inc()) still read the stale local value,
+                // but this is a rare pattern in practice.
+            }
+
+            // NOTE: The old "write back all module-level variables" loop was removed.
+            // With the LocalSet write-back fix (Bug #17), every assignment to a module
+            // variable immediately writes to the global slot. The old blanket write-back
+            // was harmful: it stored STALE init-local values back to globals, overwriting
+            // values that called functions had written via their own LocalSet write-backs.
+
+            // Initialize exported function globals with closure values
+            // This allows functions to be passed as values to other modules
+            if let Some(alloc_func_id) = closure_alloc_id {
+                let alloc_ref = self.module.declare_func_in_func(alloc_func_id, builder.func);
+                // Get js_nanbox_pointer function for proper NaN-boxing
+                let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
+
+                for (_func_name, data_id, wrapper_func_id) in &exported_func_info {
+                    // Get the function address
+                    let func_ref = self.module.declare_func_in_func(*wrapper_func_id, builder.func);
+                    let func_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+                    // Allocate a closure with 0 captures
+                    let capture_count = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(alloc_ref, &[func_ptr, capture_count]);
+                    let closure_ptr = builder.inst_results(call)[0];
+
+                    // Properly NaN-box the closure pointer using js_nanbox_pointer
+                    // This ensures typeof returns "object" (closures are objects) and
+                    // the value can be properly recognized by runtime functions
+                    let nanbox_call = builder.ins().call(nanbox_ref, &[closure_ptr]);
+                    let closure_val = builder.inst_results(nanbox_call)[0];
+
+                    // Store to the exported global
+                    let global_val = self.module.declare_data_in_func(*data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), closure_val, ptr, 0);
+                }
+            }
+
+            // Register module-level variable addresses as GC roots
+            // This ensures the GC can find references stored in module globals
+            if let Some(gc_root_id) = self.extern_funcs.get("js_gc_register_global_root").copied() {
+                let gc_root_ref = self.module.declare_func_in_func(gc_root_id, builder.func);
+                for (_local_id, data_id) in &self.module_var_data_ids {
+                    let global_val = self.module.declare_data_in_func(*data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().call(gc_root_ref, &[ptr]);
+                }
+            }
+
+            // For dylib plugins, call the user's exported activate(api) function
+            // Use direct func_ids (not wrappers, which have an extra closure_ptr param)
+            if is_dylib && self.is_entry_module {
+                let current_block = builder.current_block().unwrap();
+                if !is_block_filled(&builder, current_block) {
+                    // Find the "activate" function's direct (non-wrapper) Cranelift func ID
+                    let activate_func_id = exported_functions.iter()
+                        .find(|(name, _)| name == "activate")
+                        .and_then(|(_, hir_id)| self.func_ids.get(hir_id).copied());
+                    if let Some(func_id) = activate_func_id {
+                        let api_handle = builder.block_params(entry_block)[0]; // i64
+                        // NaN-box api_handle with POINTER_TAG: 0x7FFD << 48 | (handle & 0x0000_FFFF_FFFF_FFFF)
+                        let tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
+                        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+                        let masked = builder.ins().band(api_handle, mask);
+                        let nanboxed = builder.ins().bor(tag, masked);
+                        // Check the activate function's parameter type and pass accordingly
+                        let activate_ref = self.module.declare_func_in_func(func_id, builder.func);
+                        let sig = builder.func.dfg.ext_funcs[activate_ref].signature;
+                        let param_type = builder.func.dfg.signatures[sig].params[0].value_type;
+                        let arg = if param_type == types::F64 {
+                            builder.ins().bitcast(types::F64, MemFlags::new(), nanboxed)
+                        } else {
+                            nanboxed // i64
+                        };
+                        builder.ins().call(activate_ref, &[arg]);
+                    }
+                }
+            }
+
+            // Return from init function (if not already terminated)
+            let current_block = builder.current_block().unwrap();
+            if !is_block_filled(&builder, current_block) {
+                if is_dylib && self.is_entry_module {
+                    // plugin_activate returns 1 (success) as i64
+                    let one = builder.ins().iconst(types::I64, 1);
+                    builder.ins().return_(&[one]);
+                } else {
+                    let zero = builder.ins().iconst(types::I32, 0);
+                    builder.ins().return_(&[zero]);
+                }
+            }
+
+            let fn_name = if self.is_entry_module && is_dylib {
+                "plugin_activate"
+            } else if self.is_entry_module {
+                "main"
+            } else {
+                module_name
+            };
+            builder.finalize();
+        }
+
+        let func_name = if self.is_entry_module && is_dylib {
+            "plugin_activate"
+        } else if self.is_entry_module {
+            "main"
+        } else {
+            module_name
+        };
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in init/main '{}' ===", func_name);
+            eprintln!("Error: {}", e);
+            eprintln!("Debug: {:?}", e);
+            // Print the CLIF IR for debugging
+            eprintln!("=== CLIF IR ===");
+            eprintln!("{}", self.ctx.func.display());
+            return Err(anyhow!("Error compiling init/main '{}': {}", func_name, e));
+        }
+        self.module.clear_context(&mut self.ctx);
+
+        // For dylib entry module, also generate plugin_deactivate and perry_plugin_abi_version
+        if is_dylib && self.is_entry_module {
+            // Generate plugin_deactivate() -> void
+            // Calls the user's deactivate() function if exported, then returns
+            {
+                let sig = self.module.make_signature();
+                let deactivate_id = self.module.declare_function("plugin_deactivate", Linkage::Export, &sig)?;
+                self.ctx.func.signature = sig;
+                let mut deactivate_ctx = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut deactivate_ctx);
+                let block = builder.create_block();
+                builder.switch_to_block(block);
+                builder.seal_block(block);
+                // Call user's deactivate() if exported (use direct func, not wrapper)
+                let deactivate_func_id = exported_functions.iter()
+                    .find(|(name, _)| name == "deactivate")
+                    .and_then(|(_, hir_id)| self.func_ids.get(hir_id).copied());
+                if let Some(func_id) = deactivate_func_id {
+                    let deactivate_ref = self.module.declare_func_in_func(func_id, builder.func);
+                    builder.ins().call(deactivate_ref, &[]);
+                }
+                builder.ins().return_(&[]);
+                builder.finalize();
+                self.module.define_function(deactivate_id, &mut self.ctx)?;
+                self.module.clear_context(&mut self.ctx);
+            }
+
+            // Generate perry_plugin_abi_version() -> u64
+            {
+                let mut sig = self.module.make_signature();
+                sig.returns.push(AbiParam::new(types::I64));
+                let version_id = self.module.declare_function("perry_plugin_abi_version", Linkage::Export, &sig)?;
+                self.ctx.func.signature = sig;
+                let mut version_ctx = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut version_ctx);
+                let block = builder.create_block();
+                builder.switch_to_block(block);
+                builder.seal_block(block);
+                let version = builder.ins().iconst(types::I64, 2); // ABI version 2
+                builder.ins().return_(&[version]);
+                builder.finalize();
+                self.module.define_function(version_id, &mut self.ctx)?;
+                self.module.clear_context(&mut self.ctx);
+            }
+        }
+
+        Ok(())
+    }
+
+}

@@ -1,0 +1,682 @@
+//! Type extraction and inference utilities for HIR lowering.
+//!
+//! Contains functions for inferring types from expressions, extracting
+//! TypeScript type annotations, and parsing function parameter types.
+
+use perry_types::{Type, TypeParam};
+use swc_ecma_ast as ast;
+
+use crate::ir::*;
+use crate::lower::LoweringContext;
+use crate::lower_patterns::{get_pat_name, lower_lit};
+
+pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> Type {
+    match expr {
+        // Literals
+        ast::Expr::Lit(lit) => match lit {
+            ast::Lit::Num(_) => Type::Number,
+            ast::Lit::Str(_) => Type::String,
+            ast::Lit::Bool(_) => Type::Boolean,
+            ast::Lit::BigInt(_) => Type::BigInt,
+            ast::Lit::Null(_) => Type::Null,
+            ast::Lit::Regex(_) => Type::Named("RegExp".to_string()),
+            _ => Type::Any,
+        },
+
+        // Template literals are always strings
+        ast::Expr::Tpl(_) => Type::String,
+
+        // Array literals → infer element type from first element
+        ast::Expr::Array(arr) => {
+            let elem_ty = arr.elems.iter()
+                .find_map(|e| e.as_ref().map(|elem| infer_type_from_expr(&elem.expr, ctx)))
+                .unwrap_or(Type::Any);
+            Type::Array(Box::new(elem_ty))
+        }
+
+        // Variable reference → look up known type
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.as_ref();
+            ctx.lookup_local_type(name).cloned().unwrap_or(Type::Any)
+        }
+
+        // Binary operators
+        ast::Expr::Bin(bin) => {
+            use ast::BinaryOp::*;
+            match bin.op {
+                // Comparison/equality operators always return boolean
+                EqEq | NotEq | EqEqEq | NotEqEq | Lt | LtEq | Gt | GtEq |
+                In | InstanceOf => Type::Boolean,
+
+                // Addition: string if either side is string, else number if both number
+                Add => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if matches!(left, Type::String) || matches!(right, Type::String) {
+                        Type::String
+                    } else if matches!(left, Type::Number) && matches!(right, Type::Number) {
+                        Type::Number
+                    } else {
+                        Type::Any
+                    }
+                }
+
+                // Arithmetic operators → Number if both sides Number
+                Sub | Mul | Div | Mod | Exp => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if matches!(left, Type::Number | Type::Int32) && matches!(right, Type::Number | Type::Int32) {
+                        Type::Number
+                    } else {
+                        Type::Any
+                    }
+                }
+
+                // Bitwise operators → Number
+                BitAnd | BitOr | BitXor | LShift | RShift | ZeroFillRShift => Type::Number,
+
+                // Logical operators → type of operands (simplified)
+                LogicalAnd | LogicalOr => {
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if !matches!(right, Type::Any) { right } else {
+                        infer_type_from_expr(&bin.left, ctx)
+                    }
+                }
+                NullishCoalescing => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    if !matches!(left, Type::Any) { left } else {
+                        infer_type_from_expr(&bin.right, ctx)
+                    }
+                }
+            }
+        }
+
+        // Unary operators
+        ast::Expr::Unary(unary) => {
+            match unary.op {
+                ast::UnaryOp::TypeOf => Type::String,
+                ast::UnaryOp::Void => Type::Void,
+                ast::UnaryOp::Bang => Type::Boolean,
+                ast::UnaryOp::Minus | ast::UnaryOp::Plus | ast::UnaryOp::Tilde => Type::Number,
+                _ => Type::Any,
+            }
+        }
+
+        // Update expressions (++, --) → Number
+        ast::Expr::Update(_) => Type::Number,
+
+        // typeof always returns string
+        // Conditional (ternary) → try both branches
+        ast::Expr::Cond(cond) => {
+            let cons = infer_type_from_expr(&cond.cons, ctx);
+            let alt = infer_type_from_expr(&cond.alt, ctx);
+            if cons == alt { cons } else { Type::Any }
+        }
+
+        // Parenthesized expression
+        ast::Expr::Paren(paren) => infer_type_from_expr(&paren.expr, ctx),
+
+        // Type assertion (x as T) → extract the asserted type
+        ast::Expr::TsAs(ts_as) => extract_ts_type(&ts_as.type_ann),
+
+        // Non-null assertion (x!) → infer inner type
+        ast::Expr::TsNonNull(non_null) => infer_type_from_expr(&non_null.expr, ctx),
+
+        // Await expression → unwrap Promise
+        ast::Expr::Await(await_expr) => {
+            let inner = infer_type_from_expr(&await_expr.arg, ctx);
+            match inner {
+                Type::Promise(inner_ty) => *inner_ty,
+                other => other,
+            }
+        }
+
+        // Function calls → look up known return types
+        ast::Expr::Call(call) => {
+            if let ast::Callee::Expr(callee) = &call.callee {
+                infer_call_return_type(callee, ctx)
+            } else {
+                Type::Any
+            }
+        }
+
+        // Method calls on known types
+        ast::Expr::Member(member) => {
+            // Property access on known types (e.g., arr.length → Number)
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                let prop_name = prop.sym.as_ref();
+                let obj_ty = infer_type_from_expr(&member.obj, ctx);
+                match (&obj_ty, prop_name) {
+                    (Type::Array(_), "length") => Type::Number,
+                    (Type::String, "length") => Type::Number,
+                    _ => Type::Any,
+                }
+            } else {
+                Type::Any
+            }
+        }
+
+        // Assignments return the assigned value type
+        ast::Expr::Assign(assign) => infer_type_from_expr(&assign.right, ctx),
+
+        // new Array(), new Map(), etc. handled separately in var decl lowering
+        // Object literals
+        ast::Expr::Object(_) => Type::Any, // Could be refined but objects have complex shapes
+
+        // Arrow/function expressions
+        ast::Expr::Arrow(arrow) => {
+            let return_type = arrow.return_type.as_ref()
+                .map(|rt| extract_ts_type(&rt.type_ann))
+                .unwrap_or(Type::Any);
+            Type::Function(perry_types::FunctionType {
+                params: arrow.params.iter().map(|p| {
+                    let name = get_pat_name(p).unwrap_or_default();
+                    let ty = extract_param_type_with_ctx(p, None);
+                    (name, ty, false)
+                }).collect(),
+                return_type: Box::new(return_type),
+                is_async: arrow.is_async,
+                is_generator: arrow.is_generator,
+            })
+        }
+
+        _ => Type::Any,
+    }
+}
+
+/// Infer the return type of a function/method call expression.
+pub(crate) fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) -> Type {
+    match callee {
+        // Direct function call: foo()
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.as_ref();
+            // Check user-defined function return types
+            if let Some(ty) = ctx.lookup_func_return_type(name) {
+                return ty.clone();
+            }
+            // Known built-in functions
+            match name {
+                "parseInt" | "parseFloat" | "Number" | "Math" => Type::Number,
+                "String" => Type::String,
+                "Boolean" => Type::Boolean,
+                "isNaN" | "isFinite" => Type::Boolean,
+                "Array" => Type::Array(Box::new(Type::Any)),
+                _ => Type::Any,
+            }
+        }
+        // Method call: obj.method()
+        ast::Expr::Member(member) => {
+            if let ast::MemberProp::Ident(method) = &member.prop {
+                let method_name = method.sym.as_ref();
+                let obj_ty = infer_type_from_expr(&member.obj, ctx);
+
+                // String methods
+                if matches!(obj_ty, Type::String) {
+                    return match method_name {
+                        "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase"
+                        | "slice" | "substring" | "substr" | "replace" | "replaceAll"
+                        | "padStart" | "padEnd" | "repeat" | "charAt" | "concat"
+                        | "normalize" | "toLocaleLowerCase" | "toLocaleUpperCase" => Type::String,
+                        "indexOf" | "lastIndexOf" | "search" | "charCodeAt"
+                        | "codePointAt" | "localeCompare" => Type::Number,
+                        "startsWith" | "endsWith" | "includes" => Type::Boolean,
+                        "split" => Type::Array(Box::new(Type::String)),
+                        "match" | "matchAll" => Type::Any, // complex return types
+                        _ => Type::Any,
+                    };
+                }
+
+                // Array methods
+                if let Type::Array(elem_ty) = &obj_ty {
+                    return match method_name {
+                        "push" | "unshift" | "indexOf" | "lastIndexOf" | "findIndex" => Type::Number,
+                        "join" => Type::String,
+                        "includes" | "every" | "some" => Type::Boolean,
+                        "pop" | "shift" | "find" | "at" => *elem_ty.clone(),
+                        "map" | "filter" | "slice" | "concat" | "flat" | "flatMap"
+                        | "reverse" | "sort" | "splice" => obj_ty.clone(),
+                        "reduce" => Type::Any, // depends on accumulator
+                        "fill" => obj_ty.clone(),
+                        "forEach" => Type::Void,
+                        "length" => Type::Number,
+                        _ => Type::Any,
+                    };
+                }
+
+                // Number methods
+                if matches!(obj_ty, Type::Number | Type::Int32) {
+                    return match method_name {
+                        "toFixed" | "toPrecision" | "toExponential" | "toString" => Type::String,
+                        "valueOf" => Type::Number,
+                        _ => Type::Any,
+                    };
+                }
+
+                // Math.* methods
+                if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                    let obj_name = obj_ident.sym.as_ref();
+                    if obj_name == "Math" {
+                        return match method_name {
+                            "floor" | "ceil" | "round" | "abs" | "sqrt" | "pow" | "min" | "max"
+                            | "random" | "log" | "log2" | "log10" | "sin" | "cos" | "tan"
+                            | "asin" | "acos" | "atan" | "atan2" | "exp" | "sign" | "trunc"
+                            | "cbrt" | "hypot" | "fround" | "clz32" | "imul" => Type::Number,
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "Number" {
+                        return match method_name {
+                            "parseInt" | "parseFloat" | "EPSILON" | "MAX_SAFE_INTEGER"
+                            | "MIN_SAFE_INTEGER" | "MAX_VALUE" | "MIN_VALUE" => Type::Number,
+                            "isNaN" | "isFinite" | "isInteger" | "isSafeInteger" => Type::Boolean,
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "JSON" {
+                        return match method_name {
+                            "stringify" => Type::String,
+                            _ => Type::Any,  // parse returns any
+                        };
+                    }
+                    if obj_name == "Object" {
+                        return match method_name {
+                            "keys" | "values" => Type::Array(Box::new(Type::Any)),
+                            "entries" => Type::Array(Box::new(Type::Any)),
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "Date" {
+                        return match method_name {
+                            "now" => Type::Number,
+                            _ => Type::Any,
+                        };
+                    }
+                    // console.log etc → void
+                    if obj_name == "console" {
+                        return Type::Void;
+                    }
+                }
+
+                // Generic .toString() on any object → String
+                if method_name == "toString" {
+                    return Type::String;
+                }
+            }
+            Type::Any
+        }
+        _ => Type::Any,
+    }
+}
+
+/// Extract type parameters from SWC's TsTypeParamDecl
+pub(crate) fn extract_type_params(decl: &ast::TsTypeParamDecl) -> Vec<TypeParam> {
+    decl.params
+        .iter()
+        .map(|p| {
+            let name = p.name.sym.to_string();
+            let constraint = p.constraint.as_ref().map(|c| Box::new(extract_ts_type(c)));
+            let default = p.default.as_ref().map(|d| Box::new(extract_ts_type(d)));
+            TypeParam {
+                name,
+                constraint,
+                default,
+            }
+        })
+        .collect()
+}
+
+/// Extract a Type from an SWC TypeScript type annotation
+/// This version doesn't have access to type parameter context
+pub(crate) fn extract_ts_type(ts_type: &ast::TsType) -> Type {
+    extract_ts_type_with_ctx(ts_type, None)
+}
+
+/// Extract a Type from an SWC TypeScript type annotation with type parameter context
+pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&LoweringContext>) -> Type {
+    use ast::TsType::*;
+    use ast::TsKeywordTypeKind::*;
+
+    match ts_type {
+        // Keyword types (primitives)
+        TsKeywordType(kw) => match kw.kind {
+            TsNumberKeyword => Type::Number,
+            TsStringKeyword => Type::String,
+            TsBooleanKeyword => Type::Boolean,
+            TsBigIntKeyword => Type::BigInt,
+            TsVoidKeyword => Type::Void,
+            TsNullKeyword => Type::Null,
+            TsUndefinedKeyword => Type::Void,
+            TsAnyKeyword => Type::Any,
+            TsUnknownKeyword => Type::Unknown,
+            TsNeverKeyword => Type::Never,
+            TsSymbolKeyword => Type::Symbol,
+            TsObjectKeyword => Type::Any, // Generic object
+            TsIntrinsicKeyword => Type::Any,
+        },
+
+        // Array type: T[]
+        TsArrayType(arr) => {
+            let elem_type = extract_ts_type_with_ctx(&arr.elem_type, ctx);
+            Type::Array(Box::new(elem_type))
+        }
+
+        // Tuple type: [T, U, V]
+        TsTupleType(tuple) => {
+            let elem_types: Vec<Type> = tuple
+                .elem_types
+                .iter()
+                .map(|elem| extract_ts_type_with_ctx(&elem.ty, ctx))
+                .collect();
+            Type::Tuple(elem_types)
+        }
+
+        // Union type: A | B | C
+        TsUnionOrIntersectionType(union_or_inter) => {
+            match union_or_inter {
+                ast::TsUnionOrIntersectionType::TsUnionType(union) => {
+                    let types: Vec<Type> = union
+                        .types
+                        .iter()
+                        .map(|t| extract_ts_type_with_ctx(t, ctx))
+                        .collect();
+                    Type::Union(types)
+                }
+                ast::TsUnionOrIntersectionType::TsIntersectionType(_) => {
+                    // Intersection types are complex - treat as Any for now
+                    Type::Any
+                }
+            }
+        }
+
+        // Type reference: Array<T>, MyClass, T (type param), etc.
+        TsTypeRef(type_ref) => {
+            let name = match &type_ref.type_name {
+                ast::TsEntityName::Ident(ident) => ident.sym.to_string(),
+                ast::TsEntityName::TsQualifiedName(qname) => {
+                    // Qualified names like Foo.Bar
+                    format!("{}.{}", get_ts_entity_name(&qname.left), qname.right.sym)
+                }
+            };
+
+            // First check if this is a type parameter reference (like T, K, V)
+            if let Some(context) = ctx {
+                if context.is_type_param(&name) {
+                    return Type::TypeVar(name);
+                }
+            }
+
+            // Check for built-in generic types or generic instantiations
+            if let Some(type_params) = &type_ref.type_params {
+                match name.as_str() {
+                    "Array" if !type_params.params.is_empty() => {
+                        let elem_type = extract_ts_type_with_ctx(&type_params.params[0], ctx);
+                        return Type::Array(Box::new(elem_type));
+                    }
+                    "Promise" if !type_params.params.is_empty() => {
+                        let result_type = extract_ts_type_with_ctx(&type_params.params[0], ctx);
+                        return Type::Promise(Box::new(result_type));
+                    }
+                    _ => {
+                        // Generic type instantiation (e.g., Box<number>, Map<string, number>)
+                        let type_args: Vec<Type> = type_params
+                            .params
+                            .iter()
+                            .map(|t| extract_ts_type_with_ctx(t, ctx))
+                            .collect();
+                        return Type::Generic {
+                            base: name,
+                            type_args,
+                        };
+                    }
+                }
+            }
+
+            Type::Named(name)
+        }
+
+        // Function type: (a: T, b: U) => R
+        TsFnOrConstructorType(fn_type) => {
+            match fn_type {
+                ast::TsFnOrConstructorType::TsFnType(fn_ty) => {
+                    // Extract parameter types
+                    let params: Vec<(String, Type, bool)> = fn_ty
+                        .params
+                        .iter()
+                        .map(|p| {
+                            let (name, ty) = get_fn_param_name_and_type_with_ctx(p, ctx);
+                            (name, ty, false) // TODO: detect optional params
+                        })
+                        .collect();
+
+                    let return_type = extract_ts_type_with_ctx(&fn_ty.type_ann.type_ann, ctx);
+
+                    Type::Function(perry_types::FunctionType {
+                        params,
+                        return_type: Box::new(return_type),
+                        is_async: false,
+                        is_generator: false,
+                    })
+                }
+                ast::TsFnOrConstructorType::TsConstructorType(_) => {
+                    // Constructor types are complex - treat as Any for now
+                    Type::Any
+                }
+            }
+        }
+
+        // Literal types: "foo", 42, true
+        TsLitType(lit) => match &lit.lit {
+            ast::TsLit::Number(_) => Type::Number,
+            ast::TsLit::Str(_) => Type::String,
+            ast::TsLit::Bool(_) => Type::Boolean,
+            ast::TsLit::BigInt(_) => Type::BigInt,
+            ast::TsLit::Tpl(_) => Type::String,
+        },
+
+        // Parenthesized type: (T)
+        TsParenthesizedType(paren) => extract_ts_type_with_ctx(&paren.type_ann, ctx),
+
+        // Optional type: T?
+        TsOptionalType(opt) => extract_ts_type_with_ctx(&opt.type_ann, ctx),
+
+        // Rest type: ...T
+        TsRestType(rest) => extract_ts_type_with_ctx(&rest.type_ann, ctx),
+
+        // Type query: typeof x
+        TsTypeQuery(_) => Type::Any,
+
+        // Conditional type: T extends U ? X : Y
+        TsConditionalType(_) => Type::Any,
+
+        // Mapped type: { [K in T]: U }
+        TsMappedType(_) => Type::Any,
+
+        // Index access: T[K]
+        TsIndexedAccessType(_) => Type::Any,
+
+        // Infer type: infer T
+        TsInferType(_) => Type::Any,
+
+        // this type
+        TsThisType(_) => Type::Any,
+
+        // Type predicate: x is T
+        TsTypePredicate(_) => Type::Boolean,
+
+        // Import type: import("module").Type
+        TsImportType(_) => Type::Any,
+
+        // Type operator: keyof T, readonly T, unique symbol
+        TsTypeOperator(_) => Type::Any,
+
+        // Type literal: { a: T, b: U }
+        TsTypeLit(_) => Type::Any, // TODO: Extract to ObjectType
+    }
+}
+
+/// Helper to get name from TsEntityName
+pub(crate) fn get_ts_entity_name(entity: &ast::TsEntityName) -> String {
+    match entity {
+        ast::TsEntityName::Ident(ident) => ident.sym.to_string(),
+        ast::TsEntityName::TsQualifiedName(qname) => {
+            format!("{}.{}", get_ts_entity_name(&qname.left), qname.right.sym)
+        }
+    }
+}
+
+/// Helper to get parameter name and type from TsFnParam
+pub(crate) fn get_fn_param_name_and_type(param: &ast::TsFnParam) -> (String, Type) {
+    get_fn_param_name_and_type_with_ctx(param, None)
+}
+
+/// Helper to get parameter name and type from TsFnParam with context
+pub(crate) fn get_fn_param_name_and_type_with_ctx(param: &ast::TsFnParam, ctx: Option<&LoweringContext>) -> (String, Type) {
+    match param {
+        ast::TsFnParam::Ident(ident) => {
+            let name = ident.id.sym.to_string();
+            let ty = ident.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any);
+            (name, ty)
+        }
+        ast::TsFnParam::Array(arr) => {
+            let ty = arr.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any);
+            ("_array".to_string(), ty)
+        }
+        ast::TsFnParam::Rest(rest) => {
+            let ty = rest.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any);
+            ("_rest".to_string(), ty)
+        }
+        ast::TsFnParam::Object(obj) => {
+            let ty = obj.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any);
+            ("_obj".to_string(), ty)
+        }
+    }
+}
+
+/// Extract type from an optional type annotation
+pub(crate) fn extract_type_annotation(type_ann: &Option<Box<ast::TsTypeAnn>>) -> Type {
+    type_ann
+        .as_ref()
+        .map(|ann| extract_ts_type(&ann.type_ann))
+        .unwrap_or(Type::Any)
+}
+
+/// Extract class name from a member expression (e.g., "ethers.JsonRpcProvider" -> "JsonRpcProvider")
+/// This is used for extends clauses that reference external module classes
+pub(crate) fn extract_member_class_name(member: &ast::MemberExpr) -> String {
+    match &member.prop {
+        ast::MemberProp::Ident(ident) => ident.sym.to_string(),
+        ast::MemberProp::Computed(computed) => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = computed.expr.as_ref() {
+                s.value.as_str().unwrap_or("UnknownClass").to_string()
+            } else {
+                "UnknownClass".to_string()
+            }
+        }
+        ast::MemberProp::PrivateName(priv_name) => priv_name.name.to_string(),
+    }
+}
+
+/// Extract type from a pattern (handles BindingIdent with type annotation)
+/// Used for both parameter patterns and variable declaration bindings
+pub(crate) fn extract_pattern_type(pat: &ast::Pat) -> Type {
+    extract_pattern_type_with_ctx(pat, None)
+}
+
+/// Extract type from a pattern with type parameter context
+pub(crate) fn extract_pattern_type_with_ctx(pat: &ast::Pat, ctx: Option<&LoweringContext>) -> Type {
+    match pat {
+        ast::Pat::Ident(ident) => {
+            ident.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Array(arr) => {
+            arr.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Rest(rest) => {
+            rest.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Object(obj) => {
+            obj.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Assign(assign) => {
+            // For default parameters, get type from the left side
+            extract_pattern_type_with_ctx(&assign.left, ctx)
+        }
+        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => Type::Any,
+    }
+}
+
+/// Alias for parameter type extraction (same as pattern type)
+pub(crate) fn extract_param_type(pat: &ast::Pat) -> Type {
+    extract_pattern_type(pat)
+}
+
+/// Alias for parameter type extraction with context
+pub(crate) fn extract_param_type_with_ctx(pat: &ast::Pat, ctx: Option<&LoweringContext>) -> Type {
+    extract_pattern_type_with_ctx(pat, ctx)
+}
+
+/// Extract type from a variable declaration binding
+pub(crate) fn extract_binding_type(binding: &ast::Pat) -> Type {
+    extract_pattern_type(binding)
+}
+
+/// Lower decorators from SWC AST to HIR Decorators
+pub(crate) fn lower_decorators(_ctx: &mut LoweringContext, decorators: &[ast::Decorator]) -> Vec<Decorator> {
+    decorators.iter().filter_map(|dec| {
+        // The decorator expression can be:
+        // - Identifier: @log
+        // - Call expression: @log("prefix")
+        match dec.expr.as_ref() {
+            ast::Expr::Ident(ident) => {
+                Some(Decorator {
+                    name: ident.sym.to_string(),
+                    args: Vec::new(),
+                })
+            }
+            ast::Expr::Call(call) => {
+                // Get the callee name
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = callee_expr.as_ref() {
+                        // Lower the arguments - for now just handle simple literals
+                        let args: Vec<Expr> = call.args.iter()
+                            .filter_map(|arg| {
+                                if arg.spread.is_some() {
+                                    None // Skip spread arguments for now
+                                } else {
+                                    // For decorator args, only handle simple literals for now
+                                    match arg.expr.as_ref() {
+                                        ast::Expr::Lit(lit) => lower_lit(lit).ok(),
+                                        _ => None,
+                                    }
+                                }
+                            })
+                            .collect();
+                        return Some(Decorator {
+                            name: ident.sym.to_string(),
+                            args,
+                        });
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }).collect()
+}
+

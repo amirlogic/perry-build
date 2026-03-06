@@ -1,0 +1,504 @@
+//! Utility functions and thread-local state for codegen.
+
+use cranelift::prelude::*;
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::Module;
+use cranelift_object::ObjectModule;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use perry_hir::{BinaryOp, Expr, Stmt, UnaryOp, LogicalOp};
+use perry_types::LocalId;
+
+use crate::types::{ClassMeta, EnumMemberValue, LocalInfo, ThisContext};
+use crate::expr::compile_expr;
+
+/// Global counter for assigning unique init guard IDs to non-entry modules.
+/// Each non-entry module gets a sequential ID used with perry_init_guard_check_and_set().
+pub(crate) static INIT_MODULE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Thread-local tracking of the current function being compiled (for self-recursive call optimization)
+thread_local! {
+    pub(crate) static CURRENT_FUNC_HIR_ID: Cell<Option<u32>> = Cell::new(None);
+    /// Import module prefixes: maps imported name -> source module's scoped prefix.
+    /// Set at the start of compile_module, used by compile_expr for scoped symbol lookup.
+    pub(crate) static IMPORT_MODULE_PREFIXES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Namespace import names: set of local names that are namespace imports (import * as X).
+    /// Used by compile_expr to intercept PropertyGet(ExternFuncRef { name: X }, prop).
+    pub(crate) static NAMESPACE_IMPORTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Imported function return types: maps function name -> HIR return type.
+    /// Used by compile_stmt to resolve types for await expressions on cross-module async calls.
+    pub(crate) static IMPORTED_FUNC_RETURN_TYPES: RefCell<HashMap<String, perry_types::Type>> = RefCell::new(HashMap::new());
+    /// Maps local import name -> full scoped export name for imports where local != export name.
+    /// E.g., `import bs58 from 'bs58'` maps "bs58" -> "__export_{bs58_prefix}__default".
+    pub(crate) static IMPORT_LOCAL_TO_SCOPED: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Track try-catch nesting depth during codegen, so return/break/continue
+    /// can emit the right number of js_try_end() calls before jumping out.
+    pub(crate) static TRY_CATCH_DEPTH: Cell<usize> = Cell::new(0);
+    /// Compile-time platform target for the `__platform__` built-in constant.
+    /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux.
+    pub(crate) static COMPILE_TARGET: Cell<i64> = Cell::new(0);
+    /// Current static method's class name, so `this.method()` inside static methods
+    /// can be resolved to direct static method calls on the same class.
+    pub(crate) static CURRENT_STATIC_CLASS_NAME: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// Global counter for generating unique temporary variable IDs
+pub(crate) static TEMP_VAR_COUNTER: AtomicUsize = AtomicUsize::new(10000);
+
+/// Get a unique temporary variable ID
+pub(crate) fn next_temp_var_id() -> usize {
+    TEMP_VAR_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Construct a scoped export name for an imported symbol, using the thread-local mapping.
+pub(crate) fn tl_scoped_export_name(name: &str) -> String {
+    // First check the local-to-scoped map (for imports where local name != export name,
+    // e.g., `import bs58 from 'bs58'` where local "bs58" maps to "__export_{prefix}__default")
+    let local_scoped = IMPORT_LOCAL_TO_SCOPED.with(|p| {
+        p.borrow().get(name).cloned()
+    });
+    if let Some(scoped) = local_scoped {
+        return scoped;
+    }
+    IMPORT_MODULE_PREFIXES.with(|p| {
+        let map = p.borrow();
+        if let Some(prefix) = map.get(name) {
+            format!("__export_{}__{}", prefix, name)
+        } else {
+            format!("__export_{}", name)
+        }
+    })
+}
+
+/// Check if a name is a namespace import (import * as X from './module')
+pub(crate) fn tl_is_namespace_import(name: &str) -> bool {
+    NAMESPACE_IMPORTS.with(|p| p.borrow().contains(name))
+}
+
+/// Global counter for generating unique regex data IDs
+pub(crate) static REGEX_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Get a unique regex data ID
+pub(crate) fn next_regex_data_id() -> usize {
+    REGEX_DATA_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Global counter for generating unique JS interop data IDs
+pub(crate) static JS_INTEROP_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Get a unique JS interop data ID
+pub(crate) fn next_js_data_id() -> usize {
+    JS_INTEROP_DATA_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Resolve class_name from a type annotation by checking if the type refers to a known class
+pub(crate) fn resolve_class_name_from_type(ty: &perry_types::Type, classes: &BTreeMap<String, ClassMeta>) -> Option<String> {
+    match ty {
+        perry_types::Type::Named(name) => {
+            if classes.contains_key(name) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        }
+        perry_types::Type::Union(types) => {
+            types.iter().find_map(|t| {
+                if let perry_types::Type::Named(name) = t {
+                    if classes.contains_key(name) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Check if a block has been filled with a terminating instruction
+pub(crate) fn is_block_filled(builder: &FunctionBuilder, block: cranelift_codegen::ir::Block) -> bool {
+    if let Some(inst) = builder.func.layout.last_inst(block) {
+        builder.func.dfg.insts[inst].opcode().is_terminator()
+    } else {
+        false
+    }
+}
+
+/// Convert a HIR Type to a Cranelift ABI type (standalone version)
+pub(crate) fn type_to_cranelift_abi(ty: &perry_types::Type) -> types::Type {
+    use perry_types::Type;
+    match ty {
+        // Numbers use f64
+        Type::Number | Type::Int32 | Type::BigInt => types::F64,
+        // Booleans can be f64 (0.0 or 1.0) for simplicity
+        Type::Boolean => types::F64,
+        // Strings, arrays, objects, promises are pointers (i64)
+        Type::String | Type::Array(_) | Type::Object(_) |
+        Type::Promise(_) | Type::Named(_) | Type::Generic { .. } => types::I64,
+        // Void/Null/Undefined return f64 (will be 0)
+        Type::Void | Type::Null => types::F64,
+        // Any/Unknown use i64 (tagged values or pointers)
+        Type::Any | Type::Unknown => types::I64,
+        // Functions are pointers
+        Type::Function(_) => types::I64,
+        // Tuples use i64 (could be more complex)
+        Type::Tuple(_) => types::I64,
+        // Union types use f64 (NaN-boxed values can be numbers or pointers)
+        Type::Union(_) => types::F64,
+        // Never type - use f64 as fallback (never actually returned)
+        Type::Never => types::F64,
+        // TypeVar should be substituted before codegen; default to f64
+        Type::TypeVar(_) => types::F64,
+        // Symbol is an i64 id
+        Type::Symbol => types::I64,
+    }
+}
+
+/// Convert a Cranelift value to i64, bitcasting from f64 only if needed.
+/// This is used when values that are logically pointers (strings, arrays, objects)
+/// need to be passed to runtime functions that expect i64.
+pub(crate) fn ensure_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let val_type = builder.func.dfg.value_type(val);
+    if val_type == types::I64 {
+        val
+    } else if val_type == types::I32 {
+        // Extend i32 to i64
+        builder.ins().uextend(types::I64, val)
+    } else {
+        // F64 NaN-boxed pointer - must strip the tag bits (top 16 bits)
+        // to get the raw pointer address
+        let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+        builder.ins().band(val_i64, mask)
+    }
+}
+
+/// Convert a Cranelift value to f64, bitcasting from i64 only if needed.
+/// This is used when values need to be stored uniformly as f64 or passed to
+/// JS interop functions that expect NaN-boxed values.
+pub(crate) fn ensure_f64(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let val_type = builder.func.dfg.value_type(val);
+    if val_type == types::F64 {
+        val
+    } else if val_type == types::I32 {
+        // Convert i32 to f64 (as a number, not bitcast)
+        builder.ins().fcvt_from_sint(types::F64, val)
+    } else {
+        builder.ins().bitcast(types::F64, MemFlags::new(), val)
+    }
+}
+
+/// Inline truthiness check: returns I8 bool (1=truthy, 0=falsy) without FFI.
+/// Covers falsy values: undefined, null, false (NaN-box tags within 2 of TAG_UNDEFINED),
+/// ±0.0 (bit pattern with all-zero mantissa+exponent after shifting out sign),
+/// and BigInt 0n (BIGINT_TAG with all-zero limbs, checked via js_bigint_is_zero).
+pub(crate) fn inline_truthiness_check(
+    builder: &mut FunctionBuilder,
+    module: &mut ObjectModule,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    val: Value,
+) -> Value {
+    let val_f64 = ensure_f64(builder, val);
+    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
+    // Check falsy NaN-box tags: TAG_UNDEFINED(01), TAG_NULL(02), TAG_FALSE(03)
+    // (val - TAG_UNDEFINED) <=u 2 covers all three
+    let tag_base = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+    let sub = builder.ins().isub(val_i64, tag_base);
+    let two = builder.ins().iconst(types::I64, 2);
+    let is_falsy_tag = builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, sub, two);
+    // Check ±0.0: (val << 1) == 0
+    let shifted = builder.ins().ishl_imm(val_i64, 1);
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let is_zero_float = builder.ins().icmp(IntCC::Equal, shifted, zero_i64);
+
+    // Check BigInt 0n: extract tag bits, if BIGINT_TAG call js_bigint_is_zero
+    let tag = builder.ins().ushr_imm(val_i64, 48);
+    let bigint_tag_val = builder.ins().iconst(types::I64, 0x7FFA);
+    let is_bigint = builder.ins().icmp(IntCC::Equal, tag, bigint_tag_val);
+
+    let bigint_block = builder.create_block();
+    let non_bigint_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I8); // is_falsy result
+
+    builder.ins().brif(is_bigint, bigint_block, &[], non_bigint_block, &[]);
+
+    // BigInt block: extract pointer and call js_bigint_is_zero
+    builder.switch_to_block(bigint_block);
+    builder.seal_block(bigint_block);
+    let pointer_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let ptr = builder.ins().band(val_i64, pointer_mask);
+    let is_zero_func = extern_funcs.get("js_bigint_is_zero")
+        .expect("js_bigint_is_zero not declared");
+    let is_zero_ref = module.declare_func_in_func(*is_zero_func, builder.func);
+    let call = builder.ins().call(is_zero_ref, &[ptr]);
+    let is_zero_result = builder.inst_results(call)[0]; // i32: 1=zero, 0=non-zero
+    let is_bigint_falsy = builder.ins().ireduce(types::I8, is_zero_result);
+    builder.ins().jump(merge_block, &[is_bigint_falsy]);
+
+    // Non-BigInt block: use existing tag/float checks
+    builder.switch_to_block(non_bigint_block);
+    builder.seal_block(non_bigint_block);
+    let is_falsy_non_bigint = builder.ins().bor(is_falsy_tag, is_zero_float);
+    builder.ins().jump(merge_block, &[is_falsy_non_bigint]);
+
+    // Merge block
+    builder.switch_to_block(merge_block);
+    builder.seal_block(merge_block);
+    let is_falsy = builder.block_params(merge_block)[0];
+
+    // Invert to get truthy
+    let one_i8 = builder.ins().iconst(types::I8, 1);
+    builder.ins().bxor(is_falsy, one_i8)
+}
+
+/// Inline NaN-box a string pointer with STRING_TAG.
+/// Equivalent to `js_nanbox_string(ptr)` but avoids FFI overhead.
+/// ptr must be I64, returns F64.
+pub(crate) fn inline_nanbox_string(builder: &mut FunctionBuilder, ptr: Value) -> Value {
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let masked = builder.ins().band(ptr, mask);
+    let tag = builder.ins().iconst(types::I64, 0x7FFF_0000_0000_0000u64 as i64);
+    let tagged = builder.ins().bor(masked, tag);
+    builder.ins().bitcast(types::F64, MemFlags::new(), tagged)
+}
+
+/// Inline extract raw pointer from NaN-boxed string.
+/// Equivalent to `js_get_string_pointer_unified(val)` for values known to be NaN-boxed strings.
+/// val must be F64, returns I64.
+pub(crate) fn inline_get_string_pointer(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    builder.ins().band(val_i64, mask)
+}
+
+/// Get a raw string pointer from a value that may be either:
+/// - I64: already a raw pointer, use directly
+/// - F64: NaN-boxed string, strip the tag to get the raw pointer
+pub(crate) fn get_raw_string_ptr(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let val_type = builder.func.dfg.value_type(val);
+    if val_type == types::I64 {
+        val
+    } else {
+        // F64 NaN-boxed string — strip the tag bits
+        inline_get_string_pointer(builder, val)
+    }
+}
+
+/// Returns a short string describing the HIR Expr variant for diagnostic purposes.
+pub(crate) fn expr_type_name(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Closure { .. } => "Closure",
+        Expr::LocalGet(_) => "LocalGet",
+        Expr::Call { .. } => "Call",
+        Expr::Binary { .. } => "Binary",
+        Expr::Logical { .. } => "Logical",
+        Expr::Conditional { .. } => "Conditional",
+        Expr::PropertyGet { .. } => "PropertyGet",
+        Expr::Object(_) => "Object",
+        Expr::ObjectSpread { .. } => "ObjectSpread",
+        Expr::Array(_) => "Array",
+        Expr::MapNew => "MapNew",
+        Expr::SetNew | Expr::SetNewFromArray(_) => "SetNew",
+        Expr::New { .. } => "New",
+        Expr::Await(_) => "Await",
+        Expr::FuncRef(_) => "FuncRef",
+        Expr::ExternFuncRef { .. } => "ExternFuncRef",
+        Expr::NativeMethodCall { .. } => "NativeMethodCall",
+        Expr::BigInt(_) => "BigInt",
+        Expr::Integer(_) => "Integer",
+        Expr::String(_) => "String",
+        Expr::Undefined => "Undefined",
+        Expr::Null => "Null",
+        Expr::This => "This",
+        _ => "Other",
+    }
+}
+
+/// Inline NaN-box a pointer with POINTER_TAG (0x7FFD).
+/// ptr must be I64, returns F64.
+pub(crate) fn inline_nanbox_pointer(builder: &mut FunctionBuilder, ptr: Value) -> Value {
+    // Guard: null pointer (ptr == 0) → TAG_NULL (JS null) instead of null POINTER_TAG.
+    // Null POINTER_TAG (0x7FFD_0000_0000_0000) is never valid and causes crashes when
+    // code dereferences it as an ObjectHeader to read class_id at offset 4.
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let is_null = builder.ins().icmp(IntCC::Equal, ptr, zero_i64);
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let masked = builder.ins().band(ptr, mask);
+    let tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
+    let tagged = builder.ins().bor(masked, tag);
+    let ptr_nanboxed = builder.ins().bitcast(types::F64, MemFlags::new(), tagged);
+    // TAG_NULL = 0x7FFC_0000_0000_0002
+    let tag_null_bits = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+    let tag_null_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), tag_null_bits);
+    builder.ins().select(is_null, tag_null_f64, ptr_nanboxed)
+}
+
+pub(crate) fn inline_nanbox_bigint(builder: &mut FunctionBuilder, ptr: Value) -> Value {
+    let zero_i64 = builder.ins().iconst(types::I64, 0);
+    let is_null = builder.ins().icmp(IntCC::Equal, ptr, zero_i64);
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let masked = builder.ins().band(ptr, mask);
+    let tag = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000u64 as i64);
+    let tagged = builder.ins().bor(masked, tag);
+    let ptr_nanboxed = builder.ins().bitcast(types::F64, MemFlags::new(), tagged);
+    let tag_null_bits = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+    let tag_null_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), tag_null_bits);
+    builder.ins().select(is_null, tag_null_f64, ptr_nanboxed)
+}
+
+/// Check if all return statements in a function body return BigInt values (new BN(...) or BigInt literals).
+/// Used to infer BigInt return types for untyped functions.
+pub(crate) fn all_returns_are_bigint(stmts: &[Stmt]) -> bool {
+    let mut found_return = false;
+    fn check_stmts(stmts: &[Stmt], found: &mut bool) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Return(Some(expr)) => {
+                    *found = true;
+                    if !is_bigint_return_expr(expr) {
+                        return false;
+                    }
+                }
+                Stmt::Return(None) => {
+                    return false;
+                }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    if !check_stmts(then_branch, found) { return false; }
+                    if let Some(body) = else_branch {
+                        if !check_stmts(body, found) { return false; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+    fn is_bigint_return_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::New { class_name, .. } if class_name == "BN" => true,
+            Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+            _ => false,
+        }
+    }
+    check_stmts(stmts, &mut found_return) && found_return
+}
+
+/// Compile a condition expression to an I8 bool without FFI calls.
+/// Handles Compare (fcmp), Logical And/Or (band/bor), Unary Not, and falls back
+/// to inline_truthiness_check for general expressions.
+pub(crate) fn compile_condition_to_bool(
+    builder: &mut FunctionBuilder,
+    module: &mut ObjectModule,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>,
+    func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &BTreeMap<LocalId, LocalInfo>,
+    expr: &Expr,
+    this_ctx: Option<&ThisContext>,
+) -> anyhow::Result<Value> {
+    match expr {
+        // Expr::Compare is handled by the _ fallback below, which calls compile_expr
+        // (which has full string/bigint/bool comparison logic) + inline_truthiness_check.
+        // Using simple fcmp here would break NaN-boxed string comparisons (NaN != NaN).
+        Expr::Logical { op: LogicalOp::And, left, right } => {
+            let l = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+            let r = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
+            Ok(builder.ins().band(l, r))
+        }
+        Expr::Logical { op: LogicalOp::Or, left, right } => {
+            let l = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+            let r = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
+            Ok(builder.ins().bor(l, r))
+        }
+        Expr::Unary { op: UnaryOp::Not, operand } => {
+            let inner = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
+            let one_i8 = builder.ins().iconst(types::I8, 1);
+            Ok(builder.ins().bxor(inner, one_i8))
+        }
+        _ => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            Ok(inline_truthiness_check(builder, module, extern_funcs, val))
+        }
+    }
+}
+
+/// Try to compile an index expression entirely in i32 arithmetic.
+/// Returns Some(i32_value) if the expression can be computed in i32, None otherwise.
+/// This avoids f64 round-trips for array index computations like `i * size + k`.
+/// The i32 result is immediately consumed as an array index in IndexGet/IndexSet.
+pub(crate) fn try_compile_index_as_i32(
+    builder: &mut FunctionBuilder,
+    expr: &Expr,
+    locals: &BTreeMap<LocalId, LocalInfo>,
+) -> Option<Value> {
+    match expr {
+        Expr::Integer(n) if *n >= 0 && *n <= i32::MAX as i64 => {
+            Some(builder.ins().iconst(types::I32, *n))
+        }
+        Expr::LocalGet(id) => {
+            let info = locals.get(id)?;
+            if info.is_i32 {
+                Some(builder.use_var(info.var))
+            } else if let Some(shadow) = info.i32_shadow {
+                Some(builder.use_var(shadow))
+            } else if info.is_integer {
+                // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL on large values)
+                let f64_val = builder.use_var(info.var);
+                let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
+                Some(builder.ins().ireduce(types::I32, i64_val))
+            } else {
+                None
+            }
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            // LICM: Check for hoisted i32 product (Mul only)
+            if *op == BinaryOp::Mul {
+                if let (Expr::LocalGet(a_id), Expr::LocalGet(b_id)) = (left.as_ref(), right.as_ref()) {
+                    // Check a's hoisted products for b
+                    if let Some(info) = locals.get(a_id) {
+                        if let Some(ref products) = info.hoisted_i32_products {
+                            if let Some(&cached) = products.get(b_id) {
+                                return Some(builder.use_var(cached));
+                            }
+                        }
+                    }
+                    // Check b's hoisted products for a (commutative)
+                    if let Some(info) = locals.get(b_id) {
+                        if let Some(ref products) = info.hoisted_i32_products {
+                            if let Some(&cached) = products.get(a_id) {
+                                return Some(builder.use_var(cached));
+                            }
+                        }
+                    }
+                }
+            }
+            let l = try_compile_index_as_i32(builder, left, locals)?;
+            let r = try_compile_index_as_i32(builder, right, locals)?;
+            Some(match op {
+                BinaryOp::Add => builder.ins().iadd(l, r),
+                BinaryOp::Sub => builder.ins().isub(l, r),
+                BinaryOp::Mul => builder.ins().imul(l, r),
+                _ => unreachable!(),
+            })
+        }
+        _ => None,
+    }
+}

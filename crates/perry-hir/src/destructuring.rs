@@ -1,0 +1,1201 @@
+//! Destructuring lowering.
+//!
+//! Contains functions for lowering destructuring assignments and variable
+//! declarations with destructuring patterns.
+
+use anyhow::{anyhow, Result};
+use perry_types::{LocalId, Type};
+use swc_ecma_ast as ast;
+
+use crate::ir::*;
+use crate::lower::{LoweringContext, lower_expr};
+use crate::lower_types::*;
+use crate::lower_patterns::*;
+
+pub(crate) fn lower_destructuring_assignment_stmt(
+    ctx: &mut LoweringContext,
+    pat: &ast::AssignTargetPat,
+    rhs: &ast::Expr,
+) -> Result<Vec<Stmt>> {
+    let mut result = Vec::new();
+
+    // First, evaluate and store the RHS in a temporary variable
+    let rhs_expr = lower_expr(ctx, rhs)?;
+    let tmp_id = ctx.fresh_local();
+    let tmp_name = format!("__destruct_{}", tmp_id);
+    let tmp_ty = Type::Any; // Could infer from rhs, but Any is safe
+    ctx.locals.push((tmp_name.clone(), tmp_id, tmp_ty.clone()));
+
+    result.push(Stmt::Let {
+        id: tmp_id,
+        name: tmp_name,
+        ty: tmp_ty,
+        mutable: false,
+        init: Some(rhs_expr),
+    });
+
+    // Now generate assignments from the temp
+    match pat {
+        ast::AssignTargetPat::Array(arr_pat) => {
+            for (idx, elem) in arr_pat.elems.iter().enumerate() {
+                if let Some(elem_pat) = elem {
+                    let index_expr = Expr::IndexGet {
+                        object: Box::new(Expr::LocalGet(tmp_id)),
+                        index: Box::new(Expr::Number(idx as f64)),
+                    };
+
+                    match elem_pat {
+                        ast::Pat::Ident(ident) => {
+                            let name = ident.id.sym.to_string();
+                            if let Some(id) = ctx.lookup_local(&name) {
+                                result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(index_expr))));
+                            } else {
+                                return Err(anyhow!(
+                                    "Assignment to undeclared variable in destructuring: {}",
+                                    name
+                                ));
+                            }
+                        }
+                        ast::Pat::Array(nested_arr) => {
+                            // Nested array destructuring
+                            // First create a temp for this element
+                            let nested_tmp_id = ctx.fresh_local();
+                            let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                            ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                            result.push(Stmt::Let {
+                                id: nested_tmp_id,
+                                name: nested_tmp_name,
+                                ty: Type::Any,
+                                mutable: false,
+                                init: Some(index_expr),
+                            });
+                            // Then recursively assign from it
+                            let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                ctx,
+                                &ast::AssignTargetPat::Array(nested_arr.clone()),
+                                nested_tmp_id,
+                            )?;
+                            result.extend(nested_stmts);
+                        }
+                        ast::Pat::Object(nested_obj) => {
+                            // Nested object destructuring
+                            let nested_tmp_id = ctx.fresh_local();
+                            let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                            ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                            result.push(Stmt::Let {
+                                id: nested_tmp_id,
+                                name: nested_tmp_name,
+                                ty: Type::Any,
+                                mutable: false,
+                                init: Some(index_expr),
+                            });
+                            let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                ctx,
+                                &ast::AssignTargetPat::Object(nested_obj.clone()),
+                                nested_tmp_id,
+                            )?;
+                            result.extend(nested_stmts);
+                        }
+                        _ => {
+                            // Other patterns (Rest, Expr, etc.) - skip for now
+                        }
+                    }
+                }
+            }
+        }
+        ast::AssignTargetPat::Object(obj_pat) => {
+            for prop in &obj_pat.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        let key = match &kv.key {
+                            ast::PropName::Ident(ident) => ident.sym.to_string(),
+                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            ast::PropName::Num(n) => n.value.to_string(),
+                            _ => continue,
+                        };
+
+                        let prop_expr = Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(tmp_id)),
+                            property: key,
+                        };
+
+                        match &*kv.value {
+                            ast::Pat::Ident(ident) => {
+                                let name = ident.id.sym.to_string();
+                                if let Some(id) = ctx.lookup_local(&name) {
+                                    result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(prop_expr))));
+                                } else {
+                                    return Err(anyhow!(
+                                        "Assignment to undeclared variable in destructuring: {}",
+                                        name
+                                    ));
+                                }
+                            }
+                            ast::Pat::Array(nested_arr) => {
+                                let nested_tmp_id = ctx.fresh_local();
+                                let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                                ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                                result.push(Stmt::Let {
+                                    id: nested_tmp_id,
+                                    name: nested_tmp_name,
+                                    ty: Type::Any,
+                                    mutable: false,
+                                    init: Some(prop_expr),
+                                });
+                                let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                    ctx,
+                                    &ast::AssignTargetPat::Array(nested_arr.clone()),
+                                    nested_tmp_id,
+                                )?;
+                                result.extend(nested_stmts);
+                            }
+                            ast::Pat::Object(nested_obj) => {
+                                let nested_tmp_id = ctx.fresh_local();
+                                let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                                ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                                result.push(Stmt::Let {
+                                    id: nested_tmp_id,
+                                    name: nested_tmp_name,
+                                    ty: Type::Any,
+                                    mutable: false,
+                                    init: Some(prop_expr),
+                                });
+                                let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                    ctx,
+                                    &ast::AssignTargetPat::Object(nested_obj.clone()),
+                                    nested_tmp_id,
+                                )?;
+                                result.extend(nested_stmts);
+                            }
+                            _ => {}
+                        }
+                    }
+                    ast::ObjectPatProp::Assign(assign) => {
+                        let name = assign.key.sym.to_string();
+                        let prop_expr = Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(tmp_id)),
+                            property: name.clone(),
+                        };
+
+                        if let Some(id) = ctx.lookup_local(&name) {
+                            result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(prop_expr))));
+                        } else {
+                            return Err(anyhow!(
+                                "Assignment to undeclared variable in destructuring: {}",
+                                name
+                            ));
+                        }
+                    }
+                    ast::ObjectPatProp::Rest(_) => {
+                        // Rest pattern - skip for now
+                    }
+                }
+            }
+        }
+        ast::AssignTargetPat::Invalid(_) => {
+            return Err(anyhow!("Invalid assignment target pattern"));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Helper for nested destructuring - assigns from an already-computed local
+pub(crate) fn lower_destructuring_assignment_stmt_from_local(
+    ctx: &mut LoweringContext,
+    pat: &ast::AssignTargetPat,
+    source_id: LocalId,
+) -> Result<Vec<Stmt>> {
+    let mut result = Vec::new();
+
+    match pat {
+        ast::AssignTargetPat::Array(arr_pat) => {
+            for (idx, elem) in arr_pat.elems.iter().enumerate() {
+                if let Some(elem_pat) = elem {
+                    let index_expr = Expr::IndexGet {
+                        object: Box::new(Expr::LocalGet(source_id)),
+                        index: Box::new(Expr::Number(idx as f64)),
+                    };
+
+                    match elem_pat {
+                        ast::Pat::Ident(ident) => {
+                            let name = ident.id.sym.to_string();
+                            if let Some(id) = ctx.lookup_local(&name) {
+                                result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(index_expr))));
+                            } else {
+                                return Err(anyhow!(
+                                    "Assignment to undeclared variable in destructuring: {}",
+                                    name
+                                ));
+                            }
+                        }
+                        ast::Pat::Array(nested_arr) => {
+                            let nested_tmp_id = ctx.fresh_local();
+                            let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                            ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                            result.push(Stmt::Let {
+                                id: nested_tmp_id,
+                                name: nested_tmp_name,
+                                ty: Type::Any,
+                                mutable: false,
+                                init: Some(index_expr),
+                            });
+                            let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                ctx,
+                                &ast::AssignTargetPat::Array(nested_arr.clone()),
+                                nested_tmp_id,
+                            )?;
+                            result.extend(nested_stmts);
+                        }
+                        ast::Pat::Object(nested_obj) => {
+                            let nested_tmp_id = ctx.fresh_local();
+                            let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                            ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                            result.push(Stmt::Let {
+                                id: nested_tmp_id,
+                                name: nested_tmp_name,
+                                ty: Type::Any,
+                                mutable: false,
+                                init: Some(index_expr),
+                            });
+                            let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                ctx,
+                                &ast::AssignTargetPat::Object(nested_obj.clone()),
+                                nested_tmp_id,
+                            )?;
+                            result.extend(nested_stmts);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        ast::AssignTargetPat::Object(obj_pat) => {
+            for prop in &obj_pat.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        let key = match &kv.key {
+                            ast::PropName::Ident(ident) => ident.sym.to_string(),
+                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            ast::PropName::Num(n) => n.value.to_string(),
+                            _ => continue,
+                        };
+
+                        let prop_expr = Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(source_id)),
+                            property: key,
+                        };
+
+                        match &*kv.value {
+                            ast::Pat::Ident(ident) => {
+                                let name = ident.id.sym.to_string();
+                                if let Some(id) = ctx.lookup_local(&name) {
+                                    result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(prop_expr))));
+                                } else {
+                                    return Err(anyhow!(
+                                        "Assignment to undeclared variable in destructuring: {}",
+                                        name
+                                    ));
+                                }
+                            }
+                            ast::Pat::Array(nested_arr) => {
+                                let nested_tmp_id = ctx.fresh_local();
+                                let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                                ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                                result.push(Stmt::Let {
+                                    id: nested_tmp_id,
+                                    name: nested_tmp_name,
+                                    ty: Type::Any,
+                                    mutable: false,
+                                    init: Some(prop_expr),
+                                });
+                                let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                    ctx,
+                                    &ast::AssignTargetPat::Array(nested_arr.clone()),
+                                    nested_tmp_id,
+                                )?;
+                                result.extend(nested_stmts);
+                            }
+                            ast::Pat::Object(nested_obj) => {
+                                let nested_tmp_id = ctx.fresh_local();
+                                let nested_tmp_name = format!("__destruct_{}", nested_tmp_id);
+                                ctx.locals.push((nested_tmp_name.clone(), nested_tmp_id, Type::Any));
+                                result.push(Stmt::Let {
+                                    id: nested_tmp_id,
+                                    name: nested_tmp_name,
+                                    ty: Type::Any,
+                                    mutable: false,
+                                    init: Some(prop_expr),
+                                });
+                                let nested_stmts = lower_destructuring_assignment_stmt_from_local(
+                                    ctx,
+                                    &ast::AssignTargetPat::Object(nested_obj.clone()),
+                                    nested_tmp_id,
+                                )?;
+                                result.extend(nested_stmts);
+                            }
+                            _ => {}
+                        }
+                    }
+                    ast::ObjectPatProp::Assign(assign) => {
+                        let name = assign.key.sym.to_string();
+                        let prop_expr = Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(source_id)),
+                            property: name.clone(),
+                        };
+
+                        if let Some(id) = ctx.lookup_local(&name) {
+                            result.push(Stmt::Expr(Expr::LocalSet(id, Box::new(prop_expr))));
+                        } else {
+                            return Err(anyhow!(
+                                "Assignment to undeclared variable in destructuring: {}",
+                                name
+                            ));
+                        }
+                    }
+                    ast::ObjectPatProp::Rest(_) => {}
+                }
+            }
+        }
+        ast::AssignTargetPat::Invalid(_) => {
+            return Err(anyhow!("Invalid assignment target pattern"));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Lower a destructuring assignment expression.
+/// For [a, b] = expr or { a, b } = expr, we generate a Sequence expression:
+///   1. Assign each element/property to the corresponding target
+///   2. Return the RHS value (assignment expressions evaluate to RHS)
+///
+/// Note: We reference the RHS value directly multiple times rather than
+/// creating a temporary variable, since temps created in expression context
+/// aren't visible to codegen. This is safe when the RHS is a simple expression
+/// (which is the common case for destructuring).
+pub(crate) fn lower_destructuring_assignment(
+    ctx: &mut LoweringContext,
+    pat: &ast::AssignTargetPat,
+    value: Box<Expr>,
+) -> Result<Expr> {
+    match pat {
+        ast::AssignTargetPat::Array(arr_pat) => {
+            // Array destructuring assignment: [a, b] = expr
+            // Desugar to:
+            //   a = expr[0];
+            //   b = expr[1];
+            //   expr (result)
+            //
+            // We reference the RHS value directly. This works because:
+            // 1. The RHS is typically a local variable or simple expression
+            // 2. Creating a temp in expression context is problematic for codegen
+
+            let mut exprs = Vec::new();
+
+            // Now assign each element
+            for (idx, elem) in arr_pat.elems.iter().enumerate() {
+                if let Some(elem_pat) = elem {
+                    let index_expr = Expr::IndexGet {
+                        object: value.clone(),
+                        index: Box::new(Expr::Number(idx as f64)),
+                    };
+
+                    match elem_pat {
+                        ast::Pat::Ident(ident) => {
+                            let name = ident.id.sym.to_string();
+                            if let Some(id) = ctx.lookup_local(&name) {
+                                exprs.push(Expr::LocalSet(id, Box::new(index_expr)));
+                            } else {
+                                return Err(anyhow!(
+                                    "Assignment to undeclared variable in destructuring: {}",
+                                    name
+                                ));
+                            }
+                        }
+                        ast::Pat::Expr(inner_expr) => {
+                            // Expression pattern like [obj.prop] = arr
+                            match inner_expr.as_ref() {
+                                ast::Expr::Member(member) => {
+                                    let object = Box::new(lower_expr(ctx, &member.obj)?);
+                                    match &member.prop {
+                                        ast::MemberProp::Ident(prop_ident) => {
+                                            let property = prop_ident.sym.to_string();
+                                            exprs.push(Expr::PropertySet {
+                                                object,
+                                                property,
+                                                value: Box::new(index_expr),
+                                            });
+                                        }
+                                        ast::MemberProp::Computed(computed) => {
+                                            let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                                            exprs.push(Expr::IndexSet {
+                                                object,
+                                                index,
+                                                value: Box::new(index_expr),
+                                            });
+                                        }
+                                        _ => {
+                                            return Err(anyhow!(
+                                                "Unsupported member expression in destructuring"
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(anyhow!(
+                                        "Unsupported expression pattern in destructuring"
+                                    ));
+                                }
+                            }
+                        }
+                        ast::Pat::Rest(_) => {
+                            // Rest pattern in assignment: [...rest] = arr
+                            // For now, skip (would need slice operation)
+                        }
+                        ast::Pat::Array(nested_arr) => {
+                            // Nested array destructuring: [[a, b], c] = expr
+                            // Recursively lower with the indexed element as the value
+                            let nested_target = ast::AssignTargetPat::Array(nested_arr.clone());
+                            let nested_expr = lower_destructuring_assignment(
+                                ctx,
+                                &nested_target,
+                                Box::new(index_expr),
+                            )?;
+                            exprs.push(nested_expr);
+                        }
+                        ast::Pat::Object(nested_obj) => {
+                            // Nested object destructuring: [{ a, b }, c] = expr
+                            let nested_target = ast::AssignTargetPat::Object(nested_obj.clone());
+                            let nested_expr = lower_destructuring_assignment(
+                                ctx,
+                                &nested_target,
+                                Box::new(index_expr),
+                            )?;
+                            exprs.push(nested_expr);
+                        }
+                        _ => {
+                            // Other patterns (Assign with default, etc.) - skip for now
+                        }
+                    }
+                }
+                // If elem is None, it's a hole like [a, , c] - skip it
+            }
+
+            // The result of the assignment is the original RHS value
+            exprs.push(*value);
+
+            Ok(Expr::Sequence(exprs))
+        }
+        ast::AssignTargetPat::Object(obj_pat) => {
+            // Object destructuring assignment: { a, b } = expr
+            // Desugar to:
+            //   a = expr.a;
+            //   b = expr.b;
+            //   expr (result)
+
+            let mut exprs = Vec::new();
+
+            // Now assign each property
+            for prop in &obj_pat.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        // { key: target } - extract obj.key into target
+                        let key = match &kv.key {
+                            ast::PropName::Ident(ident) => ident.sym.to_string(),
+                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            ast::PropName::Num(n) => n.value.to_string(),
+                            _ => continue, // Skip computed keys
+                        };
+
+                        let prop_expr = Expr::PropertyGet {
+                            object: value.clone(),
+                            property: key,
+                        };
+
+                        match &*kv.value {
+                            ast::Pat::Ident(ident) => {
+                                let name = ident.id.sym.to_string();
+                                if let Some(id) = ctx.lookup_local(&name) {
+                                    exprs.push(Expr::LocalSet(id, Box::new(prop_expr)));
+                                } else {
+                                    return Err(anyhow!(
+                                        "Assignment to undeclared variable in destructuring: {}",
+                                        name
+                                    ));
+                                }
+                            }
+                            ast::Pat::Array(nested_arr) => {
+                                let nested_target = ast::AssignTargetPat::Array(nested_arr.clone());
+                                let nested_expr = lower_destructuring_assignment(
+                                    ctx,
+                                    &nested_target,
+                                    Box::new(prop_expr),
+                                )?;
+                                exprs.push(nested_expr);
+                            }
+                            ast::Pat::Object(nested_obj) => {
+                                let nested_target =
+                                    ast::AssignTargetPat::Object(nested_obj.clone());
+                                let nested_expr = lower_destructuring_assignment(
+                                    ctx,
+                                    &nested_target,
+                                    Box::new(prop_expr),
+                                )?;
+                                exprs.push(nested_expr);
+                            }
+                            _ => {
+                                // Other patterns - skip for now
+                            }
+                        }
+                    }
+                    ast::ObjectPatProp::Assign(assign) => {
+                        // Shorthand: { a } means { a: a }
+                        let name = assign.key.sym.to_string();
+                        let prop_expr = Expr::PropertyGet {
+                            object: value.clone(),
+                            property: name.clone(),
+                        };
+
+                        if let Some(id) = ctx.lookup_local(&name) {
+                            exprs.push(Expr::LocalSet(id, Box::new(prop_expr)));
+                        } else {
+                            return Err(anyhow!(
+                                "Assignment to undeclared variable in destructuring: {}",
+                                name
+                            ));
+                        }
+                    }
+                    ast::ObjectPatProp::Rest(_) => {
+                        // Rest pattern: { ...rest } - skip for now
+                    }
+                }
+            }
+
+            // The result of the assignment is the original RHS value
+            exprs.push(*value);
+
+            Ok(Expr::Sequence(exprs))
+        }
+        ast::AssignTargetPat::Invalid(_) => {
+            Err(anyhow!("Invalid assignment target pattern"))
+        }
+    }
+}
+
+/// Lower a variable declaration, handling array destructuring patterns.
+/// Returns a vector of statements (multiple for destructuring, single for simple bindings).
+pub(crate) fn lower_var_decl_with_destructuring(
+    ctx: &mut LoweringContext,
+    decl: &ast::VarDeclarator,
+    mutable: bool,
+) -> Result<Vec<Stmt>> {
+    let mut result = Vec::new();
+
+    match &decl.name {
+        ast::Pat::Ident(ident) => {
+            // Simple binding: let x = expr
+            let name = ident.id.sym.to_string();
+            let mut ty = ident.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or_else(|| {
+                    // No type annotation: try local inference from initializer
+                    if let Some(init_expr) = &decl.init {
+                        let inferred = infer_type_from_expr(init_expr, ctx);
+                        if !matches!(inferred, Type::Any) {
+                            return inferred;
+                        }
+                        // Fall back to tsgo resolved types if available
+                        if let Some(resolved) = ctx.resolved_types.as_ref() {
+                            if let Some(resolved_ty) = resolved.get(&(ident.id.span.lo.0)) {
+                                return resolved_ty.clone();
+                            }
+                        }
+                    }
+                    Type::Any
+                });
+
+            // If no type annotation, infer from new Set<T>() or new Map<K, V>() or new URLSearchParams() expressions
+            if matches!(ty, Type::Any) {
+                if let Some(init_expr) = &decl.init {
+                    if let ast::Expr::New(new_expr) = init_expr.as_ref() {
+                        if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                            let class_name = class_ident.sym.as_ref();
+                            if class_name == "Set" || class_name == "Map" {
+                                // Extract type arguments from new Set<T>() or new Map<K, V>()
+                                let type_args: Vec<Type> = new_expr.type_args.as_ref()
+                                    .map(|ta| ta.params.iter()
+                                        .map(|t| extract_ts_type(t))
+                                        .collect())
+                                    .unwrap_or_default();
+                                ty = Type::Generic {
+                                    base: class_name.to_string(),
+                                    type_args,
+                                };
+                            } else if class_name == "URLSearchParams" {
+                                ty = Type::Named("URLSearchParams".to_string());
+                            } else if class_name == "Uint8Array" || class_name == "Buffer" {
+                                ty = Type::Named("Uint8Array".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is a native class instantiation and register it
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::New(new_expr) = init_expr.as_ref() {
+                    if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                        let class_name = class_ident.sym.as_ref();
+                        // Map class names to their modules
+                        let module_name = match class_name {
+                            "EventEmitter" => Some("events"),
+                            "AsyncLocalStorage" => Some("async_hooks"),
+                            "WebSocket" | "WebSocketServer" => Some("ws"),
+                            "Redis" => Some("ioredis"),
+                            "LRUCache" => Some("lru-cache"),
+                            "Command" => Some("commander"),
+                            "Big" => Some("big.js"),
+                            "Decimal" => Some("decimal.js"),
+                            "BigNumber" => Some("bignumber.js"),
+                            // Database clients
+                            "Pool" => Some("pg"),  // PostgreSQL connection pool
+                            "Client" => Some("pg"), // PostgreSQL client
+                            _ => None,
+                        };
+                        if let Some(module) = module_name {
+                            ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Check if this is an awaited native class instantiation (e.g., await new Redis())
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if let ast::Expr::New(new_expr) = await_expr.arg.as_ref() {
+                        if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                            let class_name = class_ident.sym.as_ref();
+                            // Map class names to their modules
+                            let module_name = match class_name {
+                                "EventEmitter" => Some("events"),
+                                "AsyncLocalStorage" => Some("async_hooks"),
+                                "WebSocket" | "WebSocketServer" => Some("ws"),
+                                "Redis" => Some("ioredis"),
+                                "LRUCache" => Some("lru-cache"),
+                                "Command" => Some("commander"),
+                                "Big" => Some("big.js"),
+                                "Decimal" => Some("decimal.js"),
+                                "BigNumber" => Some("bignumber.js"),
+                                // Database clients
+                                "Pool" => Some("pg"),  // PostgreSQL connection pool
+                                "Client" => Some("pg"), // PostgreSQL client
+                                _ => None,
+                            };
+                            if let Some(module) = module_name {
+                                ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is a native module factory function call (e.g., mysql.createPool())
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                let obj_name = obj_ident.sym.as_ref();
+                                // Check if it's a known native module
+                                if let Some((module_name, _)) = ctx.lookup_native_module(obj_name) {
+                                    if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Map factory functions to their class names
+                                        let class_name = match (module_name, method_name) {
+                                            ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
+                                            ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
+                                            ("pg", "connect") => Some("Client"),
+                                            _ => None,
+                                        };
+                                        if let Some(class_name) = class_name {
+                                            ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check if this is a direct call to a default import from a native module
+                        // e.g., Fastify() where Fastify is imported from 'fastify'
+                        if let ast::Expr::Ident(func_ident) = callee.as_ref() {
+                            let func_name = func_ident.sym.as_ref();
+                            // Check if this is a default import from a native module
+                            if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
+                                // Register as native instance - the "class" is "App" for default exports
+                                ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
+                            }
+                            // Check if this is a named import that returns a handle (e.g., State from perry/ui)
+                            if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
+                                if module_name == "perry/ui" {
+                                    match method_name {
+                                        "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                        | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
+                                            ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is a require() call for a built-in module
+            if let Some(init_expr) = &decl.init {
+                if let Some(module_name) = is_require_builtin_module(init_expr) {
+                    // Register this variable as an alias to the built-in module
+                    ctx.register_builtin_module_alias(name.clone(), module_name);
+                    // Don't emit a variable declaration - the module is handled specially
+                    return Ok(result);
+                }
+            }
+
+            // Check if this is calling toString() on URLSearchParams - returns String
+            if matches!(ty, Type::Any) {
+                if let Some(init_expr) = &decl.init {
+                    if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                        if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                            if let ast::Expr::Member(member_expr) = callee_expr.as_ref() {
+                                if let ast::MemberProp::Ident(method_ident) = &member_expr.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    if method_name == "toString" || method_name == "get" {
+                                        // Check if object is a URLSearchParams
+                                        if let ast::Expr::Ident(obj_ident) = member_expr.obj.as_ref() {
+                                            let obj_name = obj_ident.sym.as_ref();
+                                            if let Some(obj_ty) = ctx.lookup_local_type(obj_name) {
+                                                if matches!(obj_ty, Type::Named(name) if name == "URLSearchParams") {
+                                                    ty = Type::String;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is assigning the result of a native method call that returns the same type
+            // e.g., const sum = d1.plus(d2) where d1 is a Decimal -> sum should also be tracked as Decimal
+            // Also handles: const r1 = new Big(...).div(...) patterns
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                        if let ast::Expr::Member(member_expr) = callee_expr.as_ref() {
+                            let mut handled = false;
+                            // First try: object is an ident that's a known native instance
+                            if let ast::Expr::Ident(obj_ident) = member_expr.obj.as_ref() {
+                                let obj_name = obj_ident.sym.as_ref();
+                                // Check if object is a native instance
+                                if let Some((module, class)) = ctx.lookup_native_instance(obj_name) {
+                                    // Check if this method returns the same type (builder pattern)
+                                    if let ast::MemberProp::Ident(method_ident) = &member_expr.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Methods that return the same type (Decimal, etc.)
+                                        let returns_same_type = match class {
+                                            "Decimal" | "Big" | "BigNumber" => matches!(method_name,
+                                                "plus" | "minus" | "times" | "div" | "mod" |
+                                                "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil"
+                                            ),
+                                            _ => false,
+                                        };
+                                        if returns_same_type {
+                                            ctx.register_native_instance(name.clone(), module.to_string(), class.to_string());
+                                            handled = true;
+                                        }
+                                    }
+                                }
+                            }
+                            // Second try: object is new Big(...) or a chained call like new Big(...).div(...)
+                            if !handled {
+                                if let Some(module_name) = detect_native_instance_expr(&member_expr.obj) {
+                                    let class_name = match module_name {
+                                        "big.js" => "Big",
+                                        "decimal.js" => "Decimal",
+                                        "bignumber.js" => "BigNumber",
+                                        "lru-cache" => "LRUCache",
+                                        "commander" => "Command",
+                                        _ => "",
+                                    };
+                                    if !class_name.is_empty() {
+                                        ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is assigning from fetch() or await fetch() - register as fetch Response
+            if let Some(init_expr) = &decl.init {
+                // Helper to check if an expression is a fetch-like call
+                // Returns the module name if it matches fetch/fetchWithAuth/fetchPostWithAuth
+                fn get_fetch_module(expr: &ast::Expr) -> Option<&'static str> {
+                    if let ast::Expr::Call(call_expr) = expr {
+                        if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                            if let ast::Expr::Ident(ident) = callee_expr.as_ref() {
+                                return match ident.sym.as_ref() {
+                                    "fetch" => Some("fetch"),
+                                    "fetchWithAuth" => Some("fetchWithAuth"),
+                                    "fetchPostWithAuth" => Some("fetchPostWithAuth"),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                    None
+                }
+
+                // Check for: const response = fetch(url) / fetchWithAuth(url, auth) / fetchPostWithAuth(url, auth, body)
+                if let Some(module) = get_fetch_module(init_expr) {
+                    ctx.register_native_instance(name.clone(), module.to_string(), "Response".to_string());
+                }
+                // Check for: const response = await fetch(url) / await fetchWithAuth(...) / await fetchPostWithAuth(...)
+                else if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if let Some(module) = get_fetch_module(&await_expr.arg) {
+                        ctx.register_native_instance(name.clone(), module.to_string(), "Response".to_string());
+                    }
+                }
+            }
+
+            // Check if calling a function whose return type is a native module type
+            // e.g., const dbPool = initializePool() where initializePool(): mysql.Pool
+            // Also handles: const dbPool = await initializePool()
+            if let Some(init_expr) = &decl.init {
+                let call_expr = match init_expr.as_ref() {
+                    ast::Expr::Call(c) => Some(c),
+                    ast::Expr::Await(await_expr) => {
+                        if let ast::Expr::Call(c) = await_expr.arg.as_ref() {
+                            Some(c)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(call_expr) = call_expr {
+                    if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                        // Check direct function calls: const x = someFunc()
+                        if let ast::Expr::Ident(func_ident) = callee_expr.as_ref() {
+                            let func_name = func_ident.sym.as_ref();
+                            if let Some((module, class)) = ctx.lookup_func_return_native_instance(func_name) {
+                                ctx.register_native_instance(name.clone(), module.to_string(), class.to_string());
+                            }
+                        }
+                        // Check method calls on native instances: const conn = pool.getConnection()
+                        if let ast::Expr::Member(member_expr) = callee_expr.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member_expr.obj.as_ref() {
+                                let obj_name = obj_ident.sym.as_ref();
+                                if let Some((module, class)) = ctx.lookup_native_instance(obj_name) {
+                                    if let ast::MemberProp::Ident(method_ident) = &member_expr.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Map method calls to their return types
+                                        let return_class = match (module, class, method_name) {
+                                            ("mysql2" | "mysql2/promise", "Pool", "getConnection") => Some("PoolConnection"),
+                                            ("pg", "Pool", "connect") => Some("Client"),
+                                            _ => None,
+                                        };
+                                        if let Some(ret_class) = return_class {
+                                            ctx.register_native_instance(name.clone(), module.to_string(), ret_class.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+            let id = ctx.define_local(name.clone(), ty.clone());
+            result.push(Stmt::Let {
+                id,
+                name,
+                ty,
+                mutable,
+                init,
+            });
+        }
+        ast::Pat::Array(arr_pat) => {
+            // Array destructuring: let [a, b, c] = expr
+            // Desugar to:
+            //   let __tmp = expr;
+            //   let a = __tmp[0];
+            //   let b = __tmp[1];
+            //   let c = __tmp[2];
+
+            // First, store the initializer in a temporary variable
+            let init_expr = decl.init.as_ref()
+                .map(|e| lower_expr(ctx, e))
+                .transpose()?
+                .ok_or_else(|| anyhow!("Array destructuring requires an initializer"))?;
+
+            // Get the array type from the pattern's type annotation, or infer from init
+            let arr_ty = arr_pat.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or(Type::Array(Box::new(Type::Any)));
+
+            // Determine element type
+            let elem_ty = match &arr_ty {
+                Type::Array(elem) => (**elem).clone(),
+                Type::Tuple(types) => types.first().cloned().unwrap_or(Type::Any),
+                _ => Type::Any,
+            };
+
+            // Create a temporary variable to hold the array
+            let tmp_id = ctx.fresh_local();
+            let tmp_name = format!("__destruct_{}", tmp_id);
+            ctx.locals.push((tmp_name.clone(), tmp_id, arr_ty.clone()));
+
+            result.push(Stmt::Let {
+                id: tmp_id,
+                name: tmp_name,
+                ty: arr_ty.clone(),
+                mutable: false,
+                init: Some(init_expr),
+            });
+
+            // Now extract each element
+            for (idx, elem) in arr_pat.elems.iter().enumerate() {
+                if let Some(elem_pat) = elem {
+                    match elem_pat {
+                        ast::Pat::Ident(ident) => {
+                            let name = ident.id.sym.to_string();
+                            // Use explicit type annotation if provided, otherwise use inferred element type
+                            let ty = ident.type_ann.as_ref()
+                                .map(|ann| extract_ts_type(&ann.type_ann))
+                                .unwrap_or_else(|| {
+                                    // For tuples, use the specific element type
+                                    match &arr_ty {
+                                        Type::Tuple(types) => types.get(idx).cloned().unwrap_or(elem_ty.clone()),
+                                        _ => elem_ty.clone(),
+                                    }
+                                });
+                            let id = ctx.define_local(name.clone(), ty.clone());
+
+                            // Generate: let name = __tmp[idx]
+                            result.push(Stmt::Let {
+                                id,
+                                name,
+                                ty,
+                                mutable,
+                                init: Some(Expr::IndexGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    index: Box::new(Expr::Number(idx as f64)),
+                                }),
+                            });
+                        }
+                        ast::Pat::Rest(rest_pat) => {
+                            // Rest element: let [a, b, ...rest] = arr
+                            // Generate: let rest = __tmp.slice(idx)
+                            if let ast::Pat::Ident(ident) = &*rest_pat.arg {
+                                let name = ident.id.sym.to_string();
+                                let ty = Type::Array(Box::new(elem_ty.clone()));
+                                let id = ctx.define_local(name.clone(), ty.clone());
+                                result.push(Stmt::Let {
+                                    id,
+                                    name,
+                                    ty,
+                                    mutable,
+                                    init: Some(Expr::ArraySlice {
+                                        array: Box::new(Expr::LocalGet(tmp_id)),
+                                        start: Box::new(Expr::Number(idx as f64)),
+                                        end: None,
+                                    }),
+                                });
+                            }
+                        }
+                        _ => {
+                            // Nested patterns - could be nested array or object destructuring
+                            // For now, skip unsupported patterns
+                        }
+                    }
+                }
+                // If elem is None, it's a hole in the pattern like [a, , c]
+                // We just skip it (no variable to bind)
+            }
+        }
+        ast::Pat::Object(obj_pat) => {
+            // Object destructuring: const { a, b, c } = expr
+            // Desugar to:
+            //   let __tmp = expr;
+            //   let a = __tmp.a;
+            //   let b = __tmp.b;
+            //   let c = __tmp.c;
+
+            // First, store the initializer in a temporary variable
+            let init_expr = decl.init.as_ref()
+                .map(|e| lower_expr(ctx, e))
+                .transpose()?
+                .ok_or_else(|| anyhow!("Object destructuring requires an initializer"))?;
+
+            // Get the object type from the pattern's type annotation
+            let obj_ty = obj_pat.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or(Type::Any);
+
+            // Create a temporary variable to hold the object
+            let tmp_id = ctx.fresh_local();
+            let tmp_name = format!("__destruct_{}", tmp_id);
+            ctx.locals.push((tmp_name.clone(), tmp_id, obj_ty.clone()));
+
+            result.push(Stmt::Let {
+                id: tmp_id,
+                name: tmp_name,
+                ty: obj_ty.clone(),
+                mutable: false,
+                init: Some(init_expr),
+            });
+
+            // Now extract each property
+            for prop in &obj_pat.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        // { key: value } - extracts obj.key into variable named by value pattern
+                        let key = match &kv.key {
+                            ast::PropName::Ident(ident) => ident.sym.to_string(),
+                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            ast::PropName::Num(n) => n.value.to_string(),
+                            _ => continue, // Skip computed keys
+                        };
+
+                        // Get the variable name from the value pattern
+                        if let ast::Pat::Ident(ident) = &*kv.value {
+                            let name = ident.id.sym.to_string();
+                            let ty = ident.type_ann.as_ref()
+                                .map(|ann| extract_ts_type(&ann.type_ann))
+                                .unwrap_or(Type::Any);
+                            let id = ctx.define_local(name.clone(), ty.clone());
+
+                            // Generate: let name = __tmp.key
+                            result.push(Stmt::Let {
+                                id,
+                                name,
+                                ty,
+                                mutable,
+                                init: Some(Expr::PropertyGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    property: key,
+                                }),
+                            });
+                        }
+                    }
+                    ast::ObjectPatProp::Assign(assign) => {
+                        // { key } or { key = default } - shorthand property
+                        let name = assign.key.sym.to_string();
+                        let ty = assign.key.type_ann.as_ref()
+                            .map(|ann| extract_ts_type(&ann.type_ann))
+                            .unwrap_or(Type::Any);
+                        let id = ctx.define_local(name.clone(), ty.clone());
+
+                        // Check if there's a default value
+                        let init_value = if let Some(default_expr) = &assign.value {
+                            // { key = default } - use default if property is undefined
+                            // Use conditional: __tmp.key !== undefined ? __tmp.key : default
+                            let prop_access = Expr::PropertyGet {
+                                object: Box::new(Expr::LocalGet(tmp_id)),
+                                property: name.clone(),
+                            };
+                            let default_val = lower_expr(ctx, default_expr)?;
+                            // Check if property is undefined
+                            let condition = Expr::Compare {
+                                op: CompareOp::Ne,
+                                left: Box::new(prop_access.clone()),
+                                right: Box::new(Expr::Undefined),
+                            };
+                            Expr::Conditional {
+                                condition: Box::new(condition),
+                                then_expr: Box::new(prop_access),
+                                else_expr: Box::new(default_val),
+                            }
+                        } else {
+                            // { key } - just access the property
+                            Expr::PropertyGet {
+                                object: Box::new(Expr::LocalGet(tmp_id)),
+                                property: name.clone(),
+                            }
+                        };
+
+                        result.push(Stmt::Let {
+                            id,
+                            name,
+                            ty,
+                            mutable,
+                            init: Some(init_value),
+                        });
+                    }
+                    ast::ObjectPatProp::Rest(rest) => {
+                        // { ...rest } - collect remaining properties not explicitly destructured
+                        if let ast::Pat::Ident(ident) = &*rest.arg {
+                            let name = ident.id.sym.to_string();
+                            let ty = Type::Any;
+                            let id = ctx.define_local(name.clone(), ty.clone());
+
+                            // Collect all explicitly destructured keys from this pattern
+                            let mut exclude_keys = Vec::new();
+                            for other_prop in &obj_pat.props {
+                                match other_prop {
+                                    ast::ObjectPatProp::KeyValue(kv) => {
+                                        if let Some(key) = match &kv.key {
+                                            ast::PropName::Ident(i) => Some(i.sym.to_string()),
+                                            ast::PropName::Str(s) => Some(s.value.as_str().unwrap_or("").to_string()),
+                                            _ => None,
+                                        } {
+                                            exclude_keys.push(key);
+                                        }
+                                    }
+                                    ast::ObjectPatProp::Assign(assign) => {
+                                        exclude_keys.push(assign.key.sym.to_string());
+                                    }
+                                    ast::ObjectPatProp::Rest(_) => {} // Skip the rest itself
+                                }
+                            }
+
+                            result.push(Stmt::Let {
+                                id,
+                                name,
+                                ty,
+                                mutable,
+                                init: Some(Expr::ObjectRest {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    exclude_keys,
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // For other patterns, fall back to existing behavior
+            let name = get_binding_name(&decl.name)?;
+            let ty = extract_binding_type(&decl.name);
+            let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+            let id = ctx.define_local(name.clone(), ty.clone());
+            result.push(Stmt::Let {
+                id,
+                name,
+                ty,
+                mutable,
+                init,
+            });
+        }
+    }
+
+    Ok(result)
+}
+

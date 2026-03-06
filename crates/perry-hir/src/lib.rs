@@ -7,8 +7,17 @@ pub mod ir;
 pub mod js_transform;
 pub mod lower;
 pub mod monomorph;
+pub(crate) mod analysis;
+pub(crate) mod enums;
+pub(crate) mod jsx;
+pub(crate) mod lower_types;
+pub(crate) mod lower_patterns;
+pub(crate) mod destructuring;
+pub(crate) mod lower_decl;
 
 pub use ir::*;
 pub use js_transform::{transform_js_imports, fix_cross_module_native_instances, fix_local_native_instances, ExportedNativeInstance};
-pub use lower::{lower_module, lower_module_with_class_id, lower_module_with_class_id_and_types, fix_imported_enums, collect_local_refs_stmt, collect_local_refs_expr};
+pub use lower::{lower_module, lower_module_with_class_id, lower_module_with_class_id_and_types};
+pub use enums::fix_imported_enums;
+pub use analysis::{collect_local_refs_stmt, collect_local_refs_expr};
 pub use monomorph::monomorphize_module;
