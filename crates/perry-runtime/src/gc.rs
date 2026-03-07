@@ -8,7 +8,7 @@
 //! - Sweep phase: free malloc objects; arena objects added to free list for reuse
 //! - Trigger: only checked on new arena block allocation or explicit gc() call
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::collections::HashSet;
 
@@ -79,6 +79,11 @@ thread_local! {
 
     /// Module-level global variable addresses (registered by codegen)
     static GLOBAL_ROOTS: RefCell<Vec<*mut u64>> = RefCell::new(Vec::new());
+
+    /// Reentrancy guard: true while gc_malloc/gc_realloc is mutating MALLOC_OBJECTS/MALLOC_SET.
+    /// Prevents gc_check_trigger() from running a collection while allocation tracking is in progress,
+    /// which would cause RefCell double-borrow panics (SIGABRT).
+    static GC_IN_ALLOC: Cell<bool> = Cell::new(false);
 }
 
 /// Threshold: run GC when total arena bytes exceed this
@@ -105,12 +110,14 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
 
         let user_ptr = raw.add(GC_HEADER_SIZE);
 
+        GC_IN_ALLOC.with(|f| f.set(true));
         MALLOC_OBJECTS.with(|list| {
             list.borrow_mut().push(header);
         });
         MALLOC_SET.with(|set| {
             set.borrow_mut().insert(header as usize);
         });
+        GC_IN_ALLOC.with(|f| f.set(false));
 
         user_ptr
     }
@@ -174,6 +181,7 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
 
         // Update pointer in MALLOC_OBJECTS and MALLOC_SET if it changed
         if new_header != old_header {
+            GC_IN_ALLOC.with(|f| f.set(true));
             MALLOC_OBJECTS.with(|list| {
                 let mut list = list.borrow_mut();
                 for ptr in list.iter_mut() {
@@ -188,6 +196,7 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
                 set.remove(&(old_header as usize));
                 set.insert(new_header as usize);
             });
+            GC_IN_ALLOC.with(|f| f.set(false));
         }
 
         new_raw.add(GC_HEADER_SIZE)
@@ -212,7 +221,12 @@ pub extern "C" fn js_gc_register_global_root(ptr: i64) {
 }
 
 /// Check if GC should run. Called only when a new arena block is allocated.
+/// Skips collection if we're inside gc_malloc/gc_realloc to prevent
+/// RefCell double-borrow panics (reentrancy from allocation → arena grow → GC → sweep).
 pub fn gc_check_trigger() {
+    if GC_IN_ALLOC.with(|f| f.get()) {
+        return;
+    }
     use crate::arena::arena_total_bytes;
     let total = arena_total_bytes();
     if total >= GC_THRESHOLD_BYTES {

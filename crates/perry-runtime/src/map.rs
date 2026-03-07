@@ -10,6 +10,9 @@ use std::collections::HashSet;
 use std::ptr;
 use crate::string::StringHeader;
 
+/// Must match value.rs TAG_UNDEFINED
+const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+
 thread_local! {
     static MAP_REGISTRY: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
@@ -270,11 +273,11 @@ pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut 
 }
 
 /// Get a value from the map by key
-/// Returns the value, or NaN (representing undefined) if not found
+/// Returns the value, or TAG_UNDEFINED if not found
 #[no_mangle]
 pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
     let map = clean_map_ptr(map);
-    if map.is_null() { return f64::from_bits(0x7FF8_0000_0000_0001); }
+    if map.is_null() { return f64::from_bits(TAG_UNDEFINED); }
     unsafe {
         let idx = find_key_index(map, key);
 
@@ -283,9 +286,7 @@ pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
             return ptr::read(entries.add((idx as usize) * 2 + 1));
         }
 
-        // Return undefined (represented as a specific NaN pattern)
-        // Using 0x7FF8_0000_0000_0001 as undefined marker
-        f64::from_bits(0x7FF8_0000_0000_0001)
+        f64::from_bits(TAG_UNDEFINED)
     }
 }
 

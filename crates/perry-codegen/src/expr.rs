@@ -11773,7 +11773,13 @@ pub(crate) fn compile_expr(
                 let func_ref = module.declare_func_in_func(*new_func, builder.func);
                 let call = builder.ins().call(func_ref, &[url_i64]);
                 let handle = builder.inst_results(call)[0];
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
+                // NaN-box the handle with POINTER_TAG so ensure_i64 round-trips correctly
+                // (raw bitcast corrupts the pointer when .then() calls ensure_i64 which masks top bits)
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[handle]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
             // new WebSocketServer({ port }) - WebSocket server
@@ -16593,8 +16599,12 @@ pub(crate) fn compile_expr(
 
                 // ws module functions
                 ("ws", false, "connect") => "js_ws_connect",
+                ("ws", false, "connectStart") => "js_ws_connect_start",
                 ("ws", false, "sendToClient") => "js_ws_send",
                 ("ws", false, "closeClient") => "js_ws_close",
+                ("ws", false, "isOpen") => "js_ws_is_open",
+                ("ws", false, "receive") => "js_ws_receive",
+                ("ws", false, "messageCount") => "js_ws_message_count",
                 ("ws", true, "send") => "js_ws_send",
                 ("ws", true, "close") => "js_ws_close",
                 ("ws", true, "isOpen") => "js_ws_is_open",
@@ -18290,6 +18300,30 @@ pub(crate) fn compile_expr(
                         }
                         "closeClient" => {
                             // closeClient(clientHandle) - clientHandle is a regular f64 number (ws_id)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let handle_i64 = builder.ins().fcvt_to_sint_sat(types::I64, handle_f64);
+                                args.push(handle_i64);
+                            }
+                            args
+                        }
+                        "connectStart" => {
+                            // connectStart(url) - pass NaN-boxed f64 directly (Rust extracts pointer)
+                            arg_vals.iter().map(|&val| ensure_f64(builder, val)).collect()
+                        }
+                        "isOpen" | "messageCount" => {
+                            // isOpen(handle) / messageCount(handle) - handle is f64 number → i64
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let handle_i64 = builder.ins().fcvt_to_sint_sat(types::I64, handle_f64);
+                                args.push(handle_i64);
+                            }
+                            args
+                        }
+                        "receive" => {
+                            // receive(handle) - handle is f64 number → i64
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
                                 let handle_f64 = ensure_f64(builder, arg_vals[0]);
