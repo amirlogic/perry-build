@@ -12101,6 +12101,20 @@ pub(crate) fn compile_expr(
             });
 
             if let Some(local_id) = maybe_local_id {
+                // Check if this local holds a class reference (e.g., const cls = MyClass; new cls())
+                if let Some(ref actual_class) = locals.get(&local_id).and_then(|i| i.class_ref_name.clone()) {
+                    if classes.contains_key(actual_class.as_str()) {
+                        let new_expr = Expr::New {
+                            class_name: actual_class.clone(),
+                            args: args.clone(),
+                            type_args: Vec::new(),
+                        };
+                        return compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids,
+                            extern_funcs, async_func_ids, classes, enums, func_param_types,
+                            func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &new_expr, this_ctx);
+                    }
+                }
+
                 // Found a local variable with this name - treat it as a constructor function
                 // and use js_new_from_handle to call it dynamically
                 let info = locals.get(&local_id).unwrap();
@@ -12222,6 +12236,20 @@ pub(crate) fn compile_expr(
                         func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &new_expr, this_ctx)
                 }
                 _ => {
+                    // Check if callee is a local variable holding a class reference
+                    if let Expr::LocalGet(id) = callee.as_ref() {
+                        if let Some(ref class_name) = locals.get(id).and_then(|i| i.class_ref_name.clone()) {
+                            let new_expr = Expr::New {
+                                class_name: class_name.clone(),
+                                args: args.clone(),
+                                type_args: Vec::new(),
+                            };
+                            return compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids,
+                                extern_funcs, async_func_ids, classes, enums, func_param_types,
+                                func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &new_expr, this_ctx);
+                        }
+                    }
+
                     // For other dynamic new expressions (e.g., new someVariable()),
                     // compile the callee as a regular expression and use js_new_from_handle
                     let ctor_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callee, this_ctx)?;

@@ -116,6 +116,30 @@ pub(crate) fn compile_async_stmt(
                 }
             }
 
+            // Check if a Call expression invokes a function that returns a string
+            fn is_string_returning_call(expr: &Expr, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+                match expr {
+                    Expr::Call { callee, .. } => {
+                        match callee.as_ref() {
+                            Expr::FuncRef(id) => {
+                                matches!(func_hir_return_types.get(id), Some(perry_types::Type::String))
+                            }
+                            Expr::ExternFuncRef { return_type, name, .. } => {
+                                if matches!(return_type, perry_types::Type::String) {
+                                    return true;
+                                }
+                                // Cross-module: check IMPORTED_FUNC_RETURN_TYPES
+                                IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
+                                })
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+
             // Helper to detect if an expression is a string
             fn is_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
@@ -177,7 +201,7 @@ pub(crate) fn compile_async_stmt(
                     // Object pointer needs NaN-boxing with POINTER_TAG
                     let ptr = ensure_i64(builder, value);
                     inline_nanbox_pointer(builder, ptr)
-                } else if is_string_expr(expr, locals) {
+                } else if is_string_expr(expr, locals) || is_string_returning_call(expr, func_hir_return_types) {
                     // String pointer needs NaN-boxing with STRING_TAG
                     let ptr = ensure_i64(builder, value);
                     let nanbox_func = extern_funcs.get("js_nanbox_string")
@@ -758,7 +782,15 @@ pub(crate) fn compile_stmt(
                                     perry_types::Type::Named(name) => {
                                         resolved = (Some(name.clone()), true, false, false, false, false, false, false, false, false);
                                     }
-                                    _ => {} // Keep default all-false for Number, String, Any, etc.
+                                    perry_types::Type::String => {
+                                        // Promise<string> resolves to string
+                                        resolved = (None, false, false, true, false, false, false, false, false, false);
+                                    }
+                                    perry_types::Type::BigInt => {
+                                        // Promise<bigint> resolves to bigint
+                                        resolved = (None, false, false, false, true, false, false, false, false, false);
+                                    }
+                                    _ => {} // Keep default all-false for Number, Any, etc.
                                 }
                             }
                         } else if let Expr::NativeMethodCall { module, method, .. } = inner.as_ref() {
@@ -1239,7 +1271,13 @@ pub(crate) fn compile_stmt(
             // for class method access (class capture promotion). Without this, the
             // data global association is lost and writes won't propagate to class methods.
             let existing_data_id = locals.get(id).and_then(|info| info.module_var_data_id);
-            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id });
+            // Track class references (e.g., `const cls = MyClass`) so `new cls()` resolves correctly
+            let class_ref_name = if let Some(Expr::ClassRef(name)) = init.as_ref() {
+                Some(name.clone())
+            } else {
+                None
+            };
+            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name });
 
             // If this variable has a module-level data global (promoted for class capture),
             // write the initial value to the data global so class methods can read it.
@@ -1287,6 +1325,29 @@ pub(crate) fn compile_stmt(
                 }
             }
 
+            // Check if a Call expression invokes a function that returns a string
+            fn is_string_returning_call_r(expr: &Expr, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+                match expr {
+                    Expr::Call { callee, .. } => {
+                        match callee.as_ref() {
+                            Expr::FuncRef(id) => {
+                                matches!(func_hir_return_types.get(id), Some(perry_types::Type::String))
+                            }
+                            Expr::ExternFuncRef { return_type, name, .. } => {
+                                if matches!(return_type, perry_types::Type::String) {
+                                    return true;
+                                }
+                                IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
+                                })
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+
             // Emit js_try_end() for each enclosing try block before returning
             let try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
             emit_try_end_cleanup(builder, module, extern_funcs, try_depth)?;
@@ -1295,8 +1356,18 @@ pub(crate) fn compile_stmt(
                 let promise_ptr = builder.use_var(promise_var);
                 if let Some(e) = expr {
                     let value = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
-                    // Resolve the promise with the value
-                    let value_f64 = ensure_f64(builder, value);
+                    // Resolve the promise with the value, NaN-boxing strings/objects properly
+                    let value_f64 = if is_string_return_expr(e, locals) || is_string_returning_call_r(e, func_hir_return_types) {
+                        // String pointer needs NaN-boxing with STRING_TAG
+                        let ptr = ensure_i64(builder, value);
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let call = builder.ins().call(nanbox_ref, &[ptr]);
+                        builder.inst_results(call)[0]
+                    } else {
+                        ensure_f64(builder, value)
+                    };
                     let resolve_func = extern_funcs.get("js_promise_resolve")
                         .ok_or_else(|| anyhow!("js_promise_resolve not declared"))?;
                     let resolve_ref = module.declare_func_in_func(*resolve_func, builder.func);
@@ -1783,24 +1854,11 @@ pub(crate) fn compile_stmt(
                         if let Expr::Compare { op: CompareOp::Lt, left: cmp_left, .. } = right.as_ref() {
                             if let Expr::LocalGet(id) = cmp_left.as_ref() {
                                 if *id == counter_id {
-                                    // Compile left side - use fcmp directly for Compare, js_is_truthy for others
-                                    let left_bool = if let Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } = left.as_ref() {
-                                        let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
-                                        let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
-                                        let lhs_f64 = ensure_f64(builder, lhs);
-                                        let rhs_f64 = ensure_f64(builder, rhs);
-                                        let cc = match cmp_op {
-                                            CompareOp::Eq => FloatCC::Equal,
-                                            CompareOp::Ne => FloatCC::NotEqual,
-                                            CompareOp::Lt => FloatCC::LessThan,
-                                            CompareOp::Le => FloatCC::LessThanOrEqual,
-                                            CompareOp::Gt => FloatCC::GreaterThan,
-                                            CompareOp::Ge => FloatCC::GreaterThanOrEqual,
-                                        };
-                                        builder.ins().fcmp(cc, lhs_f64, rhs_f64)
-                                    } else {
-                                        compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?
-                                    };
+                                    // Compile left side - use compile_condition_to_bool which correctly
+                                    // handles BigInt comparisons (via js_bigint_cmp), string comparisons,
+                                    // and boolean comparisons. Using fcmp directly would break BigInt !== 0n
+                                    // (different pointers = always "not equal" via fcmp, causing infinite loops).
+                                    let left_bool = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
 
                                     // Use icmp for counter comparison
                                     let counter_i32 = builder.use_var(i32_var);
@@ -2845,7 +2903,7 @@ pub(crate) fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: Some(field_vars.clone()),
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     });
 
                     scalar_replacement_vars = Some((obj_id, field_vars));
@@ -3745,6 +3803,16 @@ pub(crate) fn compile_stmt(
             let finally_block = builder.create_block();
             let merge_block = builder.create_block();
 
+            // Track whether we entered the finally block via exception or normal path.
+            // This is needed to:
+            // 1. Only call js_try_end() once (in catch or in finally, not both)
+            // 2. Re-throw exceptions after finally when there's no catch clause
+            let had_exception_var = Variable::new(*next_var);
+            *next_var += 1;
+            builder.declare_var(had_exception_var, types::I32);
+            let zero_val = builder.ins().iconst(types::I32, 0);
+            builder.def_var(had_exception_var, zero_val);
+
             // Call js_try_push() to get a pointer to the jmp_buf
             let try_push_func = extern_funcs.get("js_try_push")
                 .ok_or_else(|| anyhow!("js_try_push not declared"))?;
@@ -3852,6 +3920,10 @@ pub(crate) fn compile_stmt(
                 builder.ins().call(try_end_ref_catch, &[]);
             }
 
+            // Mark that we entered via exception path
+            let one_val = builder.ins().iconst(types::I32, 1);
+            builder.def_var(had_exception_var, one_val);
+
             if let Some(catch_clause) = catch {
                 // Get the exception value
                 let get_exc_func = extern_funcs.get("js_get_exception")
@@ -3887,7 +3959,7 @@ pub(crate) fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     });
                 }
 
@@ -3945,15 +4017,59 @@ pub(crate) fn compile_stmt(
                 builder.ins().call(leave_finally_ref, &[]);
             }
 
-            // Call js_try_end() after finally
-            let try_end_func = extern_funcs.get("js_try_end")
-                .ok_or_else(|| anyhow!("js_try_end not declared"))?;
-            let try_end_ref = module.declare_func_in_func(*try_end_func, builder.func);
-            builder.ins().call(try_end_ref, &[]);
-
+            // Only call js_try_end() if we came from the normal path (no exception).
+            // In the exception path, js_try_end() was already called in the catch block.
             let current = builder.current_block().unwrap();
             if !is_block_filled(builder, current) {
-                builder.ins().jump(merge_block, &[]);
+                let had_exc = builder.use_var(had_exception_var);
+                let zero_i32 = builder.ins().iconst(types::I32, 0);
+                let was_normal = builder.ins().icmp(IntCC::Equal, had_exc, zero_i32);
+
+                let try_end_block = builder.create_block();
+                let after_try_end_block = builder.create_block();
+                builder.ins().brif(was_normal, try_end_block, &[], after_try_end_block, &[]);
+
+                builder.switch_to_block(try_end_block);
+                builder.seal_block(try_end_block);
+                let try_end_func = extern_funcs.get("js_try_end")
+                    .ok_or_else(|| anyhow!("js_try_end not declared"))?;
+                let try_end_ref = module.declare_func_in_func(*try_end_func, builder.func);
+                builder.ins().call(try_end_ref, &[]);
+                builder.ins().jump(after_try_end_block, &[]);
+
+                builder.switch_to_block(after_try_end_block);
+                builder.seal_block(after_try_end_block);
+
+                // If there's no catch clause and we had an exception, re-throw it
+                // This implements JavaScript's try {} finally {} semantics:
+                // the finally block runs, then the exception propagates.
+                if catch.is_none() {
+                    let had_exc2 = builder.use_var(had_exception_var);
+                    let one_i32 = builder.ins().iconst(types::I32, 1);
+                    let should_rethrow = builder.ins().icmp(IntCC::Equal, had_exc2, one_i32);
+
+                    let rethrow_block = builder.create_block();
+                    builder.ins().brif(should_rethrow, rethrow_block, &[], merge_block, &[]);
+
+                    builder.switch_to_block(rethrow_block);
+                    builder.seal_block(rethrow_block);
+
+                    // Get the stored exception and re-throw it
+                    let get_exc_func = extern_funcs.get("js_get_exception")
+                        .ok_or_else(|| anyhow!("js_get_exception not declared"))?;
+                    let get_exc_ref = module.declare_func_in_func(*get_exc_func, builder.func);
+                    let call = builder.ins().call(get_exc_ref, &[]);
+                    let exc_val = builder.inst_results(call)[0];
+
+                    let throw_func = extern_funcs.get("js_throw")
+                        .ok_or_else(|| anyhow!("js_throw not declared"))?;
+                    let throw_ref = module.declare_func_in_func(*throw_func, builder.func);
+                    builder.ins().call(throw_ref, &[exc_val]);
+                    // js_throw is divergent (longjmp), but Cranelift may need a terminator
+                    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+                } else {
+                    builder.ins().jump(merge_block, &[]);
+                }
             }
 
             // Merge block - continue after try-catch-finally

@@ -77,6 +77,9 @@ pub(crate) struct LocalInfo {
     /// If this is a module-level variable, the DataId of its global slot.
     /// Used by closure capture code to share storage with named functions.
     pub module_var_data_id: Option<cranelift_module::DataId>,
+    /// If this variable was assigned a class reference (e.g., `const cls = MyClass`),
+    /// store the class name so `new cls()` can be resolved to `new MyClass()`.
+    pub class_ref_name: Option<String>,
 }
 
 /// Metadata about a compiled class

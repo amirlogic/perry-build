@@ -1246,7 +1246,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 });
             }
 
@@ -1326,7 +1326,7 @@ impl crate::codegen::Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: orig.and_then(|o| o.module_var_data_id),
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: orig.and_then(|o| o.module_var_data_id), class_ref_name: orig.and_then(|o| o.class_ref_name.clone()),
                     });
                 } else {
                     // For immutable captures, store the value directly
@@ -1362,7 +1362,7 @@ impl crate::codegen::Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: orig.and_then(|o| o.module_var_data_id),
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: orig.and_then(|o| o.module_var_data_id), class_ref_name: orig.and_then(|o| o.class_ref_name.clone()),
                     });
                 }
             }
@@ -1402,7 +1402,7 @@ impl crate::codegen::Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
 

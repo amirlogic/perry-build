@@ -345,7 +345,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 });
             }
 
@@ -379,7 +379,7 @@ impl crate::codegen::Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
 
@@ -637,7 +637,7 @@ impl crate::codegen::Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -800,7 +800,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 });
             }
 
@@ -821,7 +821,7 @@ impl crate::codegen::Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1012,7 +1012,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 });
             }
 
@@ -1033,7 +1033,7 @@ impl crate::codegen::Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1250,7 +1250,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 });
             }
 
@@ -1271,7 +1271,7 @@ impl crate::codegen::Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                     })
                 };
                 let var = Variable::new(next_var);

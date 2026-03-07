@@ -897,7 +897,7 @@ impl Compiler {
                     cached_array_ptr: None,
                     const_value,
                     hoisted_element_loads: None,
-                    hoisted_i32_products: None, module_var_data_id: None,
+                    hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
                 };
                 if info.is_bigint {
                 }
@@ -1227,7 +1227,7 @@ impl Compiler {
                         scalar_fields: None,
                         squared_cache: None, product_cache: None, cached_array_ptr: None,
                         const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
-                        module_var_data_id: None,
+                        module_var_data_id: None, class_ref_name: None,
                     });
                 }
             }
