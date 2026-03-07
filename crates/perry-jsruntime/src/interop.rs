@@ -477,7 +477,6 @@ pub unsafe extern "C" fn js_call_method(
         let result = match method.call(scope, obj.into(), &v8_args) {
             Some(r) => r,
             None => {
-                eprintln!("[js_call_method] '{}' call returned None", method_name);
                 return f64::from_bits(0x7FFC_0000_0000_0001);
             }
         };
@@ -1078,7 +1077,6 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
             let state = match opt.as_mut() {
                 Some(s) => s,
                 None => {
-                    eprintln!("[js_await_js_promise] no JS runtime state!");
                     return f64::from_bits(0x7FFC_0000_0000_0001);
                 }
             };
@@ -1089,7 +1087,6 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
                 let v8_val = match get_js_handle(scope, handle_id) {
                     Some(v) => v,
                     None => {
-                        eprintln!("[js_await_js_promise] handle {} not found!", handle_id);
                         return f64::from_bits(0x7FFC_0000_0000_0001);
                     }
                 };
@@ -1107,10 +1104,6 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
             }
 
             // Promise is pending - run the event loop to settle it
-            // Use a dedicated current-thread Tokio runtime to avoid thread pool starvation deadlock.
-            // The outer block_on holds a worker thread; using Handle::current().block_on() would
-            // create a nested block_on on the same runtime, deadlocking if the V8 event loop
-            // spawns Tokio tasks (e.g., ethers.js HTTP calls).
             tokio::task::block_in_place(|| {
                 let local_rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1126,27 +1119,21 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
             let v8_val = match get_js_handle(scope, handle_id) {
                 Some(v) => v,
                 None => {
-                    eprintln!("[js_await_js_promise] handle {} gone after event loop!", handle_id);
                     return f64::from_bits(0x7FFC_0000_0000_0001);
                 }
             };
 
             if v8_val.is_promise() {
                 let promise = v8::Local::<v8::Promise>::try_from(v8_val).unwrap();
-                let final_state = promise.state();
-                match final_state {
+                match promise.state() {
                     v8::PromiseState::Fulfilled => {
                         let result = promise.result(scope);
                         v8_to_native(scope, result)
                     }
                     v8::PromiseState::Rejected => {
-                        let reason = promise.result(scope);
-                        let reason_str = reason.to_rust_string_lossy(scope);
-                        eprintln!("[js_await_js_promise] REJECTED: {}", reason_str);
                         f64::from_bits(0x7FFC_0000_0000_0001) // undefined
                     }
                     v8::PromiseState::Pending => {
-                        eprintln!("[js_await_js_promise] STILL PENDING after event loop!");
                         f64::from_bits(0x7FFC_0000_0000_0001) // undefined
                     }
                 }

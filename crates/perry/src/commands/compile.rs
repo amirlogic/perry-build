@@ -576,7 +576,7 @@ fn parse_native_library_manifest(
 /// These must never be loaded into V8 — Perry's codegen intercepts all imports
 /// from these packages and replaces them with native calls.
 const PERRY_NATIVE_EXTENSION_PACKAGES: &[&str] = &[
-    "ioredis", "ethers", "mysql2", "ws", "dotenv",
+    "ioredis", "mysql2", "ws", "dotenv",
 ];
 
 /// Check if a file path is inside a Perry native extension package (has built-in stdlib support)
@@ -1183,19 +1183,13 @@ fn collect_modules(
     }
 
     if should_use_js_runtime {
-        if !enable_js_runtime {
-            return Err(anyhow!(
-                "File '{}' requires --enable-js-runtime flag",
-                canonical.display()
-            ));
-        }
 
         // Skip declaration files - they're just type information
         if is_declaration_file(&canonical) {
             return Ok(());
         }
 
-        // Perry native extension packages (ioredis, ethers, ws, mysql2, dotenv) are handled
+        // Perry native extension packages (ioredis, mysql2, ws, dotenv) are handled
         // entirely by Perry's built-in stdlib — they must NOT be loaded into V8.
         if is_perry_native {
             return Ok(());
@@ -1362,13 +1356,7 @@ fn collect_modules(
                         continue;
                     }
 
-                    if !enable_js_runtime {
-                        return Err(anyhow!(
-                            "Import '{}' resolves to JavaScript file '{}' which requires --enable-js-runtime flag",
-                            import.source,
-                            resolved_path.display()
-                        ));
-                    }
+                    // Auto-enable JS runtime for JavaScript imports
 
                     // Even for Interpreted imports, collect native library manifest if
                     // the resolved package has perry.nativeLibrary (handles symlinked packages

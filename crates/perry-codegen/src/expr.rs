@@ -4823,6 +4823,21 @@ pub(crate) fn compile_expr(
                     Expr::NativeMethodCall { module, method, .. } => {
                         module == "ethers" && (method == "parseUnits" || method == "parseEther")
                     }
+                    Expr::PropertyGet { object, property } => {
+                        // Check if object is a local with a known class whose field is BigInt
+                        if let Expr::LocalGet(id) = object.as_ref() {
+                            if let Some(info) = locals.get(id) {
+                                if let Some(ref cn) = info.class_name {
+                                    if let Some(meta) = classes.get(cn) {
+                                        if let Some(ft) = meta.field_types.get(property) {
+                                            return matches!(ft, perry_types::Type::BigInt);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        false
+                    }
                     _ => false,
                 }
             }
@@ -4886,6 +4901,16 @@ pub(crate) fn compile_expr(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union && !i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
                         is_union_arith_operand(left, locals) || is_union_arith_operand(right, locals)
+                    }
+                    // PropertyGet on objects may return BigInt at runtime (NaN-boxed BIGINT_TAG).
+                    // Use dynamic dispatch to check tag and route to BigInt or f64 arithmetic.
+                    Expr::PropertyGet { object, .. } => {
+                        if let Expr::LocalGet(id) = object.as_ref() {
+                            // Only for pointer/object locals whose properties might be BigInt
+                            locals.get(id).map(|i| i.is_pointer && !i.is_bigint && !i.is_string && !i.is_array).unwrap_or(false)
+                        } else {
+                            false
+                        }
                     }
                     _ => false,
                 }
@@ -5316,8 +5341,9 @@ pub(crate) fn compile_expr(
                     // Check if operand might be a string/pointer/NaN-boxed value
                     // In those cases, use js_is_truthy for correct falsiness (e.g., "" is falsy)
                     let needs_truthy_check = match operand.as_ref() {
-                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union).unwrap_or(false),
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint).unwrap_or(false),
                         Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
+                        Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
                         _ => false,
                     };
                     let zero = builder.ins().f64const(0.0);
@@ -15569,7 +15595,7 @@ pub(crate) fn compile_expr(
                     }
                     "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "textSetFontSize" | "textSetSelectable" |
                     "textSetWraps" |
-                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" |
+                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" | "widgetMatchParentWidth" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -15590,6 +15616,7 @@ pub(crate) fn compile_expr(
                             "textfieldFocus" => "perry_ui_textfield_focus",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
                             "widgetMatchParentHeight" => "perry_ui_widget_match_parent_height",
+                            "widgetMatchParentWidth" => "perry_ui_widget_match_parent_width",
                             "widgetSetWidth" => "perry_ui_widget_set_width",
                             "widgetSetHeight" => "perry_ui_widget_set_height",
                             "widgetSetHugging" => "perry_ui_widget_set_hugging",
@@ -15614,7 +15641,7 @@ pub(crate) fn compile_expr(
                             let pos_f64 = ensure_f64(builder, arg_vals[1]);
                             let pos_i64 = builder.ins().fcvt_to_sint_sat(types::I64, pos_f64);
                             builder.ins().call(func_ref, &[handle, pos_i64]);
-                        } else if method == "widgetClearChildren" || method == "textfieldFocus" || method == "widgetMatchParentHeight" {
+                        } else if method == "widgetClearChildren" || method == "textfieldFocus" || method == "widgetMatchParentHeight" || method == "widgetMatchParentWidth" {
                             builder.ins().call(func_ref, &[handle]);
                         } else {
                             builder.ins().call(func_ref, &call_args);

@@ -26,9 +26,9 @@ pub const NATIVE_MODULES: &[&str] = &[
     "nanoid",
     "slugify",
     "validator",
-    // ethers utility functions (formatUnits, parseUnits, getAddress, etc.) have native stubs.
-    // Contract/Provider calls fall through to default handler in codegen.
-    "ethers",
+    // ethers: NOT native — runs entirely through V8 interop.
+    // Native stubs only covered utility functions; Contract/Provider/Wallet
+    // require the full ethers.js library running in V8.
     // Node.js built-ins
     "events",
     "os",

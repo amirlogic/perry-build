@@ -377,7 +377,12 @@ pub extern "C" fn js_object_alloc_with_parent(class_id: u32, parent_class_id: u3
     }
 
     let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    // Allocate at least 8 field slots to match js_object_set_field_by_name's alloc_limit
+    // assumption (max(field_count, 8)). Without this, empty objects ({}) with field_count=0
+    // would have 0 field slots but js_object_set_field_by_name writes up to 8 fields inline,
+    // causing heap buffer overflow into adjacent arena objects.
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
     let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
@@ -406,7 +411,8 @@ pub extern "C" fn js_object_alloc_with_parent(class_id: u32, parent_class_id: u3
 #[no_mangle]
 pub extern "C" fn js_object_alloc_fast(class_id: u32, field_count: u32) -> *mut ObjectHeader {
     let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
     let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
@@ -433,7 +439,8 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     }
 
     let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
     let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
@@ -466,7 +473,8 @@ pub extern "C" fn js_object_alloc_class_with_keys(
     }
 
     let header_size = std::mem::size_of::<ObjectHeader>();
-    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * std::mem::size_of::<JSValue>();
     let total_size = header_size + fields_size;
 
     let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;

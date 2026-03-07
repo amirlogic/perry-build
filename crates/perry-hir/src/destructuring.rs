@@ -96,8 +96,44 @@ pub(crate) fn lower_destructuring_assignment_stmt(
                             )?;
                             result.extend(nested_stmts);
                         }
+                        ast::Pat::Expr(inner_expr) => {
+                            // Expression pattern like [obj.prop, obj2.prop2] = arr
+                            match inner_expr.as_ref() {
+                                ast::Expr::Member(member) => {
+                                    let object = Box::new(lower_expr(ctx, &member.obj)?);
+                                    match &member.prop {
+                                        ast::MemberProp::Ident(prop_ident) => {
+                                            let property = prop_ident.sym.to_string();
+                                            result.push(Stmt::Expr(Expr::PropertySet {
+                                                object,
+                                                property,
+                                                value: Box::new(index_expr),
+                                            }));
+                                        }
+                                        ast::MemberProp::Computed(computed) => {
+                                            let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                                            result.push(Stmt::Expr(Expr::IndexSet {
+                                                object,
+                                                index,
+                                                value: Box::new(index_expr),
+                                            }));
+                                        }
+                                        _ => {
+                                            return Err(anyhow!(
+                                                "Unsupported member expression in destructuring assignment"
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(anyhow!(
+                                        "Unsupported expression pattern in destructuring assignment"
+                                    ));
+                                }
+                            }
+                        }
                         _ => {
-                            // Other patterns (Rest, Expr, etc.) - skip for now
+                            // Other patterns (Rest, etc.) - skip for now
                         }
                     }
                 }
@@ -264,6 +300,41 @@ pub(crate) fn lower_destructuring_assignment_stmt_from_local(
                                 nested_tmp_id,
                             )?;
                             result.extend(nested_stmts);
+                        }
+                        ast::Pat::Expr(inner_expr) => {
+                            match inner_expr.as_ref() {
+                                ast::Expr::Member(member) => {
+                                    let object = Box::new(lower_expr(ctx, &member.obj)?);
+                                    match &member.prop {
+                                        ast::MemberProp::Ident(prop_ident) => {
+                                            let property = prop_ident.sym.to_string();
+                                            result.push(Stmt::Expr(Expr::PropertySet {
+                                                object,
+                                                property,
+                                                value: Box::new(index_expr),
+                                            }));
+                                        }
+                                        ast::MemberProp::Computed(computed) => {
+                                            let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                                            result.push(Stmt::Expr(Expr::IndexSet {
+                                                object,
+                                                index,
+                                                value: Box::new(index_expr),
+                                            }));
+                                        }
+                                        _ => {
+                                            return Err(anyhow!(
+                                                "Unsupported member expression in destructuring assignment"
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(anyhow!(
+                                        "Unsupported expression pattern in destructuring assignment"
+                                    ));
+                                }
+                            }
                         }
                         _ => {}
                     }
