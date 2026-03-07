@@ -684,13 +684,19 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let neg = is_negative(&a_limbs);
+        // Fill value for sign extension: 0xFF..FF for negative, 0x00..00 for positive
+        let fill: u64 = if neg { !0u64 } else { 0u64 };
+
         let shift = if b.is_null() { 0usize } else { (*b).limbs[0] as usize };
         if shift >= BIGINT_BITS {
-            (*ptr).limbs = ZERO_LIMBS;
+            // Arithmetic: negative → all 1s (-1), positive → all 0s (0)
+            (*ptr).limbs = [fill; BIGINT_LIMBS];
             return ptr;
         }
-        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
-        let mut result = ZERO_LIMBS;
+
+        let mut result = [fill; BIGINT_LIMBS];
 
         // Calculate full limb shifts and bit shifts within a limb
         let limb_shift = shift / 64;
@@ -708,6 +714,9 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
                 result[i] = a_limbs[src_idx] >> bit_shift;
                 if src_idx + 1 < BIGINT_LIMBS {
                     result[i] |= a_limbs[src_idx + 1] << (64 - bit_shift);
+                } else {
+                    // Top limb: sign-extend the vacated bits
+                    result[i] |= fill << (64 - bit_shift);
                 }
             }
         }
