@@ -6,7 +6,7 @@
 use crate::bridge::{native_to_v8, v8_to_native, get_js_handle, store_js_handle, make_js_handle_value, is_js_handle, get_handle_id, fixup_native_for_v8};
 use crate::{ensure_runtime_initialized, get_tokio_runtime, with_runtime, JsRuntimeState, JS_RUNTIME};
 use deno_core::v8;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 
 /// Convert a NaN-boxed f64 to a V8 value, returning None if the conversion fails
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn js_load_module(
         std::slice::from_raw_parts(path_ptr as *const u8, path_len)
     } else {
         // Null-terminated C string
-        CStr::from_ptr(path_ptr).to_bytes()
+        CStr::from_ptr(path_ptr as *const c_char).to_bytes()
     };
 
     let path_str = match std::str::from_utf8(path_slice) {
@@ -271,7 +271,7 @@ pub unsafe extern "C" fn js_get_export(
     } else if export_name_len > 0 {
         std::slice::from_raw_parts(export_name_ptr as *const u8, export_name_len)
     } else {
-        CStr::from_ptr(export_name_ptr).to_bytes()
+        CStr::from_ptr(export_name_ptr as *const c_char).to_bytes()
     };
 
     let export_name = match std::str::from_utf8(name_slice) {
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn js_call_function(
     } else if func_name_len > 0 {
         std::slice::from_raw_parts(func_name_ptr as *const u8, func_name_len)
     } else {
-        CStr::from_ptr(func_name_ptr).to_bytes()
+        CStr::from_ptr(func_name_ptr as *const c_char).to_bytes()
     };
 
     let func_name = match std::str::from_utf8(name_slice) {
@@ -420,7 +420,7 @@ pub unsafe extern "C" fn js_call_method(
     } else if method_name_len > 0 {
         std::slice::from_raw_parts(method_name_ptr as *const u8, method_name_len)
     } else {
-        CStr::from_ptr(method_name_ptr).to_bytes()
+        CStr::from_ptr(method_name_ptr as *const c_char).to_bytes()
     };
 
     let method_name = match std::str::from_utf8(name_slice) {
@@ -554,7 +554,7 @@ pub unsafe extern "C" fn js_register_native_function(
     } else if name_len > 0 {
         std::slice::from_raw_parts(name_ptr as *const u8, name_len)
     } else {
-        CStr::from_ptr(name_ptr).to_bytes()
+        CStr::from_ptr(name_ptr as *const c_char).to_bytes()
     };
 
     let _func_name = match std::str::from_utf8(name_slice) {
@@ -647,7 +647,7 @@ pub extern "C" fn js_handle_object_get_property(
     } else if property_name_len > 0 {
         unsafe { std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len) }
     } else {
-        unsafe { CStr::from_ptr(property_name_ptr).to_bytes() }
+        unsafe { CStr::from_ptr(property_name_ptr as *const c_char).to_bytes() }
     };
 
     let property_name = match std::str::from_utf8(name_slice) {
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn js_set_property(
     } else if property_name_len > 0 {
         std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
     } else {
-        CStr::from_ptr(property_name_ptr).to_bytes()
+        CStr::from_ptr(property_name_ptr as *const c_char).to_bytes()
     };
 
     let property_name = match std::str::from_utf8(name_slice) {
@@ -778,7 +778,7 @@ pub unsafe extern "C" fn js_new_instance(
     } else if class_name_len > 0 {
         std::slice::from_raw_parts(class_name_ptr as *const u8, class_name_len)
     } else {
-        CStr::from_ptr(class_name_ptr).to_bytes()
+        CStr::from_ptr(class_name_ptr as *const c_char).to_bytes()
     };
 
     let class_name = match std::str::from_utf8(name_slice) {
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn js_should_use_runtime(
     } else if path_len > 0 {
         std::slice::from_raw_parts(path_ptr as *const u8, path_len)
     } else {
-        CStr::from_ptr(path_ptr).to_bytes()
+        CStr::from_ptr(path_ptr as *const c_char).to_bytes()
     };
 
     let path_str = match std::str::from_utf8(path_slice) {
