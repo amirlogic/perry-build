@@ -102,6 +102,8 @@ pub fn handle_click(handle: i64) {
 }
 
 /// Set whether a Button has a visible border.
+/// When bordered=false, switches to owner-draw mode so we fully control
+/// rendering (BS_FLAT still shows borders on Windows).
 pub fn set_bordered(handle: i64, bordered: bool) {
     #[cfg(target_os = "windows")]
     {
@@ -109,12 +111,15 @@ pub fn set_bordered(handle: i64, bordered: bool) {
             unsafe {
                 let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
                 let new_style = if bordered {
-                    style | BS_PUSHBUTTON as u32
+                    (style & !0x0F) | BS_PUSHBUTTON as u32
                 } else {
-                    // Use BS_FLAT for a borderless look
-                    (style & !(BS_PUSHBUTTON as u32)) | BS_FLAT as u32
+                    // Switch to owner-draw so we fully control rendering (no border)
+                    (style & !0x0F) | BS_OWNERDRAW as u32
                 };
                 SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+                if !bordered {
+                    BTN_HWND_TO_HANDLE.with(|m| m.borrow_mut().insert(hwnd.0 as isize, handle));
+                }
                 let _ = InvalidateRect(hwnd, None, true);
             }
         }
@@ -194,20 +199,11 @@ pub fn set_image(handle: i64, name_ptr: *const u8) {
     #[cfg(target_os = "windows")]
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
-            // Read existing title and prepend the icon
-            let mut buf = [0u16; 512];
-            let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
-            let existing = if len > 0 {
-                String::from_utf16_lossy(&buf[..len])
-            } else {
-                String::new()
-            };
-            let combined = if existing.is_empty() {
-                fallback.to_string()
-            } else {
-                format!("{} {}", fallback, existing)
-            };
-            let wide = to_wide(&combined);
+            // Replace the button text with the icon fallback.
+            // On macOS, buttonSetImage sets a separate image property, but on
+            // Windows we use text fallbacks. Always replace (not prepend) so
+            // repeated calls (e.g., dirty indicator toggling) don't accumulate.
+            let wide = to_wide(fallback);
             unsafe {
                 let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(wide.as_ptr()));
             }
@@ -257,10 +253,8 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
     };
 
     let text_color = BUTTON_TEXT_COLORS.with(|c| c.borrow().get(&handle).copied());
-    let text_color = match text_color {
-        Some(c) => c,
-        None => return false,
-    };
+    // Default to white text if no explicit color set (dark theme default)
+    let text_color = text_color.unwrap_or(0x00FFFFFF);
 
     unsafe {
         let hdc = dis.hDC;
@@ -308,6 +302,8 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
         if text_len > 0 {
             let mut buf = vec![0u16; (text_len + 1) as usize];
             GetWindowTextW(dis.hwndItem, &mut buf);
+            // Small left padding so text doesn't touch the edge
+            rect.left += 2;
             DrawTextW(hdc, &mut buf[..text_len as usize], &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
