@@ -5678,6 +5678,24 @@ impl Compiler {
             self.extern_funcs.insert("js_mongodb_client_close".to_string(), func_id);
         }
 
+        // js_mongodb_client_list_databases(client: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // client handle
+            sig.returns.push(AbiParam::new(types::I64)); // Promise
+            let func_id = self.module.declare_function("js_mongodb_client_list_databases", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_mongodb_client_list_databases".to_string(), func_id);
+        }
+
+        // js_mongodb_db_list_collections(db: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // db handle
+            sig.returns.push(AbiParam::new(types::I64)); // Promise
+            let func_id = self.module.declare_function("js_mongodb_db_list_collections", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_mongodb_db_list_collections".to_string(), func_id);
+        }
+
         // ========================================================================
         // Tier 5: sqlite (better-sqlite3 compatible)
         // ========================================================================
@@ -7678,6 +7696,14 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::I64)); // app handle
             let func_id = self.module.declare_function("perry_ui_app_run", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_app_run".to_string(), func_id);
+        }
+
+        // perry_ui_app_set_icon(path_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // path string ptr
+            let func_id = self.module.declare_function("perry_ui_app_set_icon", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_set_icon".to_string(), func_id);
         }
 
         // perry_ui_text_create(text_ptr: i64) -> i64

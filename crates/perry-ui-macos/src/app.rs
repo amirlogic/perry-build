@@ -3,7 +3,7 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags,
-    NSLayoutConstraint, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
+    NSImage, NSLayoutConstraint, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGSize, CGRect};
 use objc2_foundation::{NSObject, NSString, MainThreadMarker};
@@ -29,6 +29,7 @@ thread_local! {
     static ON_TERMINATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
     static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
     static WINDOWS: RefCell<Vec<WindowEntry>> = RefCell::new(Vec::new());
+    static PENDING_ICON_PATH: RefCell<Option<String>> = RefCell::new(None);
 }
 
 struct WindowEntry {
@@ -199,6 +200,21 @@ pub fn app_run(_app_handle: i64) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
+    // Apply pending dock icon
+    PENDING_ICON_PATH.with(|p| {
+        if let Some(path) = p.borrow().as_ref() {
+            unsafe {
+                let ns_path = NSString::from_str(path);
+                let image: Option<Retained<NSImage>> = msg_send![
+                    NSImage::alloc(), initWithContentsOfFile: &*ns_path
+                ];
+                if let Some(img) = image {
+                    let _: () = msg_send![&*app, setApplicationIconImage: &*img];
+                }
+            }
+        }
+    });
+
     // Set up menu bar with Cmd+Q support
     setup_menu_bar(&app, mtm);
 
@@ -338,6 +354,17 @@ impl PerryShortcutTarget {
             callback_key: std::cell::Cell::new(0),
         });
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Set the application dock icon from a file path.
+/// Stores the path; the icon is applied in app_run after activation policy is set.
+pub fn app_set_icon(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr);
+    if !path.is_empty() {
+        PENDING_ICON_PATH.with(|p| {
+            *p.borrow_mut() = Some(path.to_string());
+        });
     }
 }
 

@@ -499,3 +499,63 @@ pub unsafe extern "C" fn js_mongodb_client_close(_client_handle: Handle) -> *mut
 
     promise
 }
+
+/// client.listDatabases() -> Promise<string> (JSON array of database names)
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_client_list_databases(client_handle: Handle) -> *mut Promise {
+    let promise = js_promise_new();
+
+    spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            if let Some(client_wrapper) = get_handle::<MongoClientHandle>(client_handle) {
+                match client_wrapper.client.list_database_names(None, None).await {
+                    Ok(names) => {
+                        let json = serde_json::to_string(&names)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        Ok(json)
+                    }
+                    Err(e) => Err(format!("List databases failed: {}", e)),
+                }
+            } else {
+                Err("Invalid client handle".to_string())
+            }
+        },
+        |json: String| {
+            let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            JSValue::string_ptr(ptr).bits()
+        },
+    );
+
+    promise
+}
+
+/// db.listCollections() -> Promise<string> (JSON array of collection names)
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_db_list_collections(db_handle: Handle) -> *mut Promise {
+    let promise = js_promise_new();
+
+    spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            if let Some(db_wrapper) = get_handle::<MongoDatabaseHandle>(db_handle) {
+                match db_wrapper.db.list_collection_names(None).await {
+                    Ok(names) => {
+                        let json = serde_json::to_string(&names)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        Ok(json)
+                    }
+                    Err(e) => Err(format!("List collections failed: {}", e)),
+                }
+            } else {
+                Err("Invalid database handle".to_string())
+            }
+        },
+        |json: String| {
+            let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            JSValue::string_ptr(ptr).bits()
+        },
+    );
+
+    promise
+}

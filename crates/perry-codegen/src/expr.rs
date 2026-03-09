@@ -15345,6 +15345,17 @@ pub(crate) fn compile_expr(
                         let set_body_ref = module.declare_func_in_func(*set_body_func, builder.func);
                         builder.ins().call(set_body_ref, &[app_handle, body_i64]);
 
+                        // Set icon (optional)
+                        if let Some(icon_func) = extern_funcs.get("perry_ui_app_set_icon") {
+                            let icon_name_ptr = create_field_name_str(module, builder, extern_funcs, "icon")?;
+                            let icon_call = builder.ins().call(get_field_ref, &[config_ptr, icon_name_ptr]);
+                            let icon_f64 = builder.inst_results(icon_call)[0];
+                            let icon_str_call = builder.ins().call(get_str_ref, &[icon_f64]);
+                            let icon_ptr = builder.inst_results(icon_str_call)[0];
+                            let icon_ref = module.declare_func_in_func(*icon_func, builder.func);
+                            builder.ins().call(icon_ref, &[icon_ptr]);
+                        }
+
                         // Run the app
                         let run_func = extern_funcs.get("perry_ui_app_run")
                             .ok_or_else(|| anyhow!("perry_ui_app_run not declared"))?;
@@ -16948,6 +16959,8 @@ pub(crate) fn compile_expr(
                 ("mongodb", true, "deleteMany") => "js_mongodb_collection_delete_many",
                 ("mongodb", true, "countDocuments") => "js_mongodb_collection_count",
                 ("mongodb", true, "close") => "js_mongodb_client_close",
+                ("mongodb", true, "listDatabases") => "js_mongodb_client_list_databases",
+                ("mongodb", true, "listCollections") => "js_mongodb_db_list_collections",
 
                 // ========================================================================
                 // Tier 5: better-sqlite3 (SQLite)
@@ -18292,8 +18305,8 @@ pub(crate) fn compile_expr(
                                 call_args.push(builder.inst_results(stringify_call)[0]);
                             }
                         }
-                        "close" => {
-                            // close() - no additional args
+                        "close" | "listDatabases" | "listCollections" => {
+                            // no additional args beyond the handle
                         }
                         _ => {}
                     }

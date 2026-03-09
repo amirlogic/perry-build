@@ -47,6 +47,12 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
+/// Set the application dock icon from a file path.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_icon(path_ptr: i64) {
+    app::app_set_icon(path_ptr as *const u8);
+}
+
 /// Register an external NSView (from a native library) as a Perry widget.
 /// Returns widget handle usable with widgetAddChild, widgetSetWidth, etc.
 #[no_mangle]
