@@ -627,8 +627,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_credential(
             args.apple_identity.as_deref(),
             "PERRY_APPLE_IDENTITY",
-            toml_signing_identity.as_deref()
-                .or_else(|| saved.apple.as_ref().and_then(|a| a.signing_identity.as_deref())),
+            toml_signing_identity.as_deref(),
             "  Signing Identity",
             false,
             interactive,
@@ -663,8 +662,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         let explicit_path = resolve_path_credential(
             args.certificate.as_deref(),
             "PERRY_APPLE_CERTIFICATE",
-            toml_certificate.as_deref()
-                .or_else(|| saved.apple.as_ref().and_then(|a| a.certificate_path.as_deref())),
+            toml_certificate.as_deref(),
             "", // empty prompt — don't prompt, we'll try auto-export instead
             false, // never prompt for path
         );
@@ -734,8 +732,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_path_credential(
             args.provisioning_profile.as_deref(),
             "PERRY_PROVISIONING_PROFILE",
-            toml_provisioning_profile.as_deref()
-                .or_else(|| saved.ios.as_ref().and_then(|i| i.provisioning_profile_path.as_deref())),
+            toml_provisioning_profile.as_deref(),
             "  Provisioning profile path",
             interactive,
         )
@@ -986,7 +983,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             } else {
                 errors.push(
                     "No provisioning profile specified. iOS App Store / TestFlight requires one.\n\
-                     \x20\x20  Set provisioning_profile_path in ~/.perry/config.toml or pass --provisioning-profile"
+                     \x20\x20  Add provisioning_profile to [ios] in perry.toml or pass --provisioning-profile\n\
+                     \x20\x20  Run `perry setup ios` to configure automatically"
                     .into()
                 );
             }
@@ -1032,7 +1030,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             if apple_certificate_p12_b64.is_none() {
                 errors.push(
                     "No distribution certificate (.p12) provided. Required for App Store signing.\n\
-                     \x20\x20  Set certificate_path in ~/.perry/config.toml or pass --certificate"
+                     \x20\x20  Add certificate to [ios] in perry.toml or pass --certificate\n\
+                     \x20\x20  Run `perry setup ios` to configure automatically"
                     .into()
                 );
             }
@@ -1099,17 +1098,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     if !is_android {
         let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
         if apple_team_id.is_some() { apple.team_id = apple_team_id.clone(); }
-        // Save the base (non-macOS-overridden) identity so iOS still gets the right cert
-        if apple_identity_base.is_some() { apple.signing_identity = apple_identity_base.clone(); }
         if apple_p8_key_path.is_some() { apple.p8_key_path = apple_p8_key_path.clone(); }
         if apple_key_id.is_some() { apple.key_id = apple_key_id.clone(); }
         if apple_issuer_id.is_some() { apple.issuer_id = apple_issuer_id.clone(); }
-        // Save .p12 path only — never the cert data or password
-        if apple_certificate_path.is_some() { apple.certificate_path = apple_certificate_path.clone(); }
-    }
-    if is_ios {
-        let ios_saved = saved.ios.get_or_insert_with(IosSavedConfig::default);
-        if provisioning_profile_path.is_some() { ios_saved.provisioning_profile_path = provisioning_profile_path.clone(); }
+        // Project-specific fields (signing_identity, certificate, provisioning_profile)
+        // are NOT saved to global config — they belong in perry.toml [ios]/[macos]
     }
     if is_android {
         let android_saved = saved.android.get_or_insert_with(AndroidSavedConfig::default);
@@ -1715,22 +1708,17 @@ pub(crate) struct AppleSavedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) team_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) signing_identity: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) p8_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) issuer_id: Option<String>,
-    /// Path to .p12 certificate bundle. Only the path is saved, never the cert data or password.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) certificate_path: Option<String>,
 }
 
+/// Legacy struct kept for backward compatibility when reading old config files.
+/// New configs no longer save iOS-specific fields to the global config.
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub(crate) struct IosSavedConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provisioning_profile_path: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -2120,15 +2108,11 @@ mod tests {
             default_target: Some("macos".into()),
             apple: Some(AppleSavedConfig {
                 team_id: Some("ABC123DEF".into()),
-                signing_identity: Some("Developer ID Application: Test (ABC123DEF)".into()),
                 p8_key_path: Some("/Users/me/AuthKey_XXX.p8".into()),
                 key_id: Some("XXX".into()),
                 issuer_id: Some("abc-def-ghi".into()),
-                ..Default::default()
             }),
-            ios: Some(IosSavedConfig {
-                provisioning_profile_path: Some("/Users/me/profile.mobileprovision".into()),
-            }),
+            ios: Some(IosSavedConfig {}),
             android: Some(AndroidSavedConfig {
                 keystore_path: Some("/Users/me/release.keystore".into()),
                 key_alias: Some("key0".into()),
@@ -2143,7 +2127,6 @@ mod tests {
         assert_eq!(parsed.server, config.server);
         assert_eq!(parsed.default_target, config.default_target);
         assert_eq!(parsed.apple.as_ref().unwrap().team_id, config.apple.as_ref().unwrap().team_id);
-        assert_eq!(parsed.apple.as_ref().unwrap().signing_identity, config.apple.as_ref().unwrap().signing_identity);
         assert_eq!(parsed.android.as_ref().unwrap().google_play_key_path, config.android.as_ref().unwrap().google_play_key_path);
     }
 

@@ -7,7 +7,7 @@ use dialoguer::{Confirm, Input, Password, Select};
 use std::process::Command;
 
 use super::publish::{
-    AndroidSavedConfig, AppleSavedConfig, IosSavedConfig, PerryConfig,
+    AndroidSavedConfig, AppleSavedConfig, PerryConfig,
     config_path, is_interactive, load_config, save_config,
 };
 
@@ -455,6 +455,7 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         None
     };
 
+    let mut created_signing_identity: Option<String> = None;
     let cert_resource_id = if let Some(id) = existing_cert_id {
         id
     } else {
@@ -577,13 +578,12 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         }
         println!("{}", style("done").green());
 
-        // Derive signing identity from cert
+        // Derive signing identity from cert (will be saved to perry.toml, not global config)
         let identity = format!("Apple Distribution: {} ({})",
             cert_name.strip_prefix("Apple Distribution: ").unwrap_or(cert_name),
             &team_id);
-        let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
-        apple.signing_identity = Some(identity.clone());
         println!("  {} Identity: {}", style("✓").green().bold(), style(&identity).bold());
+        created_signing_identity = Some(identity);
 
         // Clean up intermediate files (keep the private key for potential re-use)
         let _ = std::fs::remove_file(&csr_path);
@@ -592,9 +592,6 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         cert_id
     };
 
-    // Save certificate path and password
-    let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
-    apple.certificate_path = Some(p12_path.to_string_lossy().to_string());
     save_config(saved).ok();
     println!();
 
@@ -686,10 +683,36 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     let profile_path = perry_dir.join("perry.mobileprovision");
     std::fs::write(&profile_path, &profile_data)?;
 
-    let ios = saved.ios.get_or_insert_with(IosSavedConfig::default);
-    ios.provisioning_profile_path = Some(profile_path.to_string_lossy().to_string());
-
     println!("  {} Profile saved to {}", style("✓").green().bold(), style(profile_path.display()).dim());
+    println!();
+
+    // --- Save project-specific credentials to perry.toml ---
+    let p12_str = p12_path.to_string_lossy().to_string();
+    let profile_str = profile_path.to_string_lossy().to_string();
+
+    if perry_toml_path.exists() {
+        match update_perry_toml_ios(
+            &perry_toml_path,
+            &p12_str,
+            &profile_str,
+            created_signing_identity.as_deref(),
+        ) {
+            Ok(()) => {
+                println!("  {} Project credentials saved to {}", style("✓").green().bold(),
+                    style(perry_toml_path.display()).dim());
+            }
+            Err(e) => {
+                println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+                println!("  Add these manually to your perry.toml [ios] section:");
+                println!("  certificate = \"{}\"", p12_str);
+                println!("  provisioning_profile = \"{}\"", profile_str);
+            }
+        }
+    } else {
+        println!("  Add these to your perry.toml [ios] section:");
+        println!("  certificate = \"{}\"", p12_str);
+        println!("  provisioning_profile = \"{}\"", profile_str);
+    }
     println!();
 
     // --- Summary ---
@@ -839,13 +862,7 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         .allow_empty(true)
         .interact_text()?;
 
-    let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
-    apple.certificate_path = Some(cert_path.clone());
-    if !signing_identity.is_empty() {
-        apple.signing_identity = Some(signing_identity);
-    }
-
-    println!("  {} Certificate saved: {}", style("✓").green(), style(&cert_path).bold());
+    println!("  {} Certificate: {}", style("✓").green(), style(&cert_path).bold());
     println!(
         "  {} Certificate password is NOT saved — set PERRY_APPLE_CERTIFICATE_PASSWORD",
         style("ℹ").blue()
@@ -857,6 +874,10 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
     println!("  {}", style("[macos]").cyan());
     println!("  distribute = \"{distribute_value}\"");
+    println!("  certificate = \"{}\"", cert_path);
+    if !signing_identity.is_empty() {
+        println!("  signing_identity = \"{}\"", signing_identity);
+    }
 
     Ok(())
 }
@@ -897,4 +918,32 @@ fn press_enter_to_continue(prompt: &str) {
         .with_prompt(prompt)
         .allow_empty(true)
         .interact_text();
+}
+
+/// Update perry.toml [ios] section with project-specific signing credentials.
+fn update_perry_toml_ios(
+    perry_toml_path: &std::path::Path,
+    certificate: &str,
+    provisioning_profile: &str,
+    signing_identity: Option<&str>,
+) -> Result<()> {
+    let content = std::fs::read_to_string(perry_toml_path)?;
+    let mut doc = content.parse::<toml::Table>()
+        .context("Failed to parse perry.toml")?;
+
+    let ios = doc.entry("ios")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[ios] in perry.toml is not a table"))?;
+
+    ios.insert("certificate".into(), toml::Value::String(certificate.into()));
+    ios.insert("provisioning_profile".into(), toml::Value::String(provisioning_profile.into()));
+    if let Some(identity) = signing_identity {
+        ios.insert("signing_identity".into(), toml::Value::String(identity.into()));
+    }
+
+    let new_content = toml::to_string_pretty(&doc)
+        .context("Failed to serialize perry.toml")?;
+    std::fs::write(perry_toml_path, new_content)?;
+    Ok(())
 }

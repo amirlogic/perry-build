@@ -3924,6 +3924,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "indicatif",
+ "jsonwebtoken",
  "log",
  "perry-codegen",
  "perry-codegen-js",
