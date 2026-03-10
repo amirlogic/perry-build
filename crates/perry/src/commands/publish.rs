@@ -827,6 +827,180 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         )?;
     }
 
+    // Pre-flight validation for iOS App Store / TestFlight — detect common rejection reasons
+    if is_ios {
+        let distribute = ios_distribute.as_deref().unwrap_or("");
+        if distribute == "appstore" || distribute == "testflight" {
+            let mut warnings: Vec<String> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+
+            // 1. Validate provisioning profile bundle ID matches project bundle_id
+            if let Some(ref profile_path) = provisioning_profile_path {
+                let profile_data = fs::read(profile_path)
+                    .with_context(|| format!("Failed to read provisioning profile: {profile_path}"))?;
+                let data_str = String::from_utf8_lossy(&profile_data);
+                if let (Some(xml_start), Some(xml_end)) = (data_str.find("<?xml"), data_str.find("</plist>")) {
+                    let plist_xml = &data_str[xml_start..xml_end + "</plist>".len()];
+
+                    // Extract application-identifier from Entitlements
+                    if let Some(app_id_pos) = plist_xml.find("<key>application-identifier</key>") {
+                        let after_key = &plist_xml[app_id_pos + "<key>application-identifier</key>".len()..];
+                        if let Some(s_start) = after_key.find("<string>") {
+                            if let Some(s_end) = after_key.find("</string>") {
+                                let app_identifier = &after_key[s_start + "<string>".len()..s_end];
+                                // application-identifier is "TEAMID.bundle.id" — strip team prefix
+                                let profile_bundle_id = if let Some(dot_pos) = app_identifier.find('.') {
+                                    &app_identifier[dot_pos + 1..]
+                                } else {
+                                    app_identifier
+                                };
+
+                                if profile_bundle_id != bundle_id && profile_bundle_id != "*" {
+                                    errors.push(format!(
+                                        "Provisioning profile bundle ID mismatch:\n\
+                                         \x20\x20  Profile: {} (from {})\n\
+                                         \x20\x20  Project: {} (from perry.toml)\n\
+                                         \x20\x20  Fix: Create a new provisioning profile for \"{}\" at developer.apple.com",
+                                        app_identifier, profile_path, bundle_id, bundle_id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // Check if profile has expired
+                    if let Some(exp_pos) = plist_xml.find("<key>ExpirationDate</key>") {
+                        let after_key = &plist_xml[exp_pos + "<key>ExpirationDate</key>".len()..];
+                        if let Some(d_start) = after_key.find("<date>") {
+                            if let Some(d_end) = after_key.find("</date>") {
+                                let expiry_str = &after_key[d_start + "<date>".len()..d_end];
+                                // ISO 8601 dates sort lexicographically; compare with rough "now"
+                                let now = {
+                                    let d = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    // Convert epoch seconds to YYYY-MM-DD (approx, good enough for comparison)
+                                    let days = d / 86400;
+                                    let years = 1970 + days / 365;
+                                    let remaining_days = days % 365;
+                                    let month = remaining_days / 30 + 1;
+                                    let day = remaining_days % 30 + 1;
+                                    format!("{:04}-{:02}-{:02}", years, month, day)
+                                };
+                                // Only compare date portion (first 10 chars)
+                                let expiry_date = if expiry_str.len() >= 10 { &expiry_str[..10] } else { expiry_str };
+                                let now_date = &now[..10];
+                                if expiry_date < now_date {
+                                    errors.push(format!(
+                                        "Provisioning profile expired on {}.\n\
+                                         \x20\x20  Download a fresh profile from developer.apple.com",
+                                        expiry_date
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract and validate team ID matches
+                    if let Some(ref expected_team) = apple_team_id {
+                        if let Some(team_pos) = plist_xml.find("<key>TeamIdentifier</key>") {
+                            let after_key = &plist_xml[team_pos + "<key>TeamIdentifier</key>".len()..];
+                            if let Some(s_start) = after_key.find("<string>") {
+                                if let Some(s_end) = after_key.find("</string>") {
+                                    let profile_team = &after_key[s_start + "<string>".len()..s_end];
+                                    if profile_team != expected_team.as_str() {
+                                        errors.push(format!(
+                                            "Provisioning profile team ID mismatch:\n\
+                                             \x20\x20  Profile: {}\n\
+                                             \x20\x20  Config:  {}\n\
+                                             \x20\x20  Ensure the profile was created under the correct team",
+                                            profile_team, expected_team
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    warnings.push("Could not parse provisioning profile to validate bundle ID.".into());
+                }
+            } else {
+                errors.push(
+                    "No provisioning profile specified. iOS App Store / TestFlight requires one.\n\
+                     \x20\x20  Set provisioning_profile_path in ~/.perry/config.toml or pass --provisioning-profile"
+                    .into()
+                );
+            }
+
+            // 2. Check for app icon
+            if icon.is_none() {
+                warnings.push(
+                    "No app icon configured. App Store requires a 1024×1024 icon.\n\
+                     \x20\x20  Add [app.icons] source = \"assets/icon.png\" to perry.toml"
+                    .into()
+                );
+            } else if let Some(ref icon_path) = icon {
+                let full_icon_path = project_dir.join(icon_path);
+                if !full_icon_path.exists() {
+                    errors.push(format!(
+                        "App icon not found: {}\n\
+                         \x20\x20  Ensure the icon file exists at the specified path",
+                        icon_path
+                    ));
+                }
+            }
+
+            // 3. Validate version string (must be MAJOR.MINOR or MAJOR.MINOR.PATCH)
+            let version_parts: Vec<&str> = version.split('.').collect();
+            if version_parts.len() < 2 || version_parts.len() > 3
+                || !version_parts.iter().all(|p| p.parse::<u32>().is_ok())
+            {
+                warnings.push(format!(
+                    "Version \"{}\" may not be valid for App Store.\n\
+                     \x20\x20  Use: MAJOR.MINOR or MAJOR.MINOR.PATCH (e.g., 1.2.0)",
+                    version
+                ));
+            }
+
+            // 4. Validate build number is positive
+            if build_number == 0 {
+                errors.push(
+                    "Build number must be positive for App Store submission.".into()
+                );
+            }
+
+            // 5. Check signing certificate is provided
+            if apple_certificate_p12_b64.is_none() {
+                errors.push(
+                    "No distribution certificate (.p12) provided. Required for App Store signing.\n\
+                     \x20\x20  Set certificate_path in ~/.perry/config.toml or pass --certificate"
+                    .into()
+                );
+            }
+
+            // Print warnings and errors
+            if !warnings.is_empty() || !errors.is_empty() {
+                println!();
+                println!("  {} Pre-flight check results:", style("→").cyan().bold());
+                for w in &warnings {
+                    println!("  {} {}", style("⚠").yellow().bold(), w);
+                }
+                for e in &errors {
+                    println!("  {} {}", style("✗").red().bold(), e);
+                }
+                println!();
+            }
+
+            if !errors.is_empty() {
+                bail!(
+                    "Pre-flight validation failed with {} error(s). Fix the issues above before publishing.",
+                    errors.len()
+                );
+            }
+        }
+    }
+
     // --- Show summary and confirm ---
     if let OutputFormat::Text = format {
         println!("  Version:   {version}");
