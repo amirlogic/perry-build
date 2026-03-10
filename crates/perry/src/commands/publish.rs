@@ -1233,7 +1233,19 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 }
 
                 let bytes = resp.bytes().await?;
-                fs::write(&dest, &bytes)?;
+                // The hub may store artifacts as base64 (perry runtime doesn't
+                // decode Buffer.from(data, 'base64')). Detect and decode.
+                let data = if bytes.len() > 4 && bytes.iter().all(|&b| {
+                    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'\n' || b == b'\r'
+                }) {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&bytes)
+                        .unwrap_or_else(|_| bytes.to_vec())
+                } else {
+                    bytes.to_vec()
+                };
+                fs::write(&dest, &data)?;
             }
 
             if let OutputFormat::Text = format {
