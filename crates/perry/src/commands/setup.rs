@@ -713,6 +713,22 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         println!("  certificate = \"{}\"", p12_str);
         println!("  provisioning_profile = \"{}\"", profile_str);
     }
+    // --- Export compliance ---
+    println!("  {} Export Compliance", style("→").cyan().bold());
+    println!("  Most apps only use HTTPS and don't need custom encryption declarations.");
+    let encryption_exempt = Confirm::new()
+        .with_prompt("  Does your app ONLY use standard HTTPS? (no custom encryption)")
+        .default(true)
+        .interact()?;
+    if perry_toml_path.exists() {
+        if let Err(e) = update_perry_toml_encryption_exempt(&perry_toml_path, encryption_exempt) {
+            println!("  {} Could not update perry.toml: {e}", style("!").yellow());
+            println!("  Add manually to [ios]: encryption_exempt = {encryption_exempt}");
+        }
+    } else {
+        println!("  Add to your perry.toml [ios] section:");
+        println!("  encryption_exempt = {encryption_exempt}");
+    }
     println!();
 
     // --- Summary ---
@@ -941,6 +957,28 @@ fn update_perry_toml_ios(
     if let Some(identity) = signing_identity {
         ios.insert("signing_identity".into(), toml::Value::String(identity.into()));
     }
+
+    let new_content = toml::to_string_pretty(&doc)
+        .context("Failed to serialize perry.toml")?;
+    std::fs::write(perry_toml_path, new_content)?;
+    Ok(())
+}
+
+/// Update perry.toml [ios] section with encryption_exempt flag.
+fn update_perry_toml_encryption_exempt(
+    perry_toml_path: &std::path::Path,
+    encryption_exempt: bool,
+) -> Result<()> {
+    let content = std::fs::read_to_string(perry_toml_path)?;
+    let mut doc = content.parse::<toml::Table>()
+        .context("Failed to parse perry.toml")?;
+
+    let ios = doc.entry("ios")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[ios] in perry.toml is not a table"))?;
+
+    ios.insert("encryption_exempt".into(), toml::Value::Boolean(encryption_exempt));
 
     let new_content = toml::to_string_pretty(&doc)
         .context("Failed to serialize perry.toml")?;

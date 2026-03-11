@@ -181,6 +181,9 @@ struct IosConfig {
     key_id: Option<String>,
     issuer_id: Option<String>,
     p8_key_path: Option<String>,
+    /// If true, adds ITSAppUsesNonExemptEncryption=NO to Info.plist
+    /// (skips the export compliance prompt in App Store Connect)
+    encryption_exempt: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +306,8 @@ struct BuildManifest {
     ios_capabilities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ios_distribute: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ios_encryption_exempt: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     macos_distribute: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -539,6 +544,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let ios_orientations = config.ios.as_ref().and_then(|i| i.orientations.clone());
     let ios_capabilities = config.ios.as_ref().and_then(|i| i.capabilities.clone());
     let ios_distribute = config.ios.as_ref().and_then(|i| i.distribute.clone());
+    let ios_encryption_exempt = config.ios.as_ref().and_then(|i| i.encryption_exempt);
 
     // Android-specific config from perry.toml
     let android_min_sdk = config.android.as_ref().and_then(|a| a.min_sdk.clone());
@@ -1036,6 +1042,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 );
             }
 
+            // 6. Warn if encryption_exempt is not set (causes manual prompt in App Store Connect)
+            if ios_encryption_exempt.is_none() {
+                warnings.push(
+                    "encryption_exempt not set in [ios] of perry.toml.\n\
+                     \x20\x20  Without it, App Store Connect will prompt about export compliance on every upload.\n\
+                     \x20\x20  If your app only uses HTTPS (no custom encryption), add:\n\
+                     \x20\x20  encryption_exempt = true"
+                    .into()
+                );
+            }
+
             // Print warnings and errors
             if !warnings.is_empty() || !errors.is_empty() {
                 println!();
@@ -1143,6 +1160,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         ios_orientations: if is_ios { ios_orientations } else { None },
         ios_capabilities: if is_ios { ios_capabilities } else { None },
         ios_distribute: if is_ios { ios_distribute } else { None },
+        ios_encryption_exempt: if is_ios { ios_encryption_exempt } else { None },
         macos_distribute: if !is_ios && !is_android && !is_linux { macos_distribute } else { None },
         android_min_sdk: if is_android { android_min_sdk } else { None },
         android_target_sdk: if is_android { android_target_sdk } else { None },

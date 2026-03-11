@@ -3379,17 +3379,43 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
             None
         })().unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+
+        // Check perry.toml for iOS-specific settings (e.g. encryption_exempt)
+        let encryption_exempt_plist = (|| -> Option<String> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    let data = fs::read_to_string(toml_path).ok()?;
+                    let doc: toml::Table = data.parse().ok()?;
+                    let ios = doc.get("ios")?.as_table()?;
+                    let exempt = ios.get("encryption_exempt")?.as_bool()?;
+                    if exempt {
+                        return Some(
+                            "    <key>ITSAppUsesNonExemptEncryption</key>\n    <false/>".into()
+                        );
+                    } else {
+                        return Some(
+                            "    <key>ITSAppUsesNonExemptEncryption</key>\n    <true/>".into()
+                        );
+                    }
+                }
+            }
+            None
+        })().unwrap_or_default();
+
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>{}</string>
+    <string>{exe_stem}</string>
     <key>CFBundleIdentifier</key>
-    <string>{}</string>
+    <string>{bundle_id}</string>
     <key>CFBundleName</key>
-    <string>{}</string>
+    <string>{exe_stem}</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -3435,8 +3461,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     </dict>
 </dict>
 </plist>"#,
-            exe_stem, bundle_id, exe_stem
         );
+
+        // Append ITSAppUsesNonExemptEncryption if configured in perry.toml
+        let info_plist = if !encryption_exempt_plist.is_empty() {
+            info_plist.replace(
+                "</dict>\n</plist>",
+                &format!("{}\n</dict>\n</plist>", encryption_exempt_plist),
+            )
+        } else {
+            info_plist
+        };
         fs::write(app_dir.join("Info.plist"), info_plist)?;
 
         // Write a minimal compiled LaunchScreen storyboard so iPadOS treats
