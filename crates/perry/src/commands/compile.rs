@@ -3065,9 +3065,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let ndk_home = std::env::var("ANDROID_NDK_HOME").map_err(|_| {
             anyhow!("ANDROID_NDK_HOME not set. Set it to your NDK path, e.g. $HOME/Library/Android/sdk/ndk/28.0.12433566")
         })?;
+        let host_tag = if cfg!(target_os = "macos") { "darwin-x86_64" } else { "linux-x86_64" };
         let clang = format!(
-            "{}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang",
-            ndk_home
+            "{}/toolchains/llvm/prebuilt/{}/bin/aarch64-linux-android24-clang",
+            ndk_home, host_tag
         );
         if !PathBuf::from(&clang).exists() {
             return Err(anyhow!("Android NDK clang not found at: {}", clang));
@@ -3202,7 +3203,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-lresolv");
     } else if is_android {
         // Android system libraries
-        cmd.arg("-lm")
+        cmd.arg("-Wl,--allow-multiple-definition")
+           .arg("-lm")
            .arg("-ldl")
            .arg("-llog");
     } else if is_linux {
