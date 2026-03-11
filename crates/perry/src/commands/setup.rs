@@ -1120,23 +1120,17 @@ fn create_apple_certificate(
             println!("{} ({})", style("found").green(), name);
             println!("  {} Using existing .p12 at {}", style("✓").green().bold(),
                 style(p12_output_path.display()).dim());
-            // Extract identity from cert name
             let identity = name.to_string();
             return Ok((p12_output_path.to_string_lossy().to_string(), identity));
         } else {
-            println!("{}", style("found, regenerating .p12...").yellow());
-            // We have the cert in Apple but no local .p12 — download and create .p12
-            let cert_content = cert["attributes"]["certificateContent"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("No certificate content for existing {cert_type}"))?;
-            let identity = create_p12_from_cert_content(
-                cert_content, private_key_path, p12_output_path, p12_password, display_name,
-            )?;
-            return Ok((p12_output_path.to_string_lossy().to_string(), identity));
+            // Existing cert was created elsewhere (e.g. Xcode) — we don't have the
+            // matching private key, so we can't make a .p12 from it.
+            // Create a brand-new cert with our CSR instead.
+            println!("{}", style("found (no local key), creating new...").yellow());
         }
+    } else {
+        println!("{}", style("not found, creating...").yellow());
     }
-
-    println!("{}", style("not found, creating...").yellow());
 
     // Strip PEM headers for API (Apple wants raw base64)
     let csr_b64: String = csr_pem.lines()
