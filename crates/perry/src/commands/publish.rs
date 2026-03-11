@@ -1246,16 +1246,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         if let Some(ref id) = apple_identity {
             println!("  Signing:   {id}");
         }
-        if android_distribute.as_deref() == Some("playstore") {
+        if is_android && android_distribute.as_deref() == Some("playstore") {
             println!("  Distribute: Google Play");
-        } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight") {
+        } else if is_ios && matches!(ios_distribute.as_deref(), Some("appstore") | Some("testflight")) {
             println!("  Distribute: App Store Connect (TestFlight)");
-        } else if macos_distribute.as_deref() == Some("both") {
-            println!("  Distribute: App Store + Notarized DMG");
-        } else if matches!(macos_distribute.as_deref(), Some("appstore") | Some("testflight")) {
-            println!("  Distribute: App Store Connect (TestFlight)");
-        } else if macos_distribute.as_deref() == Some("notarize") {
-            println!("  Distribute: Notarized DMG");
+        } else if is_macos {
+            match macos_distribute.as_deref() {
+                Some("both") => println!("  Distribute: App Store + Notarized DMG"),
+                Some("appstore") => println!("  Distribute: App Store Connect (TestFlight)"),
+                Some("notarize") => println!("  Distribute: Notarized DMG"),
+                _ => {}
+            }
         }
         println!();
     }
