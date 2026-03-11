@@ -222,7 +222,8 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
     // Update project perry.toml with distribute = "playstore"
     let perry_toml_path = std::env::current_dir()?.join("perry.toml");
     if perry_toml_path.exists() {
-        match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias) {
+        let gp_key = saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref());
+        match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias, gp_key) {
             Ok(()) => {
                 println!();
                 println!(
@@ -1607,6 +1608,7 @@ fn update_perry_toml_android(
     perry_toml_path: &std::path::Path,
     keystore_path: &str,
     key_alias: &str,
+    google_play_key: Option<&str>,
 ) -> Result<()> {
     let content = std::fs::read_to_string(perry_toml_path)?;
     let mut doc = content.parse::<toml::Table>()
@@ -1619,6 +1621,9 @@ fn update_perry_toml_android(
 
     android.insert("keystore".into(), toml::Value::String(keystore_path.into()));
     android.insert("key_alias".into(), toml::Value::String(key_alias.into()));
+    if let Some(key) = google_play_key {
+        android.insert("google_play_key".into(), toml::Value::String(key.into()));
+    }
     if !android.contains_key("distribute") {
         android.insert("distribute".into(), toml::Value::String("playstore".into()));
     }

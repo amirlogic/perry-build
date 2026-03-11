@@ -203,6 +203,7 @@ struct AndroidConfig {
     distribute: Option<String>,
     keystore: Option<String>,
     key_alias: Option<String>,
+    google_play_key: Option<String>,
     entry: Option<String>,
 }
 
@@ -847,11 +848,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .or_else(|| std::env::var("PERRY_ANDROID_KEY_PASSWORD").ok());
 
     // Google Play service account JSON
+    let toml_google_play_key = config.android.as_ref().and_then(|a| a.google_play_key.as_deref());
     let google_play_key_path = if is_android {
         resolve_path_credential(
             args.google_play_key.as_deref(),
             "PERRY_GOOGLE_PLAY_KEY_PATH",
-            saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref()),
+            saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref()).or(toml_google_play_key),
             "  Google Play service account JSON path",
             interactive && android_distribute.as_deref() == Some("playstore"),
         )
