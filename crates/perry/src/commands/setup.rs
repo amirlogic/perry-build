@@ -870,8 +870,8 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     }
     println!();
 
-    // --- Step 2: Mac Distribution Certificate ---
-    println!("  {} Mac Distribution Certificate", style("Step 2/2 —").cyan().bold());
+    // --- Step 2: Distribution method ---
+    println!("  {} Distribution Method", style("Step 2/3 —").cyan().bold());
     println!();
 
     let cert_types = &[
@@ -892,79 +892,107 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     };
     let needs_appstore_cert = distribute_value == "appstore" || distribute_value == "both";
     let needs_notarize_cert = distribute_value == "notarize" || distribute_value == "both";
+    println!();
 
-    // -- App Store / Apple Distribution certificate --
+    // --- Step 3: Auto-create certificates via App Store Connect API ---
+    println!("  {} Certificates", style("Step 3/3 —").cyan().bold());
+    println!();
+
+    // Verify API connectivity
+    let client = reqwest::blocking::Client::new();
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+    print!("  Verifying API access... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/certificates?limit=1")
+        .bearer_auth(&jwt)
+        .send()
+        .context("Failed to connect to App Store Connect API")?;
+    if resp.status() == 401 || resp.status() == 403 {
+        bail!("API authentication failed — check your Key ID, Issuer ID, and .p8 key");
+    }
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        bail!("API error: {body}");
+    }
+    println!("{}", style("ok").green());
+
+    let perry_dir = dirs::home_dir().unwrap_or_default().join(".perry");
+    std::fs::create_dir_all(&perry_dir)?;
+    let p12_password = "perry-auto";
+
+    // Shared private key for all certs
+    let key_path = perry_dir.join("macos_private_key.pem");
+    let csr_path = perry_dir.join("macos_csr.pem");
+
+    // Generate RSA 2048 private key + CSR (reused across all cert types)
+    println!("  Generating private key and CSR...");
+    let status = Command::new("openssl")
+        .args(["genrsa", "-out"])
+        .arg(&key_path)
+        .arg("2048")
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("openssl not found — required for certificate generation")?;
+    if !status.success() {
+        bail!("Failed to generate private key");
+    }
+    let status = Command::new("openssl")
+        .args(["req", "-new", "-key"])
+        .arg(&key_path)
+        .args(["-out"])
+        .arg(&csr_path)
+        .args(["-subj", "/CN=Perry macOS Distribution/O=Perry"])
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        bail!("Failed to generate CSR");
+    }
+    let csr_pem = std::fs::read_to_string(&csr_path)?;
+
     let mut cert_path = String::new();
     let mut signing_identity = String::new();
-    if needs_appstore_cert {
-        println!();
-        if distribute_value == "both" {
-            println!("  {} App Store certificate (Apple Distribution):", style("A)").cyan().bold());
-        }
-        println!("  To create a Mac App Store distribution certificate:");
-        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
-        println!("  2. Click 'Manage Certificates'.");
-        println!("  3. Create a '3rd Party Mac Developer Application' certificate.");
-        println!("  4. Right-click → Export Certificate → save as .p12.");
-        println!();
-        press_enter_to_continue("  Press Enter when ready");
-
-        cert_path = prompt_file_path("  Path to .p12 certificate (App Store)", ".p12")?;
-        signing_identity = Input::<String>::new()
-            .with_prompt("  Signing identity (optional, e.g. 'Apple Distribution: ...')")
-            .allow_empty(true)
-            .interact_text()?;
-
-        println!("  {} App Store certificate: {}", style("✓").green(), style(&cert_path).bold());
-    }
-
-    // -- Developer ID certificate (for notarization) --
     let mut notarize_cert_path = String::new();
     let mut notarize_signing_identity = String::new();
-    if needs_notarize_cert {
-        println!();
-        if distribute_value == "both" {
-            println!("  {} Developer ID certificate (for notarization):", style("B)").cyan().bold());
-        }
-        println!("  To create a Developer ID Application certificate:");
-        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
-        println!("  2. Click 'Manage Certificates'.");
-        println!("  3. Create a 'Developer ID Application' certificate.");
-        println!("  4. Right-click → Export Certificate → save as .p12.");
-        println!();
-        press_enter_to_continue("  Press Enter when ready");
 
-        notarize_cert_path = prompt_file_path(
-            if distribute_value == "both" { "  Path to .p12 certificate (Developer ID)" } else { "  Path to .p12 certificate" },
-            ".p12",
+    // -- App Store certificate (MAC_APP_DISTRIBUTION) --
+    if needs_appstore_cert {
+        let (p12, identity) = create_apple_certificate(
+            &client, &key_id, &issuer_id, &p8_content,
+            "MAC_APP_DISTRIBUTION", &csr_pem, &key_path,
+            &perry_dir.join("macos_appstore.p12"), p12_password,
+            "Mac App Distribution",
         )?;
-        notarize_signing_identity = Input::<String>::new()
-            .with_prompt("  Signing identity (optional, e.g. 'Developer ID Application: ...')")
-            .allow_empty(true)
-            .interact_text()?;
+        cert_path = p12;
+        signing_identity = identity;
 
-        println!("  {} Developer ID certificate: {}", style("✓").green(), style(&notarize_cert_path).bold());
-    }
-
-    // For single-cert modes, normalize into cert_path
-    if distribute_value == "notarize" {
-        cert_path = notarize_cert_path.clone();
-        signing_identity = notarize_signing_identity.clone();
-    }
-
-    println!();
-    println!(
-        "  {} Certificate password is NOT saved — set {}",
-        style("ℹ").blue(),
-        style("PERRY_APPLE_CERTIFICATE_PASSWORD").bold()
-    );
-    if distribute_value == "both" {
-        println!(
-            "  {} Notarize cert password: set {} (falls back to main password)",
-            style("ℹ").blue(),
-            style("PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD").bold()
+        // Also create MAC_INSTALLER_DISTRIBUTION for .pkg signing
+        let _ = create_apple_certificate(
+            &client, &key_id, &issuer_id, &p8_content,
+            "MAC_INSTALLER_DISTRIBUTION", &csr_pem, &key_path,
+            &perry_dir.join("macos_installer.p12"), p12_password,
+            "Mac Installer Distribution",
         );
     }
+
+    // -- Developer ID certificate (DEVELOPER_ID_APPLICATION) --
+    if needs_notarize_cert {
+        let (p12, identity) = create_apple_certificate(
+            &client, &key_id, &issuer_id, &p8_content,
+            "DEVELOPER_ID_APPLICATION", &csr_pem, &key_path,
+            &perry_dir.join("macos_devid.p12"), p12_password,
+            "Developer ID Application",
+        )?;
+        if distribute_value == "both" {
+            notarize_cert_path = p12;
+            notarize_signing_identity = identity;
+        } else {
+            cert_path = p12;
+            signing_identity = identity;
+        }
+    }
+
+    // Clean up CSR (keep private key for future use)
+    let _ = std::fs::remove_file(&csr_path);
     println!();
 
     // --- Save project-specific credentials to perry.toml ---
@@ -1044,14 +1072,196 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         }
     }
     println!("  Distribute:   {}", style(distribute_value).bold());
-    println!("  Cert password: set PERRY_APPLE_CERTIFICATE_PASSWORD");
-    if distribute_value == "both" {
-        println!("  Notarize cert password: set PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD");
-    }
+    println!("  Cert password: auto-managed ({})", style("perry-auto").dim());
     println!();
     println!("  Then run: {}", style("perry publish --macos").bold());
 
     Ok(())
+}
+
+/// Create an Apple certificate via the App Store Connect API.
+///
+/// 1. Check for existing certs of this type (reuse if found + .p12 exists)
+/// 2. If none, submit CSR to Apple and create the cert
+/// 3. Convert to .p12 using openssl
+///
+/// Returns (p12_path, signing_identity).
+fn create_apple_certificate(
+    client: &reqwest::blocking::Client,
+    key_id: &str,
+    issuer_id: &str,
+    p8_content: &str,
+    cert_type: &str,
+    csr_pem: &str,
+    private_key_path: &std::path::Path,
+    p12_output_path: &std::path::Path,
+    p12_password: &str,
+    display_name: &str,
+) -> Result<(String, String)> {
+    use base64::Engine;
+
+    // Check for existing certs of this type
+    print!("  Checking for existing {} certificate... ", style(display_name).bold());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let jwt = generate_asc_jwt(key_id, issuer_id, p8_content)?;
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/certificates")
+        .bearer_auth(&jwt)
+        .query(&[("filter[certificateType]", cert_type), ("limit", "200")])
+        .send()?;
+    let body: serde_json::Value = resp.json()?;
+    let existing = body["data"].as_array()
+        .and_then(|arr| arr.first())
+        .cloned();
+
+    if let Some(ref cert) = existing {
+        if p12_output_path.exists() {
+            let name = cert["attributes"]["name"].as_str().unwrap_or(display_name);
+            println!("{} ({})", style("found").green(), name);
+            println!("  {} Using existing .p12 at {}", style("✓").green().bold(),
+                style(p12_output_path.display()).dim());
+            // Extract identity from cert name
+            let identity = name.to_string();
+            return Ok((p12_output_path.to_string_lossy().to_string(), identity));
+        } else {
+            println!("{}", style("found, regenerating .p12...").yellow());
+            // We have the cert in Apple but no local .p12 — download and create .p12
+            let cert_content = cert["attributes"]["certificateContent"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("No certificate content for existing {cert_type}"))?;
+            let identity = create_p12_from_cert_content(
+                cert_content, private_key_path, p12_output_path, p12_password, display_name,
+            )?;
+            return Ok((p12_output_path.to_string_lossy().to_string(), identity));
+        }
+    }
+
+    println!("{}", style("not found, creating...").yellow());
+
+    // Strip PEM headers for API (Apple wants raw base64)
+    let csr_b64: String = csr_pem.lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+
+    // Submit CSR to Apple
+    print!("  Creating {} certificate... ", style(display_name).bold());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let jwt = generate_asc_jwt(key_id, issuer_id, p8_content)?;
+    let create_body = serde_json::json!({
+        "data": {
+            "type": "certificates",
+            "attributes": {
+                "certificateType": cert_type,
+                "csrContent": csr_b64
+            }
+        }
+    });
+    let resp = client.post("https://api.appstoreconnect.apple.com/v1/certificates")
+        .bearer_auth(&jwt)
+        .json(&create_body)
+        .send()?;
+    if !resp.status().is_success() {
+        let err = resp.text().unwrap_or_default();
+        bail!("Failed to create {display_name} certificate: {err}");
+    }
+    let resp_body: serde_json::Value = resp.json()?;
+    let cert_content = resp_body["data"]["attributes"]["certificateContent"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No certificate content in response"))?;
+    let cert_name = resp_body["data"]["attributes"]["name"]
+        .as_str()
+        .unwrap_or(display_name);
+    println!("{}", style("done").green());
+    println!("  {} Certificate: {}", style("✓").green().bold(), style(cert_name).bold());
+
+    let identity = create_p12_from_cert_content(
+        cert_content, private_key_path, p12_output_path, p12_password, display_name,
+    )?;
+
+    Ok((p12_output_path.to_string_lossy().to_string(), identity))
+}
+
+/// Convert base64-encoded DER certificate content + private key into a .p12 file.
+/// Returns the signing identity string extracted from the certificate.
+fn create_p12_from_cert_content(
+    cert_content_b64: &str,
+    private_key_path: &std::path::Path,
+    p12_output_path: &std::path::Path,
+    p12_password: &str,
+    display_name: &str,
+) -> Result<String> {
+    use base64::Engine;
+
+    let cert_der = base64::engine::general_purpose::STANDARD.decode(cert_content_b64)
+        .context("Failed to decode certificate from Apple")?;
+
+    // Write cert as PEM for openssl
+    let cert_pem_path = p12_output_path.with_extension("cer.pem");
+    let cert_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        base64::engine::general_purpose::STANDARD.encode(&cert_der)
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    std::fs::write(&cert_pem_path, &cert_pem)?;
+
+    // Extract signing identity (CN) from the certificate
+    let identity_output = Command::new("openssl")
+        .args(["x509", "-noout", "-subject", "-in"])
+        .arg(&cert_pem_path)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let identity = identity_output
+        .split("CN=").nth(1)  // old format: subject= /CN=.../O=...
+        .or_else(|| identity_output.split("CN = ").nth(1))  // new format: subject=CN = ..., O = ...
+        .map(|s| s.split('/').next().unwrap_or(s))  // strip /O=...
+        .map(|s| s.split(", O").next().unwrap_or(s))  // strip , O = ...
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| display_name.to_string());
+
+    // Create .p12 from private key + certificate
+    print!("  Creating .p12 bundle... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let status = Command::new("openssl")
+        .args(["pkcs12", "-export", "-inkey"])
+        .arg(private_key_path)
+        .args(["-in"])
+        .arg(&cert_pem_path)
+        .args(["-out"])
+        .arg(p12_output_path)
+        .args(["-password", &format!("pass:{p12_password}"), "-legacy"])
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        // Retry without -legacy (older openssl)
+        let status = Command::new("openssl")
+            .args(["pkcs12", "-export", "-inkey"])
+            .arg(private_key_path)
+            .args(["-in"])
+            .arg(&cert_pem_path)
+            .args(["-out"])
+            .arg(p12_output_path)
+            .args(["-password", &format!("pass:{p12_password}")])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            bail!("Failed to create .p12 for {display_name}");
+        }
+    }
+    println!("{}", style("done").green());
+
+    // Clean up intermediate PEM
+    let _ = std::fs::remove_file(&cert_pem_path);
+
+    Ok(identity)
 }
 
 // ---------------------------------------------------------------------------

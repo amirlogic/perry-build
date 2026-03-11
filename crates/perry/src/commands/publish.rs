@@ -710,12 +710,18 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         (None, None)
     };
     let apple_certificate_password = if apple_certificate_path.is_some() {
-        // Explicit .p12 file — need password from user
+        // Explicit .p12 file — need password
+        // Check for auto-generated cert (lives in ~/.perry/) — use known password
+        let is_auto_generated = apple_certificate_path.as_deref()
+            .map(|p| p.contains("/.perry/"))
+            .unwrap_or(false);
         std::env::var("PERRY_APPLE_CERTIFICATE_PASSWORD")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                if interactive {
+                if is_auto_generated {
+                    Some("perry-auto".to_string())
+                } else if interactive {
                     dialoguer::Password::new()
                         .with_prompt("  Certificate password")
                         .interact()
@@ -902,8 +908,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         } else {
             None
         };
+        let is_auto_generated_notarize = notarize_cert_path.as_deref()
+            .map(|p| p.contains("/.perry/"))
+            .unwrap_or(false);
         let password = std::env::var("PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD").ok()
-            .or_else(|| apple_certificate_password.clone());
+            .or_else(|| {
+                if is_auto_generated_notarize {
+                    Some("perry-auto".to_string())
+                } else {
+                    apple_certificate_password.clone()
+                }
+            });
         (cert_b64, password, notarize_identity)
     } else {
         (None, None, None)
