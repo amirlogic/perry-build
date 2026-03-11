@@ -802,43 +802,72 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
 
     // --- Step 1: App Store Connect API Key ---
+    // Check for existing credentials (shared with iOS — same Apple account)
+    let existing_apple = saved.apple.clone().unwrap_or_default();
+
     println!("  {} App Store Connect API Key", style("Step 1/2 —").cyan().bold());
     println!();
-    println!("  1. Go to App Store Connect → Users and Access → Integrations → API:");
-    println!("     https://appstoreconnect.apple.com/access/integrations/api");
-    println!("  2. Click '+' and create a key with App Manager role.");
-    println!("  3. Download the .p8 file immediately — it can only be downloaded once.");
-    println!("  4. Note the Key ID and Issuer ID shown on the page.");
-    println!();
 
-    press_enter_to_continue("  Press Enter when ready");
+    let has_existing = existing_apple.p8_key_path.is_some()
+        && existing_apple.key_id.is_some()
+        && existing_apple.issuer_id.is_some();
 
-    let p8_path = prompt_file_path("  Path to .p8 key file", ".p8")?;
-    let p8_content = std::fs::read_to_string(&p8_path)?;
+    let (p8_path, key_id, issuer_id, team_id) = if has_existing {
+        let p8 = existing_apple.p8_key_path.clone().unwrap();
+        let kid = existing_apple.key_id.clone().unwrap();
+        let iss = existing_apple.issuer_id.clone().unwrap();
+        let tid = existing_apple.team_id.clone().unwrap_or_default();
+        println!("  Found existing credentials (shared with iOS):");
+        println!("    Key ID:    {}", style(&kid).bold());
+        println!("    Issuer ID: {}", style(&iss).dim());
+        println!("    .p8 key:   {}", style(&p8).dim());
+        if !tid.is_empty() {
+            println!("    Team ID:   {}", style(&tid).dim());
+        }
+        println!();
+        let reuse = Confirm::new()
+            .with_prompt("  Use these existing credentials?")
+            .default(true)
+            .interact()?;
+        if reuse {
+            (p8, kid, iss, tid)
+        } else {
+            prompt_api_credentials()?
+        }
+    } else {
+        println!("  You need an App Store Connect API key.");
+        println!("  1. Go to: {}", style("https://appstoreconnect.apple.com/access/integrations/api").underlined());
+        println!("  2. Click '+', create a key with {} role.", style("App Manager").bold());
+        println!("  3. Download the .p8 file (only downloadable once).");
+        println!("  4. Note the Key ID and Issuer ID.");
+        println!();
+        press_enter_to_continue("  Press Enter when ready");
+        prompt_api_credentials()?
+    };
+
+    // Validate p8 file
+    let p8_content = std::fs::read_to_string(&p8_path)
+        .with_context(|| format!("Cannot read .p8 key: {p8_path}"))?;
     if !p8_content.trim_start().starts_with("-----BEGIN") {
         bail!("Invalid .p8 file — expected PEM format starting with '-----BEGIN'");
     }
 
-    let key_id = Input::<String>::new()
-        .with_prompt("  Key ID (e.g. ABC123XYZ)")
-        .interact_text()?;
-    let issuer_id = Input::<String>::new()
-        .with_prompt("  Issuer ID (UUID format, e.g. a1b2c3d4-...)")
-        .interact_text()?;
-    let team_id = Input::<String>::new()
-        .with_prompt("  Apple Developer Team ID (10 characters)")
-        .interact_text()?;
-
+    // Save API credentials (shared across platforms)
     let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
     apple.p8_key_path = Some(p8_path.clone());
     apple.key_id = Some(key_id.clone());
     apple.issuer_id = Some(issuer_id.clone());
-    apple.team_id = Some(team_id.clone());
+    if !team_id.is_empty() {
+        apple.team_id = Some(team_id.clone());
+    }
+    save_config(saved).ok();
 
     println!();
     println!("  {} Key ID: {}", style("✓").green(), style(&key_id).bold());
     println!("  {} Issuer ID: {}", style("✓").green(), style(&issuer_id).bold());
-    println!("  {} Team ID: {}", style("✓").green(), style(&team_id).bold());
+    if !team_id.is_empty() {
+        println!("  {} Team ID: {}", style("✓").green(), style(&team_id).bold());
+    }
     println!();
 
     // --- Step 2: Mac Distribution Certificate ---
