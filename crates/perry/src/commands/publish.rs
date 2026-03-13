@@ -2114,7 +2114,7 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
     for (pkg_name, dep_dir) in &file_deps {
         let nm_prefix = PathBuf::from("node_modules").join(pkg_name);
         // Walk the dependency directory (exclude .git, target, dist, build artifacts)
-        let dep_exclude_dirs = [".git", "target", "dist", "build", "xcode"];
+        let dep_exclude_dirs = [".git", "target", "dist", "build", "xcode", "node_modules"];
         for entry in WalkDir::new(dep_dir)
             .follow_links(true)
             .into_iter()
