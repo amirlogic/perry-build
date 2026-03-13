@@ -238,6 +238,35 @@ pub fn menubar_attach(bar_handle: i64) {
     }
 }
 
+/// Add a menu item with a standard action selector and nil target.
+/// Used for Edit menu items (Copy, Paste, Cut, Undo, Redo, Select All) so that
+/// macOS routes them through the responder chain to the first responder.
+pub fn add_standard_action(menu_handle: i64, title_ptr: *const u8, selector_ptr: *const u8, shortcut_ptr: *const u8) {
+    let title = str_from_header(title_ptr);
+    let selector_name = str_from_header(selector_ptr);
+    let shortcut_str = str_from_header(shortcut_ptr);
+    let (key, flags) = parse_shortcut(shortcut_str);
+
+    if let Some(menu) = get_menu(menu_handle) {
+        let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+        let ns_title = NSString::from_str(title);
+        let ns_key = NSString::from_str(&key);
+        // Create a CString for the selector name
+        let sel_cstr = std::ffi::CString::new(selector_name).expect("invalid selector");
+        unsafe {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &ns_title,
+                Some(Sel::register(&sel_cstr)),
+                &ns_key,
+            );
+            item.setKeyEquivalentModifierMask(flags);
+            // target = nil → macOS sends action to first responder
+            menu.addItem(&item);
+        }
+    }
+}
+
 /// Set a context menu on a widget. Right-click will show this menu.
 pub fn set_context_menu(widget_handle: i64, menu_handle: i64) {
     if let (Some(view), Some(menu)) = (crate::widgets::get_widget(widget_handle), get_menu(menu_handle)) {

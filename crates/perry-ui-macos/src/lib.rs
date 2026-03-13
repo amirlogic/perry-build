@@ -478,6 +478,13 @@ pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_p
     menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
 }
 
+/// Add a menu item with a standard action (nil target → first responder).
+/// Used for Edit menu: Copy, Paste, Cut, Undo, Redo, Select All.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_standard_action(menu_handle: i64, title_ptr: i64, selector_ptr: i64, shortcut_ptr: i64) {
+    menu::add_standard_action(menu_handle, title_ptr as *const u8, selector_ptr as *const u8, shortcut_ptr as *const u8);
+}
+
 /// Add a separator to a menu.
 #[no_mangle]
 pub extern "C" fn perry_ui_menu_add_separator(menu_handle: i64) {

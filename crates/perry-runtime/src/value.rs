@@ -1473,7 +1473,7 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         }
     }
 
-    // Check vtable for a registered getter before falling back to field lookup
+    // Check vtable for a registered getter or method before falling back to field lookup
     let class_id = (*obj_header).class_id;
     if class_id != 0 {
         if let Ok(registry) = crate::object::CLASS_VTABLE_REGISTRY.read() {
@@ -1483,6 +1483,11 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
                         let this_i64 = ptr as i64;
                         let f: extern "C" fn(i64) -> f64 = std::mem::transmute(getter_ptr);
                         return f(this_i64);
+                    }
+                    // If the property is a registered method, return truthy so that
+                    // `if (obj.method)` works (method existence checks).
+                    if vtable.methods.contains_key(property_name) {
+                        return f64::from_bits(TAG_TRUE);
                     }
                 }
             }

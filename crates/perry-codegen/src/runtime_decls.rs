@@ -8624,6 +8624,17 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_menu_add_item_with_shortcut".to_string(), func_id);
         }
 
+        // perry_ui_menu_add_standard_action(menu: i64, title: i64, selector: i64, shortcut: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            sig.params.push(AbiParam::new(types::I64)); // selector string ptr
+            sig.params.push(AbiParam::new(types::I64)); // shortcut string ptr
+            let func_id = self.module.declare_function("perry_ui_menu_add_standard_action", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_add_standard_action".to_string(), func_id);
+        }
+
         // perry_ui_menu_add_separator(menu: i64)
         {
             let mut sig = self.module.make_signature();
