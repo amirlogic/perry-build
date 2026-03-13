@@ -1,8 +1,9 @@
 //! Run command - compile and launch a TypeScript file in one step
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use std::path::PathBuf;
+use console::style;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::compile::{CompileArgs, CompileResult};
@@ -45,6 +46,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub type_check: bool,
 
+    /// Force local compilation (error if toolchain missing)
+    #[arg(long)]
+    pub local: bool,
+
+    /// Force remote compilation via Perry Hub build server
+    #[arg(long)]
+    pub remote: bool,
+
     /// Arguments passed to the compiled program
     #[arg(last = true)]
     pub program_args: Vec<String>,
@@ -58,12 +67,47 @@ struct DeviceInfo {
 
 pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) -> Result<()> {
     // 1. Resolve entry file
-    let input = resolve_entry_file(args.input.as_deref(), &args)?;
+    let input = resolve_entry_file(args.input.as_deref())?;
 
     // 2. Resolve target and device
     let (target, device_udid) = resolve_target(&args)?;
 
-    // 3. Build CompileArgs
+    // 3. Decide local vs remote compilation
+    let needs_cross = matches!(target.as_deref(), Some("ios-simulator") | Some("ios") | Some("android"));
+    let can_local = !needs_cross || can_compile_locally(target.as_deref());
+
+    let use_remote = if args.remote {
+        true
+    } else if args.local {
+        if !can_local {
+            bail!(
+                "Local compilation for {:?} requires cross-compiled runtime libraries.\n\
+                 Build with: cargo build --release -p perry-runtime -p perry-stdlib --target {}\n\
+                 Or use --remote to compile via Perry Hub.",
+                target.as_deref().unwrap_or("native"),
+                rust_target_triple(target.as_deref()).unwrap_or("unknown")
+            );
+        }
+        false
+    } else {
+        // Auto-detect: use remote when local isn't possible
+        needs_cross && !can_local
+    };
+
+    if use_remote {
+        let target_str = target.as_deref().unwrap_or("native");
+        let rt = tokio::runtime::Runtime::new()?;
+        let result = rt.block_on(remote_build_and_launch(
+            &input,
+            target_str,
+            device_udid.as_deref(),
+            &args.program_args,
+            format,
+        ));
+        return result;
+    }
+
+    // Local compile path
     let compile_args = CompileArgs {
         input: input.clone(),
         output: None,
@@ -78,15 +122,540 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         type_check: args.type_check,
     };
 
-    // 4. Compile
     let result = super::compile::run(compile_args, format, use_color, verbose)?;
-
-    // 5. Launch
     launch(&result, device_udid.as_deref(), &args.program_args, format)
 }
 
+/// Check if we have the cross-compiled runtime libraries for a target
+fn can_compile_locally(target: Option<&str>) -> bool {
+    let triple = match rust_target_triple(target) {
+        Some(t) => t,
+        None => return true, // host build, always available
+    };
+    let runtime_path = format!("target/{triple}/release/libperry_runtime.a");
+    Path::new(&runtime_path).exists()
+}
+
+/// Map perry target names to Rust target triples
+fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
+    match target {
+        Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
+        Some("ios") => Some("aarch64-apple-ios"),
+        Some("android") => Some("aarch64-linux-android"),
+        _ => None,
+    }
+}
+
+// --- Remote build ---
+
+/// Build remotely via Perry Hub and launch the result
+async fn remote_build_and_launch(
+    input: &Path,
+    target: &str,
+    device_udid: Option<&str>,
+    program_args: &[String],
+    format: OutputFormat,
+) -> Result<()> {
+    use super::publish::{
+        auto_register_license, create_project_tarball, load_config, save_config,
+    };
+    use base64::Engine;
+    use futures_util::{SinkExt, StreamExt};
+    use indicatif::{ProgressBar, ProgressStyle};
+    use reqwest::multipart;
+    use serde::Deserialize;
+    use std::io::Write;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let project_dir = input
+        .parent()
+        .unwrap_or(Path::new("."))
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    // Walk up to find project root (directory containing package.json or perry.toml)
+    let project_root = find_project_root(&project_dir);
+
+    // Resolve server URL and license key
+    let mut config = load_config();
+    let server_url = config
+        .server
+        .clone()
+        .unwrap_or_else(|| "https://hub.perryts.com".into());
+
+    let license_key = match config.license_key.clone() {
+        Some(key) => key,
+        None => {
+            if let OutputFormat::Text = format {
+                println!("  Registering with Perry Hub...");
+            }
+            let key = auto_register_license(&server_url).await?;
+            config.license_key = Some(key.clone());
+            save_config(&config)?;
+            key
+        }
+    };
+
+    // Determine app name and bundle ID from package.json
+    let (app_name, bundle_id) = read_app_metadata(&project_root, input);
+
+    // Determine entry path relative to project root
+    let entry = input
+        .canonicalize()
+        .unwrap_or_else(|_| input.to_path_buf())
+        .strip_prefix(&project_root)
+        .unwrap_or(input)
+        .to_string_lossy()
+        .to_string();
+
+    // The build target for the manifest
+    let build_target = match target {
+        "ios-simulator" | "ios" => "ios",
+        other => other,
+    };
+
+    if let OutputFormat::Text = format {
+        println!();
+        println!(
+            "  {} Building {} for {} via Perry Hub",
+            style("▶").cyan().bold(),
+            style(&app_name).bold(),
+            style(target).cyan()
+        );
+        println!();
+    }
+
+    // Package project
+    if let OutputFormat::Text = format {
+        print!("  Packaging project...");
+        std::io::stdout().flush().ok();
+    }
+
+    let tarball = create_project_tarball(&project_root).context("Failed to create project tarball")?;
+
+    if let OutputFormat::Text = format {
+        println!(
+            " {} ({:.1} MB)",
+            style("done").green(),
+            tarball.len() as f64 / 1_048_576.0
+        );
+    }
+
+    // Build manifest (minimal for dev builds)
+    let manifest = serde_json::json!({
+        "app_name": app_name,
+        "bundle_id": bundle_id,
+        "version": "0.0.1",
+        "entry": entry,
+        "targets": [build_target],
+        "ios_distribute": if target == "ios" { "none" } else { "simulator" },
+    });
+
+    // Upload
+    if let OutputFormat::Text = format {
+        print!("  Uploading to build server...");
+        std::io::stdout().flush().ok();
+    }
+
+    let tarball_b64 = base64::engine::general_purpose::STANDARD.encode(&tarball);
+
+    let client = reqwest::Client::new();
+    let form = multipart::Form::new()
+        .text("license_key", license_key)
+        .text("manifest", serde_json::to_string(&manifest)?)
+        .text("credentials", serde_json::to_string(&serde_json::json!({
+            "apple_team_id": null,
+            "apple_signing_identity": null,
+            "apple_key_id": null,
+            "apple_issuer_id": null,
+            "apple_p8_key": null
+        }))?);
+
+    let form = form.text("tarball_b64", tarball_b64);
+
+    let resp = client
+        .post(format!("{server_url}/api/v1/build"))
+        .multipart(form)
+        .send()
+        .await
+        .context("Failed to connect to build server")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Build server returned {status}: {body}");
+    }
+
+    #[derive(Deserialize)]
+    struct BuildResponse {
+        job_id: String,
+        ws_url: String,
+        position: usize,
+    }
+
+    let build_resp: BuildResponse = resp.json().await.context("Invalid build response")?;
+
+    if let OutputFormat::Text = format {
+        println!(" {}", style("done").green());
+        println!("  Job ID:    {}", style(&build_resp.job_id).dim());
+        if build_resp.position > 1 {
+            println!("  Position:  {}", build_resp.position);
+        }
+        println!();
+    }
+
+    // WebSocket progress
+    let ws_url = if build_resp.ws_url.starts_with("ws://") || build_resp.ws_url.starts_with("wss://") {
+        build_resp.ws_url.clone()
+    } else if server_url.starts_with("https://") {
+        format!("wss://{}{}", &server_url["https://".len()..], build_resp.ws_url)
+    } else {
+        format!("ws://{}{}", &server_url["http://".len()..], build_resp.ws_url)
+    };
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .context("Failed to connect WebSocket")?;
+
+    let (mut ws_write, mut read) = ws_stream.split();
+
+    ws_write
+        .send(Message::Text(
+            format!(r#"{{"type":"subscribe","job_id":"{}"}}"#, build_resp.job_id).into(),
+        ))
+        .await
+        .context("Failed to send subscribe message")?;
+
+    let pb = if let OutputFormat::Text = format {
+        let pb = ProgressBar::new(100);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  {spinner:.cyan} [{bar:30.cyan/dim}] {msg}")
+                .unwrap()
+                .progress_chars("━╸─"),
+        );
+        pb.set_message("Waiting for build...");
+        Some(pb)
+    } else {
+        None
+    };
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum ServerMsg {
+        JobCreated {
+            #[serde(default)]
+            job_id: Option<String>,
+        },
+        QueueUpdate {
+            position: usize,
+        },
+        Stage {
+            #[allow(dead_code)]
+            stage: String,
+            message: String,
+        },
+        Log {
+            line: String,
+            stream: String,
+        },
+        Progress {
+            percent: u8,
+        },
+        ArtifactReady {
+            artifact_name: String,
+            download_url: String,
+            #[serde(default)]
+            download_path: Option<String>,
+        },
+        Published {
+            #[allow(dead_code)]
+            platform: String,
+            #[allow(dead_code)]
+            message: String,
+        },
+        Error {
+            message: String,
+        },
+        #[serde(other)]
+        Unknown,
+    }
+
+    let mut download_url: Option<String> = None;
+    let mut download_path: Option<String> = None;
+    let mut artifact_name: Option<String> = None;
+    let mut build_success = false;
+
+    while let Some(msg) = read.next().await {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                if let Some(ref pb) = pb {
+                    pb.abandon_with_message(format!("WebSocket error: {e}"));
+                }
+                bail!("WebSocket error: {e}");
+            }
+        };
+
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+
+        let server_msg: ServerMsg = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        match server_msg {
+            ServerMsg::JobCreated { .. } => {
+                if let Some(ref pb) = pb {
+                    pb.set_message("Build started");
+                }
+            }
+            ServerMsg::QueueUpdate { position, .. } => {
+                if let Some(ref pb) = pb {
+                    pb.set_message(format!("Queue position: {position}"));
+                }
+            }
+            ServerMsg::Stage { message, .. } => {
+                if let Some(ref pb) = pb {
+                    pb.set_message(format!("▶️  {message}"));
+                }
+            }
+            ServerMsg::Log { line, stream, .. } => {
+                if let Some(ref pb) = pb {
+                    if stream == "stderr" {
+                        pb.println(format!("    {}", style(&line).dim()));
+                    }
+                }
+            }
+            ServerMsg::Progress { percent, .. } => {
+                if let Some(ref pb) = pb {
+                    pb.set_position(percent as u64);
+                }
+            }
+            ServerMsg::ArtifactReady {
+                artifact_name: name,
+                download_url: url,
+                download_path: path,
+                ..
+            } => {
+                if let Some(ref pb) = pb {
+                    pb.set_position(100);
+                    pb.finish_with_message(format!(
+                        "✓ Build complete: {}",
+                        style(&name).bold()
+                    ));
+                }
+                download_url = Some(url);
+                download_path = path;
+                artifact_name = Some(name);
+                build_success = true;
+            }
+            ServerMsg::Published { .. } => {
+                build_success = true;
+            }
+            ServerMsg::Error { message, .. } => {
+                if let Some(ref pb) = pb {
+                    pb.abandon_with_message(format!("✗ {message}"));
+                }
+                bail!("Build failed: {message}");
+            }
+            ServerMsg::Unknown => {}
+        }
+    }
+
+    if !build_success {
+        bail!("Build failed (no artifact received)");
+    }
+
+    // Download artifact
+    let (url, name) = match (download_url, artifact_name) {
+        (Some(u), Some(n)) => (u, n),
+        _ => bail!("Build succeeded but no download URL received"),
+    };
+
+    if let OutputFormat::Text = format {
+        print!("  Downloading {}...", name);
+        std::io::stdout().flush().ok();
+    }
+
+    let dist_dir = PathBuf::from("dist");
+    std::fs::create_dir_all(&dist_dir)?;
+    let dest = dist_dir.join(&name);
+
+    if let Some(ref src_path) = download_path {
+        std::fs::copy(src_path, &dest)
+            .with_context(|| format!("Failed to copy artifact from {src_path}"))?;
+    } else {
+        let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.clone()
+        } else {
+            format!("{server_url}{url}")
+        };
+        let resp = client
+            .get(&full_url)
+            .send()
+            .await
+            .context("Failed to download artifact")?;
+
+        if !resp.status().is_success() {
+            bail!("Download failed: {}", resp.status());
+        }
+
+        let bytes = resp.bytes().await?;
+        // Detect base64-encoded content
+        let data = if bytes.len() > 4
+            && bytes.iter().all(|&b| {
+                b.is_ascii_alphanumeric()
+                    || b == b'+'
+                    || b == b'/'
+                    || b == b'='
+                    || b == b'\n'
+                    || b == b'\r'
+            })
+        {
+            base64::engine::general_purpose::STANDARD
+                .decode(&bytes)
+                .unwrap_or_else(|_| bytes.to_vec())
+        } else {
+            bytes.to_vec()
+        };
+        std::fs::write(&dest, &data)?;
+    }
+
+    if let OutputFormat::Text = format {
+        println!(" {} → {}", style("done").green(), style(dest.display()).bold());
+        println!();
+    }
+
+    // For iOS: extract .app from .ipa and install
+    if target == "ios-simulator" || target == "ios" {
+        let app_dir = extract_app_from_ipa(&dest, &dist_dir)?;
+        let udid = device_udid.ok_or_else(|| anyhow!("No device UDID for iOS launch"))?;
+
+        if target == "ios-simulator" {
+            launch_ios_simulator(&app_dir, &bundle_id, udid, format)
+        } else {
+            launch_ios_device(&app_dir, &bundle_id, udid, format)
+        }
+    } else {
+        // Native binary
+        launch_native(&dest, program_args, format)
+    }
+}
+
+/// Extract .app bundle from an .ipa file
+fn extract_app_from_ipa(ipa_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(ipa_path).context("Failed to open .ipa")?;
+    let mut archive = zip::ZipArchive::new(file).context("Failed to read .ipa as ZIP")?;
+
+    // .ipa structure: Payload/<AppName>.app/...
+    let mut app_name = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        let name = entry.name().to_string();
+        if name.starts_with("Payload/") && name.ends_with(".app/") {
+            // Extract the .app directory name
+            let parts: Vec<&str> = name.split('/').collect();
+            if parts.len() >= 2 {
+                app_name = Some(parts[1].to_string());
+                break;
+            }
+        }
+    }
+
+    let app_name = app_name.ok_or_else(|| anyhow!("No .app found in .ipa"))?;
+    let app_dir = dest_dir.join(&app_name);
+    let _ = std::fs::remove_dir_all(&app_dir); // clean previous
+
+    // Extract all files under Payload/<app_name>/
+    let prefix = format!("Payload/{}/", app_name);
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name().to_string();
+        if let Some(rel) = name.strip_prefix(&prefix) {
+            if rel.is_empty() {
+                continue;
+            }
+            let out_path = app_dir.join(rel);
+            if name.ends_with('/') {
+                std::fs::create_dir_all(&out_path)?;
+            } else {
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut out_file = std::fs::File::create(&out_path)?;
+                std::io::copy(&mut entry, &mut out_file)?;
+            }
+        }
+    }
+
+    // Make the main executable... executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Find the executable inside the .app (same name as app, without .app)
+        let exe_name = app_name.strip_suffix(".app").unwrap_or(&app_name);
+        let exe_path = app_dir.join(exe_name);
+        if exe_path.exists() {
+            let _ = std::fs::set_permissions(&exe_path, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    Ok(app_dir)
+}
+
+/// Find project root by walking up from a directory
+fn find_project_root(start: &Path) -> PathBuf {
+    let mut dir = start.to_path_buf();
+    for _ in 0..10 {
+        if dir.join("package.json").exists() || dir.join("perry.toml").exists() {
+            return dir;
+        }
+        if let Some(parent) = dir.parent() {
+            dir = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    start.to_path_buf()
+}
+
+/// Read app name and bundle ID from package.json
+fn read_app_metadata(project_root: &Path, input: &Path) -> (String, String) {
+    let pkg_path = project_root.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            let name = pkg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("app")
+                .to_string();
+            let bundle_id = pkg
+                .get("bundleId")
+                .or_else(|| pkg.get("perry").and_then(|p| p.get("bundleId")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("com.perry.{}", name));
+            return (name, bundle_id);
+        }
+    }
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app");
+    (stem.to_string(), format!("com.perry.{}", stem))
+}
+
+// --- Local compilation helpers ---
+
 /// Resolve the entry TypeScript file
-fn resolve_entry_file(input: Option<&std::path::Path>, _args: &RunArgs) -> Result<PathBuf> {
+fn resolve_entry_file(input: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = input {
         if path.exists() {
             return Ok(path.to_path_buf());
@@ -119,7 +688,6 @@ fn resolve_entry_file(input: Option<&std::path::Path>, _args: &RunArgs) -> Resul
 /// Read entry point from perry.toml if present
 fn read_perry_toml_entry() -> Option<PathBuf> {
     let toml_str = std::fs::read_to_string("perry.toml").ok()?;
-    // Simple TOML parsing: look for entry = "..."
     for line in toml_str.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("entry") {
@@ -187,7 +755,10 @@ fn resolve_target(args: &RunArgs) -> Result<(Option<String>, Option<String>)> {
         }
 
         // Multiple options: prompt
-        let names: Vec<String> = all.iter().map(|(d, t)| format!("{} ({})", d.name, t)).collect();
+        let names: Vec<String> = all
+            .iter()
+            .map(|(d, t)| format!("{} ({})", d.name, t))
+            .collect();
         let selection = pick_from_list(&names, "Select iOS target")?;
         let (dev, target) = all.remove(selection);
         return Ok((Some(target.to_string()), Some(dev.udid)));
@@ -211,16 +782,20 @@ fn launch(
     match result.target.as_str() {
         "web" => launch_web(&result.output_path, format),
         "ios-simulator" => {
-            let udid = device_udid
-                .ok_or_else(|| anyhow!("No simulator UDID — use --simulator <UDID>"))?;
-            let bundle_id = result.bundle_id.as_deref()
+            let udid =
+                device_udid.ok_or_else(|| anyhow!("No simulator UDID — use --simulator <UDID>"))?;
+            let bundle_id = result
+                .bundle_id
+                .as_deref()
                 .ok_or_else(|| anyhow!("No bundle ID found for iOS app"))?;
             launch_ios_simulator(&result.output_path, bundle_id, udid, format)
         }
         "ios" => {
-            let udid = device_udid
-                .ok_or_else(|| anyhow!("No device UDID — use --device <UDID>"))?;
-            let bundle_id = result.bundle_id.as_deref()
+            let udid =
+                device_udid.ok_or_else(|| anyhow!("No device UDID — use --device <UDID>"))?;
+            let bundle_id = result
+                .bundle_id
+                .as_deref()
                 .ok_or_else(|| anyhow!("No bundle ID found for iOS app"))?;
             launch_ios_device(&result.output_path, bundle_id, udid, format)
         }
@@ -236,8 +811,10 @@ fn launch(
     }
 }
 
+// --- Launch functions ---
+
 /// Launch a native executable
-fn launch_native(exe_path: &std::path::Path, program_args: &[String], format: OutputFormat) -> Result<()> {
+fn launch_native(exe_path: &Path, program_args: &[String], format: OutputFormat) -> Result<()> {
     let exe = if exe_path.is_absolute() {
         exe_path.to_path_buf()
     } else {
@@ -245,7 +822,10 @@ fn launch_native(exe_path: &std::path::Path, program_args: &[String], format: Ou
     };
 
     if !exe.exists() {
-        return Err(anyhow!("Compiled executable not found: {}", exe.display()));
+        return Err(anyhow!(
+            "Compiled executable not found: {}",
+            exe.display()
+        ));
     }
 
     if let OutputFormat::Text = format {
@@ -267,7 +847,7 @@ fn launch_native(exe_path: &std::path::Path, program_args: &[String], format: Ou
 
 /// Launch on iOS Simulator: install + launch
 fn launch_ios_simulator(
-    app_dir: &std::path::Path,
+    app_dir: &Path,
     bundle_id: &str,
     udid: &str,
     format: OutputFormat,
@@ -305,7 +885,7 @@ fn launch_ios_simulator(
 
 /// Launch on a physical iOS device via devicectl (Xcode 15+)
 fn launch_ios_device(
-    app_dir: &std::path::Path,
+    app_dir: &Path,
     bundle_id: &str,
     udid: &str,
     format: OutputFormat,
@@ -332,8 +912,13 @@ fn launch_ios_device(
 
     let launch = Command::new("xcrun")
         .args([
-            "devicectl", "device", "process", "launch",
-            "--device", udid, bundle_id,
+            "devicectl",
+            "device",
+            "process",
+            "launch",
+            "--device",
+            udid,
+            bundle_id,
         ])
         .status()
         .map_err(|e| anyhow!("Failed to run xcrun devicectl launch: {}", e))?;
@@ -345,7 +930,7 @@ fn launch_ios_device(
 }
 
 /// Launch a web build: open HTML in browser
-fn launch_web(html_path: &std::path::Path, format: OutputFormat) -> Result<()> {
+fn launch_web(html_path: &Path, format: OutputFormat) -> Result<()> {
     if let OutputFormat::Text = format {
         println!();
         println!("Opening {} in browser...", html_path.display());
@@ -380,8 +965,8 @@ fn detect_booted_simulators() -> Result<Vec<DeviceInfo>> {
         return Ok(Vec::new());
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
 
     let mut devices = Vec::new();
     if let Some(device_map) = json.get("devices").and_then(|d| d.as_object()) {
@@ -416,14 +1001,13 @@ fn detect_ios_devices() -> Result<Vec<DeviceInfo>> {
 
     let output = match output {
         Ok(o) if o.status.success() => o,
-        _ => return Ok(Vec::new()), // devicectl not available or failed
+        _ => return Ok(Vec::new()),
     };
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
 
     let mut devices = Vec::new();
-    // devicectl JSON structure: { "result": { "devices": [...] } }
     if let Some(arr) = json
         .get("result")
         .and_then(|r| r.get("devices"))
@@ -476,8 +1060,8 @@ fn detect_android_devices() -> Result<Vec<DeviceInfo>> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 && parts[1] == "device" {
             let serial = parts[0].to_string();
-            // Try to extract model name from the line
-            let name = parts.iter()
+            let name = parts
+                .iter()
                 .find(|p| p.starts_with("model:"))
                 .map(|p| p.trim_start_matches("model:").to_string())
                 .unwrap_or_else(|| serial.clone());
@@ -495,7 +1079,10 @@ fn detect_android_devices() -> Result<Vec<DeviceInfo>> {
 
 /// Pick a device from a list using dialoguer, or auto-select if non-interactive
 fn pick_device(devices: &[DeviceInfo], label: &str) -> Result<String> {
-    let names: Vec<String> = devices.iter().map(|d| format!("{} ({})", d.name, d.udid)).collect();
+    let names: Vec<String> = devices
+        .iter()
+        .map(|d| format!("{} ({})", d.name, d.udid))
+        .collect();
     let idx = pick_from_list(&names, &format!("Select {}", label))?;
     Ok(devices[idx].udid.clone())
 }

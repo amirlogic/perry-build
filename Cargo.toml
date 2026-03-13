@@ -126,6 +126,7 @@ dirs = "6"
 flate2 = "1"
 tar = "0.4"
 base64 = "0.22"
+zip = "2"
 
 # Internal crates
 perry-parser = { path = "crates/perry-parser" }

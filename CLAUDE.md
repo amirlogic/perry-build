@@ -155,6 +155,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ### v0.2.180
 - **`perry run` command**: compile and launch in one step — auto-detects entry file (perry.toml, src/main.ts, main.ts), platform-aware device detection (iOS simulators via simctl, devices via devicectl, Android via adb), interactive prompts with dialoguer when multiple targets found, forwards program args via `--`
+- **Remote build fallback**: `perry run --ios` auto-detects missing cross-compilation toolchain and falls back to Perry Hub build server — packages project, uploads, streams build progress via WebSocket, downloads .ipa, extracts .app, installs and launches on device/simulator; `--local`/`--remote` flags to force either path
 
 ### v0.2.179
 - **Public beta notice for publish/verify**: one-time interactive prompt on first `perry publish` or `perry verify` run; opt-in automatic error reporting (sanitized, no credentials/paths) via Chirp telemetry; consent stored in `~/.perry/config.toml [beta]`

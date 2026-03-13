@@ -2059,7 +2059,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     Ok(())
 }
 
-async fn auto_register_license(server_url: &str) -> Result<String> {
+pub(crate) async fn auto_register_license(server_url: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{server_url}/api/v1/license/register"))
@@ -2138,7 +2138,7 @@ fn resolve_file_deps(project_dir: &Path) -> Vec<(String, PathBuf)> {
     deps
 }
 
-fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
+pub(crate) fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
     let buf = Vec::new();
     let encoder = GzEncoder::new(buf, Compression::default());
     let mut ar = tar::Builder::new(encoder);
