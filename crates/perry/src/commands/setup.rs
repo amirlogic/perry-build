@@ -791,7 +791,8 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     use base64::Engine;
     let profile_data = base64::engine::general_purpose::STANDARD.decode(&profile_b64)
         .context("Failed to decode provisioning profile")?;
-    let profile_path = perry_dir.join("perry.mobileprovision");
+    let profile_filename = format!("{}.mobileprovision", bundle_id.replace('.', "_"));
+    let profile_path = perry_dir.join(profile_filename);
     std::fs::write(&profile_path, &profile_data)?;
 
     println!("  {} Profile saved to {}", style("✓").green().bold(), style(profile_path.display()).dim());
