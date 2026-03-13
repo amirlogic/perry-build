@@ -453,9 +453,11 @@ async fn remote_build_and_launch(
                 download_path = path;
                 artifact_name = Some(name);
                 build_success = true;
+                break; // artifact ready, proceed to download
             }
             ServerMsg::Published { .. } => {
                 build_success = true;
+                break;
             }
             ServerMsg::Error { message, .. } => {
                 if let Some(ref pb) = pb {
