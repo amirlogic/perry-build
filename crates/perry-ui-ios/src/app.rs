@@ -15,6 +15,8 @@ thread_local! {
     static PENDING_CONFIG: RefCell<Option<AppConfig>> = RefCell::new(None);
     static PENDING_BODY: RefCell<Option<i64>> = RefCell::new(None);
     static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
+    /// The bottom constraint of the root widget, adjusted when keyboard appears/disappears
+    static ROOT_BOTTOM_CONSTRAINT: RefCell<Option<Retained<AnyObject>>> = RefCell::new(None);
 }
 
 struct AppConfig {
@@ -147,6 +149,11 @@ unsafe extern "C" fn scene_will_connect(
                 let _: () = msg_send![&*c2, setActive: true];
                 let _: () = msg_send![&*c3, setActive: true];
                 let _: () = msg_send![&*c4, setActive: true];
+
+                // Store the bottom constraint so we can adjust it for keyboard avoidance
+                ROOT_BOTTOM_CONSTRAINT.with(|rc| {
+                    *rc.borrow_mut() = Some(c4);
+                });
             }
         }
     });
@@ -154,9 +161,18 @@ unsafe extern "C" fn scene_will_connect(
     window.setRootViewController(Some(&vc));
     window.makeKeyAndVisible();
 
+    // Store the view for keyboard avoidance
+    let vc_view_ptr = Retained::as_ptr(&vc_view) as usize;
+    KEYBOARD_VIEW.with(|kv| {
+        *kv.borrow_mut() = Some(vc_view_ptr);
+    });
+
     APPS.with(|a| {
         a.borrow_mut().push(AppEntry { window });
     });
+
+    // Register for keyboard notifications
+    register_keyboard_observers();
 
     // Start the timer pump to drive setInterval/setTimeout callbacks (8ms ≈ 120Hz).
     // Without this, js_interval_timer_tick() is never called and setInterval never fires.
@@ -431,6 +447,217 @@ impl PerryTimerTarget {
         });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+// ============================================
+// Keyboard Avoidance
+// ============================================
+
+thread_local! {
+    static KEYBOARD_VIEW: RefCell<Option<usize>> = RefCell::new(None);
+}
+
+/// Register for UIKeyboard notifications to adjust the root view when the keyboard appears.
+fn register_keyboard_observers() {
+    unsafe {
+        let nc: *const AnyObject = msg_send![
+            AnyClass::get(c"NSNotificationCenter").unwrap(),
+            defaultCenter
+        ];
+
+        // Register the PerryKeyboardObserver class
+        let observer = PerryKeyboardObserver::new();
+
+        // UIKeyboardWillChangeFrameNotification
+        let notif_name = NSString::from_str("UIKeyboardWillChangeFrameNotification");
+        let sel = Sel::register(c"keyboardWillChangeFrame:");
+        let _: () = msg_send![
+            nc,
+            addObserver: &*observer,
+            selector: sel,
+            name: &*notif_name,
+            object: std::ptr::null::<AnyObject>()
+        ];
+
+        std::mem::forget(observer); // keep alive
+    }
+}
+
+pub struct PerryKeyboardObserverIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryKeyboardObserver"]
+    #[ivars = PerryKeyboardObserverIvars]
+    pub struct PerryKeyboardObserver;
+
+    impl PerryKeyboardObserver {
+        #[unsafe(method(keyboardWillChangeFrame:))]
+        fn keyboard_will_change_frame(&self, notification: &AnyObject) {
+            unsafe {
+                // Get keyboard frame from notification userInfo
+                let user_info: *const AnyObject = msg_send![notification, userInfo];
+                if user_info.is_null() { return; }
+
+                let frame_key = NSString::from_str("UIKeyboardFrameEndUserInfoKey");
+                let frame_value: *const AnyObject = msg_send![user_info, objectForKey: &*frame_key];
+                if frame_value.is_null() { return; }
+
+                let kbd_frame: objc2_core_foundation::CGRect = msg_send![frame_value, CGRectValue];
+
+                // Get animation duration
+                let duration_key = NSString::from_str("UIKeyboardAnimationDurationUserInfoKey");
+                let duration_value: *const AnyObject = msg_send![user_info, objectForKey: &*duration_key];
+                let duration: f64 = if !duration_value.is_null() {
+                    msg_send![duration_value, doubleValue]
+                } else {
+                    0.25
+                };
+
+                // Get the screen height to determine if keyboard is showing or hiding
+                let screen: *const AnyObject = msg_send![
+                    AnyClass::get(c"UIScreen").unwrap(),
+                    mainScreen
+                ];
+                let screen_bounds: objc2_core_foundation::CGRect = msg_send![screen, bounds];
+                let screen_height = screen_bounds.size.height;
+
+                // Keyboard height: if kbd_frame.origin.y >= screen_height, keyboard is hidden
+                let keyboard_height = if kbd_frame.origin.y >= screen_height {
+                    0.0
+                } else {
+                    screen_height - kbd_frame.origin.y
+                };
+
+                // Adjust the root bottom constraint
+                ROOT_BOTTOM_CONSTRAINT.with(|rc| {
+                    if let Some(ref constraint) = *rc.borrow() {
+                        // Negative constant because bottom constraint is root.bottom == view.bottom + constant
+                        let _: () = msg_send![&**constraint, setConstant: -keyboard_height];
+                    }
+                });
+
+                // Animate the layout change
+                KEYBOARD_VIEW.with(|kv| {
+                    if let Some(view_ptr) = *kv.borrow() {
+                        let view = view_ptr as *const AnyObject;
+
+                        // Get animation curve
+                        let curve_key = NSString::from_str("UIKeyboardAnimationCurveUserInfoKey");
+                        let curve_value: *const AnyObject = msg_send![user_info, objectForKey: &*curve_key];
+                        let curve: u64 = if !curve_value.is_null() {
+                            msg_send![curve_value, unsignedIntegerValue]
+                        } else {
+                            7 // UIViewAnimationCurveKeyboard (undocumented but standard)
+                        };
+
+                        // UIView.animateWithDuration:delay:options:animations:completion:
+                        // options: curve << 16 to convert UIViewAnimationCurve to UIViewAnimationOptions
+                        let options = curve << 16;
+                        let view_copy = view;
+
+                        // Use block-based animation
+                        let animation_block = block2::RcBlock::new(move || {
+                            let _: () = msg_send![view_copy, layoutIfNeeded];
+                        });
+
+                        let _: () = msg_send![
+                            AnyClass::get(c"UIView").unwrap(),
+                            animateWithDuration: duration,
+                            delay: 0.0f64,
+                            options: options,
+                            animations: &*animation_block,
+                            completion: std::ptr::null::<AnyObject>()
+                        ];
+
+                        // Also scroll the focused text field into view
+                        scroll_focused_field_into_view(keyboard_height);
+                    }
+                });
+            }
+        }
+    }
+);
+
+impl PerryKeyboardObserver {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryKeyboardObserverIvars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Find the currently focused UITextField/UISecureTextField and scroll its
+/// parent UIScrollView so the field is visible above the keyboard.
+unsafe fn scroll_focused_field_into_view(keyboard_height: f64) {
+    if keyboard_height <= 0.0 { return; }
+
+    // Find the first responder
+    let app: *const AnyObject = msg_send![
+        AnyClass::get(c"UIApplication").unwrap(),
+        sharedApplication
+    ];
+    let key_window: *const AnyObject = msg_send![app, keyWindow];
+    if key_window.is_null() { return; }
+
+    // Use a private but widely-used method to find first responder
+    // Alternatively, walk the view hierarchy
+    let first_responder: *const AnyObject = find_first_responder(key_window as *const AnyObject);
+    if first_responder.is_null() { return; }
+
+    // Check if it's a text field
+    let tf_cls = AnyClass::get(c"UITextField").unwrap();
+    let is_tf: bool = msg_send![first_responder, isKindOfClass: tf_cls];
+    if !is_tf { return; }
+
+    // Find parent UIScrollView
+    let mut parent: *const AnyObject = msg_send![first_responder, superview];
+    let scroll_cls = AnyClass::get(c"UIScrollView").unwrap();
+    while !parent.is_null() {
+        let is_scroll: bool = msg_send![parent, isKindOfClass: scroll_cls];
+        if is_scroll {
+            // Convert the text field's frame to the scroll view's coordinate space
+            let tf_frame: objc2_core_foundation::CGRect = msg_send![first_responder, frame];
+            let tf_superview: *const AnyObject = msg_send![first_responder, superview];
+            let converted: objc2_core_foundation::CGRect = msg_send![
+                parent,
+                convertRect: tf_frame,
+                fromView: tf_superview
+            ];
+
+            // Calculate visible area (scroll view height minus keyboard)
+            let scroll_bounds: objc2_core_foundation::CGRect = msg_send![parent, bounds];
+            let visible_height = scroll_bounds.size.height - keyboard_height;
+
+            // If the text field is below the visible area, scroll to it
+            let tf_bottom = converted.origin.y + converted.size.height + 20.0; // 20px padding
+            let scroll_offset: objc2_core_foundation::CGPoint = msg_send![parent, contentOffset];
+
+            if tf_bottom > scroll_offset.y + visible_height {
+                let new_offset = tf_bottom - visible_height;
+                let point = objc2_core_foundation::CGPoint::new(0.0, new_offset);
+                let _: () = msg_send![parent, setContentOffset: point, animated: true];
+            }
+
+            break;
+        }
+        parent = msg_send![parent, superview];
+    }
+}
+
+/// Recursively find the first responder in the view hierarchy.
+unsafe fn find_first_responder(view: *const AnyObject) -> *const AnyObject {
+    let is_first: bool = msg_send![view, isFirstResponder];
+    if is_first { return view; }
+
+    let subviews: *const AnyObject = msg_send![view, subviews];
+    let count: usize = msg_send![subviews, count];
+    for i in 0..count {
+        let subview: *const AnyObject = msg_send![subviews, objectAtIndex: i];
+        let result = find_first_responder(subview);
+        if !result.is_null() { return result; }
+    }
+
+    std::ptr::null()
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.

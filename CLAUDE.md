@@ -154,6 +154,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 ### v0.2.181
+- **iOS keyboard avoidance**: register for `UIKeyboardWillChangeFrameNotification`, adjust root view bottom constraint with animated layout, auto-scroll focused TextField into view above keyboard; `perry run --ios` now adds `--console` for live stdout/stderr streaming and embeds app icon from perry.toml
 - **Fix `RefCell already borrowed` panic in state callbacks (GH-4)**: `state_set()` now snapshots onChange/forEach callbacks into a local Vec before invoking them, releasing the RefCell borrow first — fixes crash when perry-react's `useEffect` triggers a re-render that registers new `useState` onChange handlers during callback iteration
 - **Fix fetch linker error without stdlib imports (GH-5)**: `fetch()` is a global built-in (no import needed) but `js_fetch_with_options` lives in perry-stdlib — added `uses_fetch` flag to HIR Module, set during lowering, checked in compile.rs to ensure stdlib is linked when `fetch()` is used
 
