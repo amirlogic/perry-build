@@ -551,6 +551,9 @@ async fn remote_build_and_launch(
         let app_dir = extract_app_from_ipa(&dest, &dist_dir)?;
         let udid = device_udid.ok_or_else(|| anyhow!("No device UDID for iOS launch"))?;
 
+        // Embed app icon from project source if missing from the bundle
+        embed_app_icon(&app_dir, &project_root);
+
         // For device builds, re-sign with a local development identity
         // (the hub may have signed with a distribution profile)
         if target == "ios" {
@@ -569,6 +572,101 @@ async fn remote_build_and_launch(
 }
 
 /// Extract .app bundle from an .ipa file
+/// Embed app icon into the .app bundle if missing.
+/// Reads icon path from perry.toml [project].icons.source or package.json perry.icon,
+/// converts to the required iOS icon sizes using sips, and adds CFBundleIcons to Info.plist.
+fn embed_app_icon(app_dir: &Path, project_root: &Path) {
+    // Skip if icons already exist
+    if app_dir.join("AppIcon60x60@2x.png").exists() || app_dir.join("Assets.car").exists() {
+        return;
+    }
+
+    // Find icon source from perry.toml or package.json
+    let icon_path = find_icon_source(project_root);
+    let icon_path = match icon_path {
+        Some(p) if p.exists() => p,
+        _ => return,
+    };
+
+    // Generate required iOS icon sizes
+    let sizes = [
+        ("AppIcon60x60@2x.png", 120),
+        ("AppIcon60x60@3x.png", 180),
+        ("AppIcon76x76@2x.png", 152),
+        ("AppIcon83.5x83.5@2x.png", 167),
+    ];
+
+    for (name, size) in &sizes {
+        let dest = app_dir.join(name);
+        let _ = Command::new("sips")
+            .args([
+                "-z", &size.to_string(), &size.to_string(),
+                "--setProperty", "format", "png",
+            ])
+            .arg(&icon_path)
+            .args(["--out"])
+            .arg(&dest)
+            .output();
+    }
+
+    // Update Info.plist to reference the icons
+    let info_plist = app_dir.join("Info.plist");
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons dict"])
+        .arg(&info_plist)
+        .output();
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons:CFBundlePrimaryIcon dict"])
+        .arg(&info_plist)
+        .output();
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array"])
+        .arg(&info_plist)
+        .output();
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60"])
+        .arg(&info_plist)
+        .output();
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:1 string AppIcon76x76"])
+        .arg(&info_plist)
+        .output();
+    let _ = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:2 string AppIcon83.5x83.5"])
+        .arg(&info_plist)
+        .output();
+}
+
+/// Find the icon source file from project config
+fn find_icon_source(project_root: &Path) -> Option<PathBuf> {
+    // Check perry.toml [project].icons.source
+    let toml_path = project_root.join("perry.toml");
+    if let Ok(content) = std::fs::read_to_string(&toml_path) {
+        if let Ok(config) = content.parse::<toml::Value>() {
+            if let Some(source) = config
+                .get("project")
+                .and_then(|p| p.get("icons"))
+                .and_then(|i| i.get("source"))
+                .and_then(|s| s.as_str())
+            {
+                return Some(project_root.join(source));
+            }
+        }
+    }
+
+    // Check package.json perry.icon
+    let pkg_path = project_root.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(icon) = pkg.get("perry").and_then(|p| p.get("icon")).and_then(|i| i.as_str()) {
+                return Some(project_root.join(icon));
+            }
+        }
+    }
+
+    None
+}
+
 fn extract_app_from_ipa(ipa_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
     use std::io::Read;
 
@@ -1681,6 +1779,7 @@ fn launch_ios_device(
             "device",
             "process",
             "launch",
+            "--console",
             "--device",
             udid,
             bundle_id,
