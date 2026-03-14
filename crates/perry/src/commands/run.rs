@@ -554,7 +554,7 @@ async fn remote_build_and_launch(
         // For device builds, re-sign with a local development identity
         // (the hub may have signed with a distribution profile)
         if target == "ios" {
-            resign_for_development(&app_dir, format)?;
+            resign_for_development(&app_dir, &config, udid, format).await?;
         }
 
         if target == "ios-simulator" {
@@ -633,18 +633,20 @@ fn extract_app_from_ipa(ipa_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
 
 /// Re-sign an .app bundle for development device installs.
 ///
-/// Creates a minimal temporary Xcode project and uses `xcodebuild` with
-/// automatic signing to re-sign the .app. This lets Xcode handle provisioning
-/// profile creation/download automatically, which is the only reliable way
-/// to get a valid development profile without manual Apple Developer portal work.
-///
-/// Falls back to manual `codesign` if Xcode isn't available.
-fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
+/// Searches for an existing dev provisioning profile, or creates one via
+/// the App Store Connect API (registers device, creates App ID + profile).
+/// Then re-signs with a local Apple Development identity.
+async fn resign_for_development(
+    app_dir: &Path,
+    config: &super::publish::PerryConfig,
+    device_udid: &str,
+    format: OutputFormat,
+) -> Result<()> {
     // Read bundle ID from Info.plist
     let bundle_id = read_bundle_id_from_app(app_dir)
         .unwrap_or_else(|| "com.perry.app".to_string());
 
-    // Find a development signing identity and extract team ID
+    // Find a development signing identity
     let output = Command::new("security")
         .args(["find-identity", "-v", "-p", "codesigning"])
         .output()
@@ -668,18 +670,16 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
         Some(id) => id,
         None => bail!(
             "No Apple Development signing identity found in Keychain.\n\
-             Device installs require a development certificate.\n\
              Use Xcode to set up your development signing, or use a simulator instead."
         ),
     };
 
-    // Extract team ID from identity name, e.g. "Apple Development: Name (TEAMID)"
     let team_id = identity
         .rfind('(')
         .and_then(|start| identity.rfind(')').filter(|&end| end > start)
             .map(|end| identity[start + 1..end].to_string()))
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("Could not extract team ID from signing identity: {identity}"))?;
+        .ok_or_else(|| anyhow!("Could not extract team ID from: {identity}"))?;
 
     if let OutputFormat::Text = format {
         println!(
@@ -689,59 +689,33 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
         );
     }
 
-    // Create a minimal Xcode project to leverage automatic signing
+    // Step 1: Find or create a development provisioning profile
+    let profile_data = if let Some(path) = find_system_dev_profile(&bundle_id, &team_id) {
+        if let OutputFormat::Text = format {
+            println!("  Using existing dev profile: {}", style(path.display()).dim());
+        }
+        std::fs::read(&path)?
+    } else {
+        // Create via App Store Connect API
+        if let OutputFormat::Text = format {
+            println!("  Creating development provisioning profile via App Store Connect...");
+        }
+        create_dev_profile_via_api(config, &bundle_id, &team_id, device_udid, format).await
+            .context(
+                "Could not create development provisioning profile.\n\
+                 Ensure your App Store Connect API key has the right permissions,\n\
+                 or use a simulator instead: perry run --ios --simulator <UDID>"
+            )?
+    };
+
+    // Embed the dev profile
+    std::fs::write(app_dir.join("embedded.mobileprovision"), &profile_data)?;
+
+    // Step 2: Build entitlements
     let tmp_dir = std::env::temp_dir().join("perry_run_resign");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let app_name = app_dir.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("app");
-
-    // Write a minimal pbxproj that references the pre-built binary
-    let proj_dir = tmp_dir.join(format!("{app_name}.xcodeproj"));
-    std::fs::create_dir_all(&proj_dir)?;
-
-    // Instead of a full Xcode project, use codesign with a proper provisioning profile.
-    // We use `xcrun security` to find one that matches, or create via xcodebuild.
-
-    // Step 1: Find or download a development provisioning profile via xcodebuild
-    // Use a minimal xcodebuild -exportArchive approach... too complex.
-    // Instead: search system provisioning profiles for a matching dev profile.
-    let profile_path = find_system_dev_profile(&bundle_id, &team_id);
-
-    if let Some(ref profile) = profile_path {
-        // Found a development profile — embed it and re-sign
-        std::fs::copy(profile, app_dir.join("embedded.mobileprovision"))?;
-    } else {
-        // No dev profile found — try to auto-generate via xcodebuild
-        if let OutputFormat::Text = format {
-            println!("  No development provisioning profile found, requesting from Apple...");
-        }
-        let generated = generate_dev_profile_via_xcodebuild(
-            &tmp_dir, app_name, &bundle_id, &team_id
-        );
-        match generated {
-            Ok(profile_data) => {
-                std::fs::write(app_dir.join("embedded.mobileprovision"), &profile_data)?;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-                bail!(
-                    "Could not find or create a development provisioning profile: {e}\n\
-                     \n\
-                     To fix this, do ONE of:\n\
-                     1. Open Xcode, create any project with bundle ID '{bundle_id}',\n\
-                        build to your device once (Xcode will create the profile)\n\
-                     2. Use Apple Developer portal to create a Development profile\n\
-                        for '{bundle_id}' and save it to ~/.perry/\n\
-                     3. Use a simulator instead: perry run --ios --simulator <UDID>"
-                );
-            }
-        }
-    }
-
-    // Step 2: Build entitlements
     let app_identifier = format!("{team_id}.{bundle_id}");
     let entitlements = tmp_dir.join("entitlements.plist");
     std::fs::write(
@@ -788,42 +762,31 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
 }
 
 /// Search system provisioning profile directories for a development profile
-/// matching the given bundle ID and team ID
 fn find_system_dev_profile(bundle_id: &str, team_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-
-    // Xcode stores downloaded profiles here
     let profile_dirs = [
         home.join("Library/MobileDevice/Provisioning Profiles"),
         home.join(".perry"),
     ];
 
     for dir in &profile_dirs {
-        if !dir.exists() {
-            continue;
-        }
+        if !dir.exists() { continue; }
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("mobileprovision") {
                     continue;
                 }
-                // Check if this is a development profile for our bundle ID
                 if let Ok(output) = Command::new("security")
-                    .args(["cms", "-D", "-i"])
-                    .arg(&path)
-                    .output()
+                    .args(["cms", "-D", "-i"]).arg(&path).output()
                 {
                     if output.status.success() {
-                        let content = String::from_utf8_lossy(&output.stdout);
-                        let has_devices = content.contains("<key>ProvisionedDevices</key>");
-                        let has_task_allow = content.contains("get-task-allow")
-                            && content.contains("<true/>");
-                        let matches_bundle = content.contains(bundle_id)
-                            || content.contains(&format!("{}.*", team_id));
-                        let matches_team = content.contains(team_id);
-
-                        if (has_devices || has_task_allow) && matches_bundle && matches_team {
+                        let c = String::from_utf8_lossy(&output.stdout);
+                        let is_dev = c.contains("<key>ProvisionedDevices</key>")
+                            || (c.contains("get-task-allow") && c.contains("<true/>"));
+                        let matches = (c.contains(bundle_id) || c.contains(&format!("{team_id}.*")))
+                            && c.contains(team_id);
+                        if is_dev && matches {
                             return Some(path);
                         }
                     }
@@ -831,109 +794,229 @@ fn find_system_dev_profile(bundle_id: &str, team_id: &str) -> Option<PathBuf> {
             }
         }
     }
-
     None
 }
 
-/// Try to generate a development provisioning profile via xcodebuild automatic signing
-fn generate_dev_profile_via_xcodebuild(
-    tmp_dir: &Path,
-    app_name: &str,
+/// Create a development provisioning profile via App Store Connect API.
+///
+/// Steps: generate JWT → register device → find/create App ID → find dev cert →
+/// create profile → download profile content
+async fn create_dev_profile_via_api(
+    config: &super::publish::PerryConfig,
     bundle_id: &str,
     team_id: &str,
+    device_udid: &str,
+    format: OutputFormat,
 ) -> Result<Vec<u8>> {
-    // Create a minimal Xcode project for automatic signing
-    let proj_dir = tmp_dir.join(format!("{app_name}.xcodeproj"));
-    std::fs::create_dir_all(&proj_dir)?;
+    let apple = config.apple.as_ref()
+        .ok_or_else(|| anyhow!("No Apple credentials in ~/.perry/config.toml — run `perry setup ios` first"))?;
 
-    // Minimal pbxproj
-    let pbxproj = format!(
-        r#"// !$*UTF8*$!
-{{
-    archiveVersion = 1;
-    objectVersion = 56;
-    rootObject = ROOT;
-    objects = {{
-        ROOT = {{
-            isa = PBXProject;
-            buildConfigurationList = CFGLIST;
-            mainGroup = MAIN;
-            targets = (TARGET);
-            attributes = {{ TargetAttributes = {{ TARGET = {{
-                DevelopmentTeam = {team_id};
-                ProvisioningStyle = Automatic;
-            }}; }}; }};
-        }};
-        MAIN = {{ isa = PBXGroup; children = (); sourceTree = "<group>"; }};
-        TARGET = {{
-            isa = PBXNativeTarget;
-            name = {app_name};
-            productName = {app_name};
-            buildConfigurationList = TCFGLIST;
-            productType = "com.apple.product-type.application";
-            buildPhases = ();
-        }};
-        CFGLIST = {{
-            isa = XCConfigurationList;
-            buildConfigurations = (CFG);
-        }};
-        CFG = {{
-            isa = XCBuildConfiguration;
-            name = Release;
-            buildSettings = {{
-                SDKROOT = iphoneos;
-                IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-            }};
-        }};
-        TCFGLIST = {{
-            isa = XCConfigurationList;
-            buildConfigurations = (TCFG);
-        }};
-        TCFG = {{
-            isa = XCBuildConfiguration;
-            name = Release;
-            buildSettings = {{
-                PRODUCT_BUNDLE_IDENTIFIER = "{bundle_id}";
-                DEVELOPMENT_TEAM = {team_id};
-                CODE_SIGN_STYLE = Automatic;
-                CODE_SIGN_IDENTITY = "Apple Development";
-                INFOPLIST_FILE = "";
-            }};
-        }};
-    }};
-}}"#
-    );
+    let key_id = apple.key_id.as_deref()
+        .ok_or_else(|| anyhow!("Missing apple.key_id in config"))?;
+    let issuer_id = apple.issuer_id.as_deref()
+        .ok_or_else(|| anyhow!("Missing apple.issuer_id in config"))?;
+    let p8_path = apple.p8_key_path.as_deref()
+        .ok_or_else(|| anyhow!("Missing apple.p8_key_path in config"))?;
+    let p8_key = std::fs::read_to_string(p8_path)
+        .with_context(|| format!("Failed to read .p8 key from {p8_path}"))?;
 
-    std::fs::write(proj_dir.join("project.pbxproj"), pbxproj)?;
+    // Generate JWT for App Store Connect API
+    let token = generate_asc_jwt(key_id, issuer_id, &p8_key)?;
 
-    // Run xcodebuild to trigger automatic provisioning profile resolution
-    let output = Command::new("xcodebuild")
-        .args([
-            "-project",
-        ])
-        .arg(&proj_dir.with_extension("xcodeproj"))
-        .args([
-            "-target", app_name,
-            "-configuration", "Release",
-            "-allowProvisioningUpdates",
-            "-resolvePackageDependencies",
-            "CODE_SIGN_STYLE=Automatic",
-            &format!("DEVELOPMENT_TEAM={team_id}"),
-            &format!("PRODUCT_BUNDLE_IDENTIFIER={bundle_id}"),
-        ])
-        .arg("build")
-        .env("XCODEBUILD_QUIET", "1")
-        .output();
+    let client = reqwest::Client::new();
+    let base = "https://api.appstoreconnect.apple.com/v1";
 
-    // After xcodebuild runs, it may have downloaded the profile to
-    // ~/Library/MobileDevice/Provisioning Profiles/
-    // Try to find it now
-    if let Some(profile_path) = find_system_dev_profile(bundle_id, team_id) {
-        return std::fs::read(&profile_path)
-            .context("Failed to read auto-generated provisioning profile");
+    // 1. Register the device (ignore error if already registered)
+    if let OutputFormat::Text = format {
+        print!("    Registering device...");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+    let device_name = format!("Perry Dev Device {}", &device_udid[..8.min(device_udid.len())]);
+    let _ = client.post(format!("{base}/devices"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "data": {
+                "type": "devices",
+                "attributes": {
+                    "name": device_name,
+                    "platform": "IOS",
+                    "udid": device_udid
+                }
+            }
+        }))
+        .send().await;
+    if let OutputFormat::Text = format { println!(" done"); }
+
+    // 2. Find or create App ID (bundleId)
+    if let OutputFormat::Text = format {
+        print!("    Resolving App ID...");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+    let resp = client.get(format!("{base}/bundleIds"))
+        .bearer_auth(&token)
+        .query(&[("filter[identifier]", bundle_id)])
+        .send().await
+        .context("Failed to query bundleIds")?;
+    let body: serde_json::Value = resp.json().await?;
+
+    let bundle_id_resource_id = if let Some(first) = body["data"].as_array().and_then(|a| a.first()) {
+        first["id"].as_str().unwrap_or("").to_string()
+    } else {
+        // Create App ID
+        let app_name = bundle_id.split('.').last().unwrap_or("app");
+        let resp = client.post(format!("{base}/bundleIds"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "data": {
+                    "type": "bundleIds",
+                    "attributes": {
+                        "identifier": bundle_id,
+                        "name": format!("Perry {app_name}"),
+                        "platform": "IOS"
+                    }
+                }
+            }))
+            .send().await
+            .context("Failed to create bundleId")?;
+        let body: serde_json::Value = resp.json().await?;
+        body["data"]["id"].as_str().unwrap_or("").to_string()
+    };
+    if bundle_id_resource_id.is_empty() {
+        bail!("Could not resolve App ID for {bundle_id}");
+    }
+    if let OutputFormat::Text = format { println!(" done"); }
+
+    // 3. Find a development certificate
+    if let OutputFormat::Text = format {
+        print!("    Finding development certificate...");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+    let resp = client.get(format!("{base}/certificates"))
+        .bearer_auth(&token)
+        .query(&[("filter[certificateType]", "IOS_DEVELOPMENT,DEVELOPMENT")])
+        .send().await
+        .context("Failed to query certificates")?;
+    let body: serde_json::Value = resp.json().await?;
+
+    let cert_ids: Vec<String> = body["data"].as_array()
+        .map(|arr| arr.iter().filter_map(|c| c["id"].as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    if cert_ids.is_empty() {
+        bail!("No iOS development certificates found in your Apple Developer account");
+    }
+    if let OutputFormat::Text = format { println!(" done ({})", cert_ids.len()); }
+
+    // 4. Get all registered device IDs
+    let resp = client.get(format!("{base}/devices"))
+        .bearer_auth(&token)
+        .query(&[("filter[platform]", "IOS"), ("limit", "200")])
+        .send().await
+        .context("Failed to query devices")?;
+    let body: serde_json::Value = resp.json().await?;
+    let device_ids: Vec<String> = body["data"].as_array()
+        .map(|arr| arr.iter().filter_map(|d| d["id"].as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    // 5. Create the provisioning profile
+    if let OutputFormat::Text = format {
+        print!("    Creating development profile...");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
     }
 
-    bail!("xcodebuild could not resolve a development provisioning profile")
+    let cert_relationships: Vec<serde_json::Value> = cert_ids.iter()
+        .map(|id| serde_json::json!({"type": "certificates", "id": id}))
+        .collect();
+    let device_relationships: Vec<serde_json::Value> = device_ids.iter()
+        .map(|id| serde_json::json!({"type": "devices", "id": id}))
+        .collect();
+
+    let profile_name = format!("Perry Dev - {bundle_id}");
+    let resp = client.post(format!("{base}/profiles"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "data": {
+                "type": "profiles",
+                "attributes": {
+                    "name": profile_name,
+                    "profileType": "IOS_APP_DEVELOPMENT"
+                },
+                "relationships": {
+                    "bundleId": {
+                        "data": {"type": "bundleIds", "id": bundle_id_resource_id}
+                    },
+                    "certificates": {
+                        "data": cert_relationships
+                    },
+                    "devices": {
+                        "data": device_relationships
+                    }
+                }
+            }
+        }))
+        .send().await
+        .context("Failed to create provisioning profile")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Failed to create profile (HTTP {status}): {body}");
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+
+    // The profile content is base64-encoded in attributes.profileContent
+    let profile_b64 = body["data"]["attributes"]["profileContent"]
+        .as_str()
+        .ok_or_else(|| anyhow!("No profileContent in API response"))?;
+
+    use base64::Engine;
+    let profile_data = base64::engine::general_purpose::STANDARD
+        .decode(profile_b64)
+        .context("Failed to decode profile content")?;
+
+    if let OutputFormat::Text = format { println!(" done"); }
+
+    // Save for future use
+    if let Some(home) = dirs::home_dir() {
+        let save_path = home.join(".perry").join(format!("{}_dev.mobileprovision", bundle_id.replace('.', "_")));
+        let _ = std::fs::write(&save_path, &profile_data);
+    }
+
+    Ok(profile_data)
+}
+
+/// Generate a JWT for App Store Connect API authentication
+fn generate_asc_jwt(key_id: &str, issuer_id: &str, p8_key: &str) -> Result<String> {
+    use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    #[derive(serde::Serialize)]
+    struct Claims {
+        iss: String,
+        iat: u64,
+        exp: u64,
+        aud: String,
+    }
+
+    let claims = Claims {
+        iss: issuer_id.to_string(),
+        iat: now,
+        exp: now + 1200, // 20 minutes
+        aud: "appstoreconnect-v1".to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(key_id.to_string());
+    header.typ = Some("JWT".to_string());
+
+    let key = EncodingKey::from_ec_pem(p8_key.as_bytes())
+        .context("Failed to parse .p8 key")?;
+
+    encode(&header, &claims, &key)
+        .context("Failed to generate JWT")
 }
 
 /// Find project root by walking up from a directory
