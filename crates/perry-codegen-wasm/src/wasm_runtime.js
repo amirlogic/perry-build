@@ -1,6 +1,6 @@
 // Perry WASM Runtime Bridge
 // Provides JavaScript runtime functions imported by the WASM module.
-// Handles NaN-boxing, string management, and browser API access.
+// Handles NaN-boxing, string management, handle store, and browser API access.
 
 // NaN-boxing constants (matching perry-runtime/src/value.rs)
 const TAG_UNDEFINED = 0x7FFC_0000_0000_0001n;
@@ -11,7 +11,7 @@ const STRING_TAG    = 0x7FFFn;
 const POINTER_TAG   = 0x7FFDn;
 const INT32_TAG     = 0x7FFEn;
 
-// f64 <-> i64 conversion via shared buffer
+// f64 <-> u64 conversion via shared buffer
 const _convBuf = new ArrayBuffer(8);
 const _f64 = new Float64Array(_convBuf);
 const _u64 = new BigUint64Array(_convBuf);
@@ -19,28 +19,51 @@ const _u64 = new BigUint64Array(_convBuf);
 function f64ToU64(f) { _f64[0] = f; return _u64[0]; }
 function u64ToF64(u) { _u64[0] = u; return _f64[0]; }
 
+// NaN-box helpers
 function nanboxString(id) {
   return u64ToF64((STRING_TAG << 48n) | BigInt(id));
 }
-
+function nanboxPointer(id) {
+  return u64ToF64((POINTER_TAG << 48n) | BigInt(id));
+}
 function isString(val) {
   return (f64ToU64(val) >> 48n) === STRING_TAG;
 }
-
+function isPointer(val) {
+  return (f64ToU64(val) >> 48n) === POINTER_TAG;
+}
 function getStringId(val) {
   return Number(f64ToU64(val) & 0xFFFFFFFFn);
 }
-
+function getPointerId(val) {
+  return Number(f64ToU64(val) & 0xFFFFFFFFn);
+}
 function isUndefined(val) { return f64ToU64(val) === TAG_UNDEFINED; }
 function isNull(val) { return f64ToU64(val) === TAG_NULL; }
 function isTrue(val) { return f64ToU64(val) === TAG_TRUE; }
 function isFalse(val) { return f64ToU64(val) === TAG_FALSE; }
-function isBool(val) { const b = f64ToU64(val); return b === TAG_TRUE || b === TAG_FALSE; }
 
 // String table — maps string_id (index) to JS string
 const stringTable = [];
 
-// Convert a NaN-boxed f64 value to a JS value for display/manipulation
+// Handle store — maps handle_id to JS objects/arrays/closures/etc.
+const handleStore = new Map();
+let nextHandleId = 1;
+
+function allocHandle(obj) {
+  const id = nextHandleId++;
+  handleStore.set(id, obj);
+  return id;
+}
+function getHandle(val) {
+  if (!isPointer(val)) return undefined;
+  return handleStore.get(getPointerId(val));
+}
+function getHandleId(val) {
+  return getPointerId(val);
+}
+
+// Convert a NaN-boxed f64 value to a JS value
 function toJsValue(val) {
   const bits = f64ToU64(val);
   if (bits === TAG_UNDEFINED) return undefined;
@@ -49,8 +72,11 @@ function toJsValue(val) {
   if (bits === TAG_FALSE) return false;
   const tag = bits >> 48n;
   if (tag === STRING_TAG) return stringTable[Number(bits & 0xFFFFFFFFn)];
-  // Plain number
-  return val;
+  if (tag === POINTER_TAG) {
+    const obj = handleStore.get(Number(bits & 0xFFFFFFFFn));
+    if (obj !== undefined) return obj;
+  }
+  return val; // plain number
 }
 
 // Convert a JS value to a NaN-boxed f64
@@ -59,172 +85,69 @@ function fromJsValue(v) {
   if (v === null) return u64ToF64(TAG_NULL);
   if (v === true) return u64ToF64(TAG_TRUE);
   if (v === false) return u64ToF64(TAG_FALSE);
+  if (typeof v === 'number') return v;
   if (typeof v === 'string') {
     const id = stringTable.length;
     stringTable.push(v);
     return nanboxString(id);
   }
-  return v; // number
+  // Object/Array/Function — store as handle
+  const id = allocHandle(v);
+  return nanboxPointer(id);
+}
+
+// Get string from NaN-boxed value (supports both string tag and pointer to string)
+function getString(val) {
+  if (isString(val)) return stringTable[getStringId(val)];
+  const js = toJsValue(val);
+  return String(js);
 }
 
 let wasmMemory = null;
+let wasmInstance = null;
 
 // Build the import object for WASM instantiation
 function buildImports() {
   return {
     rt: {
-      // Register a string literal from WASM memory
+      // ===== Core (Phase 0) =====
+
       string_new: (offset, len) => {
         const bytes = new Uint8Array(wasmMemory.buffer, offset, len);
-        const str = new TextDecoder().decode(bytes);
-        stringTable.push(str);
+        stringTable.push(new TextDecoder().decode(bytes));
       },
+      console_log: (val) => { console.log(toJsValue(val)); },
+      console_warn: (val) => { console.warn(toJsValue(val)); },
+      console_error: (val) => { console.error(toJsValue(val)); },
 
-      // Console output
-      console_log: (val) => {
-        console.log(toJsValue(val));
-      },
-      console_warn: (val) => {
-        console.warn(toJsValue(val));
-      },
-      console_error: (val) => {
-        console.error(toJsValue(val));
-      },
-
-      // String concatenation: string + string -> string
       string_concat: (a, b) => {
-        const sa = stringTable[getStringId(a)];
-        const sb = stringTable[getStringId(b)];
-        const id = stringTable.length;
-        stringTable.push(sa + sb);
-        return nanboxString(id);
+        const s = stringTable[getStringId(a)] + stringTable[getStringId(b)];
+        stringTable.push(s);
+        return nanboxString(stringTable.length - 1);
       },
-
-      // Dynamic addition: handles string+string, string+number, number+string
-      js_add: (a, b) => {
-        const ja = toJsValue(a);
-        const jb = toJsValue(b);
-        const result = ja + jb;
-        return fromJsValue(result);
-      },
-
-      // String comparison
-      string_eq: (a, b) => {
-        const sa = stringTable[getStringId(a)];
-        const sb = stringTable[getStringId(b)];
-        return sa === sb ? 1 : 0;
-      },
-
-      // String length
+      js_add: (a, b) => fromJsValue(toJsValue(a) + toJsValue(b)),
+      string_eq: (a, b) => stringTable[getStringId(a)] === stringTable[getStringId(b)] ? 1 : 0,
       string_len: (val) => {
-        return stringTable[getStringId(val)].length;
+        if (isString(val)) return stringTable[getStringId(val)].length;
+        // Array length
+        const obj = getHandle(val);
+        if (Array.isArray(obj)) return obj.length;
+        return 0;
       },
-
-      // Convert any value to string
       jsvalue_to_string: (val) => {
-        const js = toJsValue(val);
-        const str = String(js);
-        const id = stringTable.length;
-        stringTable.push(str);
-        return nanboxString(id);
+        stringTable.push(String(toJsValue(val)));
+        return nanboxString(stringTable.length - 1);
       },
-
-      // Check if a value is truthy (returns i32: 0 or 1)
       is_truthy: (val) => {
         const bits = f64ToU64(val);
         if (bits === TAG_FALSE || bits === TAG_NULL || bits === TAG_UNDEFINED) return 0;
         if (bits === TAG_TRUE) return 1;
         const tag = bits >> 48n;
-        if (tag === STRING_TAG) {
-          return stringTable[Number(bits & 0xFFFFFFFFn)].length > 0 ? 1 : 0;
-        }
-        // Number: 0 and NaN are falsy
+        if (tag === STRING_TAG) return stringTable[Number(bits & 0xFFFFFFFFn)].length > 0 ? 1 : 0;
+        if (tag === POINTER_TAG) return 1; // objects are truthy
         return (val === 0 || Number.isNaN(val)) ? 0 : 1;
       },
-
-      // Strict equality
-      js_strict_eq: (a, b) => {
-        const ja = toJsValue(a);
-        const jb = toJsValue(b);
-        return ja === jb ? 1 : 0;
-      },
-
-      // String methods
-      string_charAt: (str, idx) => {
-        const s = stringTable[getStringId(str)];
-        const ch = s.charAt(idx);
-        const id = stringTable.length;
-        stringTable.push(ch);
-        return nanboxString(id);
-      },
-      string_substring: (str, start, end) => {
-        const s = stringTable[getStringId(str)];
-        const result = s.substring(start, end);
-        const id = stringTable.length;
-        stringTable.push(result);
-        return nanboxString(id);
-      },
-      string_indexOf: (str, search) => {
-        const s = stringTable[getStringId(str)];
-        const needle = stringTable[getStringId(search)];
-        return s.indexOf(needle);
-      },
-      string_slice: (str, start, end) => {
-        const s = stringTable[getStringId(str)];
-        const result = s.slice(start, end);
-        const id = stringTable.length;
-        stringTable.push(result);
-        return nanboxString(id);
-      },
-      string_toLowerCase: (str) => {
-        const s = stringTable[getStringId(str)];
-        const id = stringTable.length;
-        stringTable.push(s.toLowerCase());
-        return nanboxString(id);
-      },
-      string_toUpperCase: (str) => {
-        const s = stringTable[getStringId(str)];
-        const id = stringTable.length;
-        stringTable.push(s.toUpperCase());
-        return nanboxString(id);
-      },
-      string_trim: (str) => {
-        const s = stringTable[getStringId(str)];
-        const id = stringTable.length;
-        stringTable.push(s.trim());
-        return nanboxString(id);
-      },
-      string_includes: (str, search) => {
-        const s = stringTable[getStringId(str)];
-        const needle = stringTable[getStringId(search)];
-        return s.includes(needle) ? 1 : 0;
-      },
-      string_startsWith: (str, search) => {
-        const s = stringTable[getStringId(str)];
-        const needle = stringTable[getStringId(search)];
-        return s.startsWith(needle) ? 1 : 0;
-      },
-      string_endsWith: (str, search) => {
-        const s = stringTable[getStringId(str)];
-        const needle = stringTable[getStringId(search)];
-        return s.endsWith(needle) ? 1 : 0;
-      },
-      string_replace: (str, pattern, replacement) => {
-        const s = stringTable[getStringId(str)];
-        const p = stringTable[getStringId(pattern)];
-        const r = stringTable[getStringId(replacement)];
-        const id = stringTable.length;
-        stringTable.push(s.replace(p, r));
-        return nanboxString(id);
-      },
-      string_split: (str, delim) => {
-        // Returns a comma-joined string for now (arrays need more work)
-        const s = stringTable[getStringId(str)];
-        const d = stringTable[getStringId(delim)];
-        const id = stringTable.length;
-        stringTable.push(JSON.stringify(s.split(d)));
-        return nanboxString(id);
-      },
+      js_strict_eq: (a, b) => toJsValue(a) === toJsValue(b) ? 1 : 0,
 
       // Math
       math_floor: (x) => Math.floor(x),
@@ -233,43 +156,660 @@ function buildImports() {
       math_abs: (x) => Math.abs(x),
       math_sqrt: (x) => Math.sqrt(x),
       math_pow: (base, exp) => Math.pow(base, exp),
-      math_min: (a, b) => Math.min(a, b),
-      math_max: (a, b) => Math.max(a, b),
       math_random: () => Math.random(),
       math_log: (x) => Math.log(x),
-      math_log2: (x) => Math.log2(x),
-      math_log10: (x) => Math.log10(x),
-
-      // parseInt / parseFloat
-      parse_int: (str) => {
-        const s = stringTable[getStringId(str)];
+      date_now: () => Date.now(),
+      js_typeof: (val) => {
+        const t = typeof toJsValue(val);
+        stringTable.push(t);
+        return nanboxString(stringTable.length - 1);
+      },
+      math_min: (a, b) => Math.min(a, b),
+      math_max: (a, b) => Math.max(a, b),
+      parse_int: (val) => {
+        const s = isString(val) ? stringTable[getStringId(val)] : String(toJsValue(val));
         return parseInt(s, 10);
       },
-      parse_float: (str) => {
-        const s = stringTable[getStringId(str)];
+      parse_float: (val) => {
+        const s = isString(val) ? stringTable[getStringId(val)] : String(toJsValue(val));
         return parseFloat(s);
       },
 
-      // Date
-      date_now: () => Date.now(),
+      // Phase 0 fixes
+      js_mod: (a, b) => a % b,
+      is_null_or_undefined: (val) => {
+        const bits = f64ToU64(val);
+        return (bits === TAG_NULL || bits === TAG_UNDEFINED) ? 1 : 0;
+      },
 
-      // typeof (returns string)
-      js_typeof: (val) => {
+      // ===== Phase 1: Objects =====
+
+      object_new: () => nanboxPointer(allocHandle({})),
+
+      // object_set(handle, key_str, value) -> handle (for chaining)
+      object_set: (handle, key, value) => {
+        const obj = getHandle(handle);
+        if (obj) obj[getString(key)] = toJsValue(value);
+        return handle;
+      },
+      object_get: (handle, key) => {
+        const obj = getHandle(handle);
+        if (!obj) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(obj[getString(key)]);
+      },
+      object_get_dynamic: (handle, key) => {
+        const obj = getHandle(handle);
+        if (!obj) return u64ToF64(TAG_UNDEFINED);
+        const k = toJsValue(key);
+        return fromJsValue(obj[k]);
+      },
+      object_set_dynamic: (handle, key, value) => {
+        const obj = getHandle(handle);
+        if (obj) obj[toJsValue(key)] = toJsValue(value);
+      },
+      object_delete: (handle, key) => {
+        const obj = getHandle(handle);
+        if (obj) delete obj[getString(key)];
+      },
+      object_delete_dynamic: (handle, key) => {
+        const obj = getHandle(handle);
+        if (obj) delete obj[toJsValue(key)];
+      },
+      object_keys: (handle) => {
+        const obj = getHandle(handle);
+        return nanboxPointer(allocHandle(obj ? Object.keys(obj) : []));
+      },
+      object_values: (handle) => {
+        const obj = getHandle(handle);
+        return nanboxPointer(allocHandle(obj ? Object.values(obj) : []));
+      },
+      object_entries: (handle) => {
+        const obj = getHandle(handle);
+        return nanboxPointer(allocHandle(obj ? Object.entries(obj) : []));
+      },
+      object_has_property: (handle, key) => {
+        const obj = getHandle(handle);
+        if (!obj) return 0;
+        const k = toJsValue(key);
+        return (k in obj) ? 1 : 0;
+      },
+      // object_assign(target, source) -> target handle
+      object_assign: (target, source) => {
+        const t = getHandle(target);
+        const s = getHandle(source);
+        if (t && s) Object.assign(t, s);
+        return target;
+      },
+
+      // ===== Phase 1: Arrays =====
+
+      array_new: () => nanboxPointer(allocHandle([])),
+
+      // array_push(handle, value) -> handle (for chaining)
+      array_push: (handle, value) => {
+        const arr = getHandle(handle);
+        if (arr) arr.push(toJsValue(value));
+        return handle;
+      },
+      array_pop: (handle) => {
+        const arr = getHandle(handle);
+        if (!arr || arr.length === 0) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(arr.pop());
+      },
+      array_get: (handle, index) => {
+        const arr = getHandle(handle);
+        if (!arr) return u64ToF64(TAG_UNDEFINED);
+        const i = typeof index === 'number' ? index : toJsValue(index);
+        return fromJsValue(arr[i]);
+      },
+      array_set: (handle, index, value) => {
+        const arr = getHandle(handle);
+        if (arr) arr[typeof index === 'number' ? index : toJsValue(index)] = toJsValue(value);
+      },
+      array_length: (handle) => {
+        const arr = getHandle(handle);
+        return arr ? arr.length : 0;
+      },
+      array_slice: (handle, start, end) => {
+        const arr = getHandle(handle);
+        if (!arr) return nanboxPointer(allocHandle([]));
+        const s = typeof start === 'number' ? start : 0;
+        const e = isUndefined(end) ? undefined : (typeof end === 'number' ? end : toJsValue(end));
+        return nanboxPointer(allocHandle(arr.slice(s, e)));
+      },
+      array_splice: (handle, start, deleteCount) => {
+        const arr = getHandle(handle);
+        if (!arr) return nanboxPointer(allocHandle([]));
+        const s = typeof start === 'number' ? start : 0;
+        const dc = isUndefined(deleteCount) ? arr.length - s : deleteCount;
+        return nanboxPointer(allocHandle(arr.splice(s, dc)));
+      },
+      array_shift: (handle) => {
+        const arr = getHandle(handle);
+        if (!arr || arr.length === 0) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(arr.shift());
+      },
+      array_unshift: (handle, value) => {
+        const arr = getHandle(handle);
+        if (arr) arr.unshift(toJsValue(value));
+      },
+      array_join: (handle, separator) => {
+        const arr = getHandle(handle);
+        if (!arr) return nanboxString(allocHandle(''));
+        const sep = getString(separator);
+        const result = arr.map(v => typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)).join(sep);
+        stringTable.push(result);
+        return nanboxString(stringTable.length - 1);
+      },
+      array_index_of: (handle, value) => {
+        const arr = getHandle(handle);
+        if (!arr) return -1;
+        const v = toJsValue(value);
+        return arr.indexOf(v);
+      },
+      array_includes: (handle, value) => {
+        const arr = getHandle(handle);
+        if (!arr) return 0;
+        return arr.includes(toJsValue(value)) ? 1 : 0;
+      },
+      array_concat: (h1, h2) => {
+        const a1 = getHandle(h1) || [];
+        const a2 = getHandle(h2) || [];
+        return nanboxPointer(allocHandle(a1.concat(a2)));
+      },
+      array_reverse: (handle) => {
+        const arr = getHandle(handle);
+        if (arr) arr.reverse();
+        return handle;
+      },
+      array_flat: (handle) => {
+        const arr = getHandle(handle);
+        return nanboxPointer(allocHandle(arr ? arr.flat() : []));
+      },
+      array_is_array: (val) => {
+        if (!isPointer(val)) return 0;
+        const obj = getHandle(val);
+        return Array.isArray(obj) ? 1 : 0;
+      },
+      array_from: (val) => {
+        const v = toJsValue(val);
+        return nanboxPointer(allocHandle(Array.from(v)));
+      },
+      array_push_spread: (target, source) => {
+        const t = getHandle(target);
+        const s = getHandle(source);
+        if (t && s) t.push(...s);
+        return target;
+      },
+
+      // ===== Phase 1: String methods =====
+
+      string_charAt: (str, idx) => {
+        const s = stringTable[getStringId(str)];
+        stringTable.push(s.charAt(idx));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_substring: (str, start, end) => {
+        const s = stringTable[getStringId(str)];
+        stringTable.push(s.substring(start, end));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_indexOf: (str, search) => {
+        return stringTable[getStringId(str)].indexOf(stringTable[getStringId(search)]);
+      },
+      string_slice: (str, start, end) => {
+        const s = stringTable[getStringId(str)];
+        stringTable.push(s.slice(start, end));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_toLowerCase: (str) => {
+        stringTable.push(stringTable[getStringId(str)].toLowerCase());
+        return nanboxString(stringTable.length - 1);
+      },
+      string_toUpperCase: (str) => {
+        stringTable.push(stringTable[getStringId(str)].toUpperCase());
+        return nanboxString(stringTable.length - 1);
+      },
+      string_trim: (str) => {
+        stringTable.push(stringTable[getStringId(str)].trim());
+        return nanboxString(stringTable.length - 1);
+      },
+      string_includes: (str, search) => {
+        return stringTable[getStringId(str)].includes(stringTable[getStringId(search)]) ? 1 : 0;
+      },
+      string_startsWith: (str, search) => {
+        return stringTable[getStringId(str)].startsWith(stringTable[getStringId(search)]) ? 1 : 0;
+      },
+      string_endsWith: (str, search) => {
+        return stringTable[getStringId(str)].endsWith(stringTable[getStringId(search)]) ? 1 : 0;
+      },
+      string_replace: (str, pattern, replacement) => {
+        const s = stringTable[getStringId(str)];
+        // pattern might be a regex handle or a string
+        let p, r;
+        if (isPointer(pattern)) {
+          p = getHandle(pattern); // RegExp object
+        } else {
+          p = getString(pattern);
+        }
+        r = getString(replacement);
+        stringTable.push(s.replace(p, r));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_split: (str, delim) => {
+        const s = stringTable[getStringId(str)];
+        const d = getString(delim);
+        return nanboxPointer(allocHandle(s.split(d)));
+      },
+      string_fromCharCode: (code) => {
+        stringTable.push(String.fromCharCode(code));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_padStart: (str, len, fill) => {
+        const s = stringTable[getStringId(str)];
+        stringTable.push(s.padStart(len, getString(fill)));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_padEnd: (str, len, fill) => {
+        const s = stringTable[getStringId(str)];
+        stringTable.push(s.padEnd(len, getString(fill)));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_repeat: (str, count) => {
+        stringTable.push(stringTable[getStringId(str)].repeat(count));
+        return nanboxString(stringTable.length - 1);
+      },
+      string_match: (str, regex) => {
+        const s = stringTable[getStringId(str)];
+        const re = isPointer(regex) ? getHandle(regex) : new RegExp(getString(regex));
+        const result = s.match(re);
+        if (!result) return u64ToF64(TAG_NULL);
+        return nanboxPointer(allocHandle(Array.from(result)));
+      },
+      math_log2: (x) => Math.log2(x),
+      math_log10: (x) => Math.log10(x),
+
+      // ===== Phase 2: Closures =====
+
+      // closure_new(func_table_idx, capture_count) -> handle
+      closure_new: (funcIdx, captureCount) => {
+        const closure = { funcIdx: funcIdx, captures: new Array(captureCount | 0) };
+        return nanboxPointer(allocHandle(closure));
+      },
+      // closure_set_capture(handle, idx, value) -> handle (chaining)
+      closure_set_capture: (handle, idx, value) => {
+        const c = getHandle(handle);
+        if (c) c.captures[idx | 0] = value; // store raw NaN-boxed f64
+        return handle;
+      },
+      // closure_call_N(handle, args...) -> result
+      closure_call_0: (handle) => {
+        const c = getHandle(handle);
+        if (!c || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(c.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        return fn(...c.captures);
+      },
+      closure_call_1: (handle, a0) => {
+        const c = getHandle(handle);
+        if (!c || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(c.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        return fn(...c.captures, a0);
+      },
+      closure_call_2: (handle, a0, a1) => {
+        const c = getHandle(handle);
+        if (!c || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(c.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        return fn(...c.captures, a0, a1);
+      },
+      closure_call_3: (handle, a0, a1, a2) => {
+        const c = getHandle(handle);
+        if (!c || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(c.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        return fn(...c.captures, a0, a1, a2);
+      },
+      // closure_call_spread(handle, args_array_handle) -> result
+      closure_call_spread: (handle, argsHandle) => {
+        const c = getHandle(handle);
+        const args = getHandle(argsHandle) || [];
+        if (!c || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(c.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        const nanboxedArgs = args.map(v => fromJsValue(v));
+        return fn(...c.captures, ...nanboxedArgs);
+      },
+
+      // ===== Phase 2: Array higher-order methods =====
+
+      // Helper: call a closure/wasm function with an element
+      // The closure is a handle, the callback takes (element, index, array)
+      array_map: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return nanboxPointer(allocHandle([]));
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return nanboxPointer(allocHandle([]));
+        const result = arr.map((v, i) => {
+          const r = fn(...cb.captures, fromJsValue(v), i);
+          return toJsValue(r);
+        });
+        return nanboxPointer(allocHandle(result));
+      },
+      array_filter: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return nanboxPointer(allocHandle([]));
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return nanboxPointer(allocHandle([]));
+        const result = arr.filter((v, i) => {
+          const r = fn(...cb.captures, fromJsValue(v), i);
+          const bits = f64ToU64(r);
+          if (bits === TAG_TRUE) return true;
+          if (bits === TAG_FALSE || bits === TAG_NULL || bits === TAG_UNDEFINED) return false;
+          return !!toJsValue(r);
+        });
+        return nanboxPointer(allocHandle(result));
+      },
+      array_forEach: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return;
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return;
+        arr.forEach((v, i) => fn(...cb.captures, fromJsValue(v), i));
+      },
+      array_reduce: (handle, cbHandle, initial) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        let acc = isUndefined(initial) ? fromJsValue(arr[0]) : initial;
+        const startIdx = isUndefined(initial) ? 1 : 0;
+        for (let i = startIdx; i < arr.length; i++) {
+          acc = fn(...cb.captures, acc, fromJsValue(arr[i]), i);
+        }
+        return acc;
+      },
+      array_find: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        for (let i = 0; i < arr.length; i++) {
+          const v = fromJsValue(arr[i]);
+          const r = fn(...cb.captures, v, i);
+          if (toJsValue(r)) return v;
+        }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      array_find_index: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return -1;
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return -1;
+        for (let i = 0; i < arr.length; i++) {
+          const r = fn(...cb.captures, fromJsValue(arr[i]), i);
+          if (toJsValue(r)) return i;
+        }
+        return -1;
+      },
+      array_sort: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        if (!arr) return handle;
+        if (isUndefined(cbHandle) || isNull(cbHandle)) {
+          arr.sort();
+          return handle;
+        }
+        const cb = getHandle(cbHandle);
+        if (!cb || !wasmInstance) { arr.sort(); return handle; }
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) { arr.sort(); return handle; }
+        arr.sort((a, b) => fn(...cb.captures, fromJsValue(a), fromJsValue(b)));
+        return handle;
+      },
+      array_some: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return 0;
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return 0;
+        return arr.some((v, i) => toJsValue(fn(...cb.captures, fromJsValue(v), i))) ? 1 : 0;
+      },
+      array_every: (handle, cbHandle) => {
+        const arr = getHandle(handle);
+        const cb = getHandle(cbHandle);
+        if (!arr || !cb || !wasmInstance) return 0;
+        const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+        if (!fn) return 0;
+        return arr.every((v, i) => toJsValue(fn(...cb.captures, fromJsValue(v), i))) ? 1 : 0;
+      },
+
+      // ===== Phase 3: Classes =====
+
+      // Class registry: class_name -> { methods: Map, statics: Map, parent: string|null }
+      // class_new(class_name_str, field_count) -> handle
+      class_new: (classNameVal, fieldCount) => {
+        const obj = {};
+        obj.__class__ = getString(classNameVal);
+        return nanboxPointer(allocHandle(obj));
+      },
+      // class_set_method(class_id_str, method_name_str, func_table_idx)
+      class_set_method: (classId, methodName, funcIdx) => {
+        const cls = getString(classId);
+        if (!classMethodTable[cls]) classMethodTable[cls] = {};
+        classMethodTable[cls][getString(methodName)] = funcIdx | 0;
+      },
+      // class_call_method(handle, method_name_str, args_array_handle) -> result
+      class_call_method: (handle, methodName, argsHandle) => {
+        const obj = getHandle(handle);
+        if (!obj) return u64ToF64(TAG_UNDEFINED);
+        const mname = getString(methodName);
+        const cls = obj.__class__;
+        const methods = classMethodTable[cls];
+        if (!methods || !(mname in methods)) return u64ToF64(TAG_UNDEFINED);
+        const fn = wasmInstance?.exports.__indirect_function_table?.get(methods[mname]);
+        if (!fn) return u64ToF64(TAG_UNDEFINED);
+        const args = getHandle(argsHandle) || [];
+        return fn(handle, ...args.map(v => fromJsValue(v)));
+      },
+      class_get_field: (handle, name) => {
+        const obj = getHandle(handle);
+        if (!obj) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(obj[getString(name)]);
+      },
+      class_set_field: (handle, name, value) => {
+        const obj = getHandle(handle);
+        if (obj) obj[getString(name)] = toJsValue(value);
+      },
+      class_set_static: (classId, name, value) => {
+        const cls = getString(classId);
+        if (!classStaticTable[cls]) classStaticTable[cls] = {};
+        classStaticTable[cls][getString(name)] = toJsValue(value);
+      },
+      class_get_static: (classId, name) => {
+        const cls = getString(classId);
+        const statics = classStaticTable[cls];
+        if (!statics) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(statics[getString(name)]);
+      },
+      class_instanceof: (handle, classId) => {
+        const obj = getHandle(handle);
+        if (!obj) return 0;
+        return obj.__class__ === getString(classId) ? 1 : 0;
+      },
+
+      // ===== Phase 4: JSON =====
+
+      json_parse: (str) => {
+        try {
+          const s = getString(str);
+          return fromJsValue(JSON.parse(s));
+        } catch { return u64ToF64(TAG_UNDEFINED); }
+      },
+      json_stringify: (val) => {
         const js = toJsValue(val);
-        const t = typeof js;
-        const id = stringTable.length;
-        stringTable.push(t);
-        return nanboxString(id);
+        stringTable.push(JSON.stringify(js));
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Phase 4: Map =====
+
+      map_new: () => nanboxPointer(allocHandle(new Map())),
+      map_set: (handle, key, value) => {
+        const m = getHandle(handle);
+        if (m) m.set(toJsValue(key), toJsValue(value));
+      },
+      map_get: (handle, key) => {
+        const m = getHandle(handle);
+        if (!m) return u64ToF64(TAG_UNDEFINED);
+        return fromJsValue(m.get(toJsValue(key)));
+      },
+      map_has: (handle, key) => {
+        const m = getHandle(handle);
+        return m?.has(toJsValue(key)) ? 1 : 0;
+      },
+      map_delete: (handle, key) => {
+        const m = getHandle(handle);
+        if (m) m.delete(toJsValue(key));
+      },
+      map_size: (handle) => {
+        const m = getHandle(handle);
+        return m ? m.size : 0;
+      },
+      map_clear: (handle) => {
+        const m = getHandle(handle);
+        if (m) m.clear();
+      },
+      map_entries: (handle) => {
+        const m = getHandle(handle);
+        return nanboxPointer(allocHandle(m ? [...m.entries()] : []));
+      },
+      map_keys: (handle) => {
+        const m = getHandle(handle);
+        return nanboxPointer(allocHandle(m ? [...m.keys()] : []));
+      },
+      map_values: (handle) => {
+        const m = getHandle(handle);
+        return nanboxPointer(allocHandle(m ? [...m.values()] : []));
+      },
+
+      // ===== Phase 4: Set =====
+
+      set_new: () => nanboxPointer(allocHandle(new Set())),
+      set_new_from_array: (arrHandle) => {
+        const arr = getHandle(arrHandle) || toJsValue(arrHandle);
+        return nanboxPointer(allocHandle(new Set(Array.isArray(arr) ? arr : [])));
+      },
+      set_add: (handle, value) => {
+        const s = getHandle(handle);
+        if (s) s.add(toJsValue(value));
+      },
+      set_has: (handle, value) => {
+        const s = getHandle(handle);
+        return s?.has(toJsValue(value)) ? 1 : 0;
+      },
+      set_delete: (handle, value) => {
+        const s = getHandle(handle);
+        if (s) s.delete(toJsValue(value));
+      },
+      set_size: (handle) => {
+        const s = getHandle(handle);
+        return s ? s.size : 0;
+      },
+      set_clear: (handle) => {
+        const s = getHandle(handle);
+        if (s) s.clear();
+      },
+      set_values: (handle) => {
+        const s = getHandle(handle);
+        return nanboxPointer(allocHandle(s ? [...s.values()] : []));
+      },
+
+      // ===== Phase 4: Date =====
+
+      date_new_val: (arg) => {
+        const d = isUndefined(arg) ? new Date() : new Date(toJsValue(arg));
+        return nanboxPointer(allocHandle(d));
+      },
+      date_get_time: (handle) => {
+        const d = getHandle(handle);
+        return d instanceof Date ? d.getTime() : 0;
+      },
+      date_to_iso_string: (handle) => {
+        const d = getHandle(handle);
+        if (!(d instanceof Date)) return u64ToF64(TAG_UNDEFINED);
+        stringTable.push(d.toISOString());
+        return nanboxString(stringTable.length - 1);
+      },
+      date_get_full_year: (h) => { const d = getHandle(h); return d instanceof Date ? d.getFullYear() : 0; },
+      date_get_month: (h) => { const d = getHandle(h); return d instanceof Date ? d.getMonth() : 0; },
+      date_get_date: (h) => { const d = getHandle(h); return d instanceof Date ? d.getDate() : 0; },
+      date_get_hours: (h) => { const d = getHandle(h); return d instanceof Date ? d.getHours() : 0; },
+      date_get_minutes: (h) => { const d = getHandle(h); return d instanceof Date ? d.getMinutes() : 0; },
+      date_get_seconds: (h) => { const d = getHandle(h); return d instanceof Date ? d.getSeconds() : 0; },
+      date_get_milliseconds: (h) => { const d = getHandle(h); return d instanceof Date ? d.getMilliseconds() : 0; },
+
+      // ===== Phase 4: Error =====
+
+      error_new: (msg) => {
+        const message = isUndefined(msg) ? undefined : getString(msg);
+        return nanboxPointer(allocHandle(new Error(message)));
+      },
+      error_message: (handle) => {
+        const e = getHandle(handle);
+        const msg = e instanceof Error ? e.message : '';
+        stringTable.push(msg);
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Phase 4: RegExp =====
+
+      regexp_new: (pattern, flags) => {
+        const p = getString(pattern);
+        const f = getString(flags);
+        return nanboxPointer(allocHandle(new RegExp(p, f)));
+      },
+      regexp_test: (regex, str) => {
+        const re = getHandle(regex);
+        if (!(re instanceof RegExp)) return 0;
+        return re.test(getString(str)) ? 1 : 0;
+      },
+
+      // ===== Phase 4: Globals =====
+
+      number_coerce: (val) => {
+        const v = toJsValue(val);
+        return Number(v);
+      },
+      is_nan: (val) => Number.isNaN(val) ? 1 : 0,
+      is_finite: (val) => Number.isFinite(val) ? 1 : 0,
+
+      // ===== Phase 5: Misc =====
+
+      console_log_multi: (argsHandle) => {
+        const args = getHandle(argsHandle);
+        if (args) console.log(...args.map(toJsValue));
       },
     }
   };
 }
+
+// Class method/static tables
+const classMethodTable = {};
+const classStaticTable = {};
 
 // Boot the WASM module
 async function bootPerryWasm(wasmBase64) {
   const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
   const imports = buildImports();
   const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+  wasmInstance = instance;
   wasmMemory = instance.exports.memory;
   // Call the entry point
   if (instance.exports._start) {
