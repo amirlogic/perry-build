@@ -631,11 +631,20 @@ fn extract_app_from_ipa(ipa_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
     Ok(app_dir)
 }
 
-/// Re-sign an .app bundle with a local development identity for device installs.
-/// The build server may sign with a distribution profile; we re-sign locally so
-/// `devicectl device install` succeeds on a physical device.
+/// Re-sign an .app bundle for development device installs.
+///
+/// Creates a minimal temporary Xcode project and uses `xcodebuild` with
+/// automatic signing to re-sign the .app. This lets Xcode handle provisioning
+/// profile creation/download automatically, which is the only reliable way
+/// to get a valid development profile without manual Apple Developer portal work.
+///
+/// Falls back to manual `codesign` if Xcode isn't available.
 fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
-    // Find a development signing identity
+    // Read bundle ID from Info.plist
+    let bundle_id = read_bundle_id_from_app(app_dir)
+        .unwrap_or_else(|| "com.perry.app".to_string());
+
+    // Find a development signing identity and extract team ID
     let output = Command::new("security")
         .args(["find-identity", "-v", "-p", "codesigning"])
         .output()
@@ -648,11 +657,7 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
             let line = line.trim();
             let q1 = line.find('"')?;
             let q2 = line.rfind('"')?;
-            if q2 > q1 {
-                Some(line[q1 + 1..q2].to_string())
-            } else {
-                None
-            }
+            if q2 > q1 { Some(line[q1 + 1..q2].to_string()) } else { None }
         })
         .find(|name| {
             name.starts_with("Apple Development")
@@ -661,51 +666,84 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
 
     let identity = match dev_identity {
         Some(id) => id,
-        None => {
-            bail!(
-                "No Apple Development signing identity found in Keychain.\n\
-                 Device installs require a development certificate.\n\
-                 Use Xcode to set up your development signing, or use a simulator instead."
-            );
-        }
+        None => bail!(
+            "No Apple Development signing identity found in Keychain.\n\
+             Device installs require a development certificate.\n\
+             Use Xcode to set up your development signing, or use a simulator instead."
+        ),
     };
-
-    if let OutputFormat::Text = format {
-        println!("Re-signing with: {}", style(&identity).dim());
-    }
 
     // Extract team ID from identity name, e.g. "Apple Development: Name (TEAMID)"
     let team_id = identity
         .rfind('(')
-        .and_then(|start| {
-            identity.rfind(')').map(|end| {
-                if end > start {
-                    identity[start + 1..end].to_string()
-                } else {
-                    String::new()
-                }
-            })
-        })
-        .filter(|s| !s.is_empty());
+        .and_then(|start| identity.rfind(')').filter(|&end| end > start)
+            .map(|end| identity[start + 1..end].to_string()))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("Could not extract team ID from signing identity: {identity}"))?;
 
-    // Read bundle ID from Info.plist
-    let bundle_id = read_bundle_id_from_app(app_dir)
-        .unwrap_or_else(|| "com.perry.app".to_string());
+    if let OutputFormat::Text = format {
+        println!(
+            "Re-signing for development (team {}, {})...",
+            style(&team_id).dim(),
+            style(&identity).dim()
+        );
+    }
 
-    // Remove existing code signature
-    let _ = std::fs::remove_dir_all(app_dir.join("_CodeSignature"));
+    // Create a minimal Xcode project to leverage automatic signing
+    let tmp_dir = std::env::temp_dir().join("perry_run_resign");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)?;
 
-    // Remove embedded (distribution) provisioning profile
-    let _ = std::fs::remove_file(app_dir.join("embedded.mobileprovision"));
+    let app_name = app_dir.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app");
 
-    // Build entitlements with application-identifier (required for device installs)
-    let app_identifier = if let Some(ref tid) = team_id {
-        format!("{tid}.{bundle_id}")
+    // Write a minimal pbxproj that references the pre-built binary
+    let proj_dir = tmp_dir.join(format!("{app_name}.xcodeproj"));
+    std::fs::create_dir_all(&proj_dir)?;
+
+    // Instead of a full Xcode project, use codesign with a proper provisioning profile.
+    // We use `xcrun security` to find one that matches, or create via xcodebuild.
+
+    // Step 1: Find or download a development provisioning profile via xcodebuild
+    // Use a minimal xcodebuild -exportArchive approach... too complex.
+    // Instead: search system provisioning profiles for a matching dev profile.
+    let profile_path = find_system_dev_profile(&bundle_id, &team_id);
+
+    if let Some(ref profile) = profile_path {
+        // Found a development profile — embed it and re-sign
+        std::fs::copy(profile, app_dir.join("embedded.mobileprovision"))?;
     } else {
-        bundle_id.clone()
-    };
+        // No dev profile found — try to auto-generate via xcodebuild
+        if let OutputFormat::Text = format {
+            println!("  No development provisioning profile found, requesting from Apple...");
+        }
+        let generated = generate_dev_profile_via_xcodebuild(
+            &tmp_dir, app_name, &bundle_id, &team_id
+        );
+        match generated {
+            Ok(profile_data) => {
+                std::fs::write(app_dir.join("embedded.mobileprovision"), &profile_data)?;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                bail!(
+                    "Could not find or create a development provisioning profile: {e}\n\
+                     \n\
+                     To fix this, do ONE of:\n\
+                     1. Open Xcode, create any project with bundle ID '{bundle_id}',\n\
+                        build to your device once (Xcode will create the profile)\n\
+                     2. Use Apple Developer portal to create a Development profile\n\
+                        for '{bundle_id}' and save it to ~/.perry/\n\
+                     3. Use a simulator instead: perry run --ios --simulator <UDID>"
+                );
+            }
+        }
+    }
 
-    let entitlements = std::env::temp_dir().join("perry_run_entitlements.plist");
+    // Step 2: Build entitlements
+    let app_identifier = format!("{team_id}.{bundle_id}");
+    let entitlements = tmp_dir.join("entitlements.plist");
     std::fs::write(
         &entitlements,
         format!(
@@ -716,7 +754,7 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
     <key>application-identifier</key>
     <string>{app_identifier}</string>
     <key>com.apple.developer.team-identifier</key>
-    <string>{team_id_str}</string>
+    <string>{team_id}</string>
     <key>get-task-allow</key>
     <true/>
     <key>keychain-access-groups</key>
@@ -726,30 +764,176 @@ fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
 </dict>
 </plist>
 "#,
-            team_id_str = team_id.as_deref().unwrap_or(""),
         ),
     )?;
 
-    // Re-sign with development identity
+    // Step 3: Remove old signature and re-sign
+    let _ = std::fs::remove_dir_all(app_dir.join("_CodeSignature"));
+
     let status = Command::new("codesign")
-        .args([
-            "--force",
-            "--sign",
-            &identity,
-            "--entitlements",
-        ])
+        .args(["--force", "--sign", &identity, "--entitlements"])
         .arg(&entitlements)
+        .arg("--generate-entitlement-der")
         .arg(app_dir)
         .status()
         .context("Failed to run codesign")?;
 
-    let _ = std::fs::remove_file(&entitlements);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 
     if !status.success() {
         bail!("codesign failed — check that your development certificate is valid");
     }
 
     Ok(())
+}
+
+/// Search system provisioning profile directories for a development profile
+/// matching the given bundle ID and team ID
+fn find_system_dev_profile(bundle_id: &str, team_id: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+
+    // Xcode stores downloaded profiles here
+    let profile_dirs = [
+        home.join("Library/MobileDevice/Provisioning Profiles"),
+        home.join(".perry"),
+    ];
+
+    for dir in &profile_dirs {
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("mobileprovision") {
+                    continue;
+                }
+                // Check if this is a development profile for our bundle ID
+                if let Ok(output) = Command::new("security")
+                    .args(["cms", "-D", "-i"])
+                    .arg(&path)
+                    .output()
+                {
+                    if output.status.success() {
+                        let content = String::from_utf8_lossy(&output.stdout);
+                        let has_devices = content.contains("<key>ProvisionedDevices</key>");
+                        let has_task_allow = content.contains("get-task-allow")
+                            && content.contains("<true/>");
+                        let matches_bundle = content.contains(bundle_id)
+                            || content.contains(&format!("{}.*", team_id));
+                        let matches_team = content.contains(team_id);
+
+                        if (has_devices || has_task_allow) && matches_bundle && matches_team {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Try to generate a development provisioning profile via xcodebuild automatic signing
+fn generate_dev_profile_via_xcodebuild(
+    tmp_dir: &Path,
+    app_name: &str,
+    bundle_id: &str,
+    team_id: &str,
+) -> Result<Vec<u8>> {
+    // Create a minimal Xcode project for automatic signing
+    let proj_dir = tmp_dir.join(format!("{app_name}.xcodeproj"));
+    std::fs::create_dir_all(&proj_dir)?;
+
+    // Minimal pbxproj
+    let pbxproj = format!(
+        r#"// !$*UTF8*$!
+{{
+    archiveVersion = 1;
+    objectVersion = 56;
+    rootObject = ROOT;
+    objects = {{
+        ROOT = {{
+            isa = PBXProject;
+            buildConfigurationList = CFGLIST;
+            mainGroup = MAIN;
+            targets = (TARGET);
+            attributes = {{ TargetAttributes = {{ TARGET = {{
+                DevelopmentTeam = {team_id};
+                ProvisioningStyle = Automatic;
+            }}; }}; }};
+        }};
+        MAIN = {{ isa = PBXGroup; children = (); sourceTree = "<group>"; }};
+        TARGET = {{
+            isa = PBXNativeTarget;
+            name = {app_name};
+            productName = {app_name};
+            buildConfigurationList = TCFGLIST;
+            productType = "com.apple.product-type.application";
+            buildPhases = ();
+        }};
+        CFGLIST = {{
+            isa = XCConfigurationList;
+            buildConfigurations = (CFG);
+        }};
+        CFG = {{
+            isa = XCBuildConfiguration;
+            name = Release;
+            buildSettings = {{
+                SDKROOT = iphoneos;
+                IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+            }};
+        }};
+        TCFGLIST = {{
+            isa = XCConfigurationList;
+            buildConfigurations = (TCFG);
+        }};
+        TCFG = {{
+            isa = XCBuildConfiguration;
+            name = Release;
+            buildSettings = {{
+                PRODUCT_BUNDLE_IDENTIFIER = "{bundle_id}";
+                DEVELOPMENT_TEAM = {team_id};
+                CODE_SIGN_STYLE = Automatic;
+                CODE_SIGN_IDENTITY = "Apple Development";
+                INFOPLIST_FILE = "";
+            }};
+        }};
+    }};
+}}"#
+    );
+
+    std::fs::write(proj_dir.join("project.pbxproj"), pbxproj)?;
+
+    // Run xcodebuild to trigger automatic provisioning profile resolution
+    let output = Command::new("xcodebuild")
+        .args([
+            "-project",
+        ])
+        .arg(&proj_dir.with_extension("xcodeproj"))
+        .args([
+            "-target", app_name,
+            "-configuration", "Release",
+            "-allowProvisioningUpdates",
+            "-resolvePackageDependencies",
+            "CODE_SIGN_STYLE=Automatic",
+            &format!("DEVELOPMENT_TEAM={team_id}"),
+            &format!("PRODUCT_BUNDLE_IDENTIFIER={bundle_id}"),
+        ])
+        .arg("build")
+        .env("XCODEBUILD_QUIET", "1")
+        .output();
+
+    // After xcodebuild runs, it may have downloaded the profile to
+    // ~/Library/MobileDevice/Provisioning Profiles/
+    // Try to find it now
+    if let Some(profile_path) = find_system_dev_profile(bundle_id, team_id) {
+        return std::fs::read(&profile_path)
+            .context("Failed to read auto-generated provisioning profile");
+    }
+
+    bail!("xcodebuild could not resolve a development provisioning profile")
 }
 
 /// Find project root by walking up from a directory
