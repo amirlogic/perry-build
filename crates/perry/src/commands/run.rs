@@ -768,25 +768,10 @@ fn build_device_credentials(
         }
     };
 
-    // Provisioning profile: perry.toml [ios].provisioning_profile → ~/.perry/ search
-    let profile_b64 = {
-        let toml_profile_path = ios_toml
-            .and_then(|t| t.get("provisioning_profile"))
-            .and_then(|v| v.as_str());
-
-        if let Some(profile_path) = toml_profile_path {
-            let path = Path::new(profile_path);
-            if path.exists() {
-                std::fs::read(path)
-                    .ok()
-                    .map(|d| base64::engine::general_purpose::STANDARD.encode(&d))
-            } else {
-                find_provisioning_profile(bundle_id)
-            }
-        } else {
-            find_provisioning_profile(bundle_id)
-        }
-    };
+    // Provisioning profile: for dev builds, don't send the distribution profile —
+    // the hub should generate/find a development profile when ios_distribute = "development".
+    // Only check for profiles that are explicitly development profiles.
+    let profile_b64 = find_development_provisioning_profile(bundle_id);
 
     if signing_identity.is_none() {
         bail!(
@@ -904,7 +889,26 @@ fn auto_export_p12(identity: Option<&str>) -> (Option<String>, Option<String>) {
 }
 
 /// Find a provisioning profile for the given bundle ID in ~/.perry/
-fn find_provisioning_profile(bundle_id: &str) -> Option<String> {
+/// Check if a provisioning profile is a development profile (has get-task-allow = true)
+fn is_development_profile(path: &Path) -> bool {
+    let output = Command::new("security")
+        .args(["cms", "-D", "-i"])
+        .arg(path)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            // Development profiles have get-task-allow = true
+            // Also check for ProvisionedDevices (dev profiles list specific devices)
+            stdout.contains("<key>ProvisionedDevices</key>")
+                || (stdout.contains("get-task-allow") && stdout.contains("<true/>"))
+        }
+        _ => false,
+    }
+}
+
+/// Find a development provisioning profile (not distribution) for device builds
+fn find_development_provisioning_profile(bundle_id: &str) -> Option<String> {
     use base64::Engine;
 
     let perry_dir = dirs::home_dir()?.join(".perry");
@@ -912,32 +916,42 @@ fn find_provisioning_profile(bundle_id: &str) -> Option<String> {
         return None;
     }
 
-    // Look for {bundle_id_underscored}.mobileprovision or generic perry.mobileprovision
+    // Check all .mobileprovision files, prefer ones matching the bundle_id
     let underscored = bundle_id.replace('.', "_");
-    let candidates = [
-        perry_dir.join(format!("{underscored}.mobileprovision")),
-        perry_dir.join("perry.mobileprovision"),
-    ];
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
+    // Prioritized candidates
+    let primary = perry_dir.join(format!("{underscored}.mobileprovision"));
+    if primary.exists() {
+        candidates.push(primary);
+    }
+    let fallback = perry_dir.join("perry.mobileprovision");
+    if fallback.exists() {
+        candidates.push(fallback);
+    }
+
+    // All other .mobileprovision files
+    if let Ok(entries) = std::fs::read_dir(&perry_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("mobileprovision")
+                && !candidates.contains(&path)
+            {
+                candidates.push(path);
+            }
+        }
+    }
+
+    // Return first development profile found
     for path in &candidates {
-        if path.exists() {
+        if is_development_profile(path) {
             if let Ok(data) = std::fs::read(path) {
                 return Some(base64::engine::general_purpose::STANDARD.encode(&data));
             }
         }
     }
 
-    // Also check any .mobileprovision file in ~/.perry/
-    if let Ok(entries) = std::fs::read_dir(&perry_dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().and_then(|e| e.to_str()) == Some("mobileprovision") {
-                if let Ok(data) = std::fs::read(entry.path()) {
-                    return Some(base64::engine::general_purpose::STANDARD.encode(&data));
-                }
-            }
-        }
-    }
-
+    // No development profile found — return None, hub will handle it
     None
 }
 
