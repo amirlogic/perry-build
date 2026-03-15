@@ -946,6 +946,10 @@ pub enum Expr {
         offset: Option<Box<Expr>>,
         encoding: Option<Box<Expr>>,
     },
+    BufferFill {                         // buffer.fill(value) -> Buffer (same buffer)
+        buffer: Box<Expr>,
+        value: Box<Expr>,
+    },
     BufferEquals {                       // buffer.equals(other) -> boolean
         buffer: Box<Expr>,
         other: Box<Expr>,

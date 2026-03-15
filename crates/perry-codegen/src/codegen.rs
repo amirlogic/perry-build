@@ -118,6 +118,9 @@ pub struct Compiler {
     /// Compile-time platform ID injected as `__platform__` constant:
     /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux
     pub(crate) compile_target: i64,
+    /// Compile-time feature flags. Each entry becomes a `__feature_NAME__` constant (1).
+    /// Missing features default to 0. Used for dead-code elimination via `if (__plugins__)`.
+    pub(crate) enabled_features: HashSet<String>,
 }
 
 impl Compiler {
@@ -248,6 +251,7 @@ impl Compiler {
             bundled_extensions: Vec::new(),
             native_library_functions: Vec::new(),
             compile_target,
+            enabled_features: HashSet::new(),
         })
     }
 
@@ -282,6 +286,17 @@ impl Compiler {
     /// Add a JavaScript module that should be loaded at runtime
     pub fn add_js_module(&mut self, specifier: String) {
         self.js_modules.push(specifier);
+    }
+
+    /// Set enabled compile-time feature flags.
+    /// Each feature becomes a `__feature_NAME__` constant (1) in TypeScript scope.
+    /// The special `__plugins__` constant is derived from the "plugins" feature.
+    pub fn set_enabled_features(&mut self, features: Vec<String>) {
+        self.enabled_features = features.into_iter().collect();
+        // Publish to thread-local so free functions (compile_stmt) can read it
+        ENABLED_FEATURES.with(|f| {
+            *f.borrow_mut() = self.enabled_features.clone();
+        });
     }
 
     /// Register a bundled extension for static plugin registration in the entry module init.
@@ -824,15 +839,25 @@ impl Compiler {
                 // Check for buffer expressions
                 let is_buffer = matches!(init, Some(Expr::BufferFrom { .. }) | Some(Expr::BufferAlloc { .. }) |
                     Some(Expr::BufferAllocUnsafe(_)) | Some(Expr::BufferConcat(_)) |
-                    Some(Expr::BufferSlice { .. }) | Some(Expr::ChildProcessExecSync { .. }))
-                    || is_buffer_from_native;
+                    Some(Expr::BufferSlice { .. }) | Some(Expr::BufferFill { .. }) |
+                    Some(Expr::Uint8ArrayNew(_)) | Some(Expr::Uint8ArrayFrom(_)) |
+                    Some(Expr::ChildProcessExecSync { .. }))
+                    || is_buffer_from_native
+                    || matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer");
 
                 // Track compile-time constant values for const module-level variables.
                 // Special case: `declare const __platform__: number` is injected with
                 // the compile-time platform ID (0=macOS,1=iOS,2=Android,3=Windows,4=Linux).
+                // Special case: `declare const __plugins__: number` gets 1 if "plugins" feature.
+                // Special case: `declare const __feature_NAME__: number` gets 1 if feature "NAME".
                 let const_value = if !mutable && !is_pointer && !is_string {
                     if name == "__platform__" {
                         Some(self.compile_target as f64)
+                    } else if name == "__plugins__" {
+                        if self.enabled_features.contains("plugins") { Some(1.0) } else { Some(0.0) }
+                    } else if name.starts_with("__feature_") && name.ends_with("__") {
+                        let feature_name = &name[10..name.len()-2];
+                        if self.enabled_features.contains(feature_name) { Some(1.0) } else { Some(0.0) }
                     } else {
                         match init {
                             Some(Expr::Integer(n)) => Some(*n as f64),

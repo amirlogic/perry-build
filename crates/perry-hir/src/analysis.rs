@@ -342,6 +342,10 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
                 collect_local_refs_expr(enc, refs, visited);
             }
         }
+        Expr::BufferFill { buffer, value } => {
+            collect_local_refs_expr(buffer, refs, visited);
+            collect_local_refs_expr(value, refs, visited);
+        }
         Expr::BufferSlice { buffer, start, end } => {
             collect_local_refs_expr(buffer, refs, visited);
             if let Some(s) = start {
@@ -1108,6 +1112,10 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             if let Some(enc) = encoding {
                 collect_assigned_locals_expr(enc, assigned);
             }
+        }
+        Expr::BufferFill { buffer, value } => {
+            collect_assigned_locals_expr(buffer, assigned);
+            collect_assigned_locals_expr(value, assigned);
         }
         Expr::BufferSlice { buffer, start, end } => {
             collect_assigned_locals_expr(buffer, assigned);

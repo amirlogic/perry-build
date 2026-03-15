@@ -733,6 +733,10 @@ impl crate::codegen::Compiler {
                     self.collect_closures_from_expr(enc, closures, enclosing_class);
                 }
             }
+            Expr::BufferFill { buffer, value } => {
+                self.collect_closures_from_expr(buffer, closures, enclosing_class);
+                self.collect_closures_from_expr(value, closures, enclosing_class);
+            }
             Expr::BufferSlice { buffer, start, end } => {
                 self.collect_closures_from_expr(buffer, closures, enclosing_class);
                 if let Some(s) = start {

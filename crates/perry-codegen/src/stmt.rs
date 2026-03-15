@@ -655,7 +655,7 @@ pub(crate) fn compile_stmt(
             fn is_buffer_expr(expr: &Expr) -> bool {
                 matches!(expr,
                     Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
-                    Expr::BufferConcat(_) | Expr::BufferSlice { .. } |
+                    Expr::BufferConcat(_) | Expr::BufferSlice { .. } | Expr::BufferFill { .. } |
                     Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_)
                 ) || matches!(expr, Expr::NativeMethodCall { module, method, .. }
                     if module == "crypto" && method == "randomBytes"
@@ -1182,10 +1182,24 @@ pub(crate) fn compile_stmt(
             } else {
                 // Initialize to undefined/null/0 depending on the type.
                 // Special: `declare const __platform__: number` gets the compile-time platform ID.
+                // Special: `declare const __plugins__: number` gets 1 if "plugins" feature is enabled, else 0.
                 if var_name == "__platform__" {
                     let platform_val = COMPILE_TARGET.with(|c| c.get()) as f64;
                     let platform_const = builder.ins().f64const(platform_val);
                     builder.def_var(var, platform_const);
+                } else if var_name == "__plugins__" {
+                    let plugins_val = ENABLED_FEATURES.with(|f| {
+                        if f.borrow().contains("plugins") { 1.0_f64 } else { 0.0_f64 }
+                    });
+                    let plugins_const = builder.ins().f64const(plugins_val);
+                    builder.def_var(var, plugins_const);
+                } else if var_name.starts_with("__feature_") && var_name.ends_with("__") {
+                    let feature_name = &var_name[10..var_name.len()-2];
+                    let feature_val = ENABLED_FEATURES.with(|f| {
+                        if f.borrow().contains(feature_name) { 1.0_f64 } else { 0.0_f64 }
+                    });
+                    let feature_const = builder.ins().f64const(feature_val);
+                    builder.def_var(var, feature_const);
                 } else if is_pointer && !is_union {
                     // Raw pointer type - use null pointer (0)
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -1207,13 +1221,23 @@ pub(crate) fn compile_stmt(
 
             let i32_shadow: Option<Variable> = None;
 
-            // Track compile-time constant values for const variables with literal initializers
             // Track compile-time constant values for const variables with literal initializers.
             // Special case: `declare const __platform__: number` gets the compile-time platform ID
             // (0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux) injected via COMPILE_TARGET thread-local.
+            // Special case: `declare const __plugins__: number` gets 1 if "plugins" feature enabled.
+            // Special case: `declare const __feature_NAME__: number` gets 1 if feature "NAME" enabled.
             let const_value = if !mutable && !is_pointer && !is_string && !is_bigint {
                 if var_name == "__platform__" {
                     Some(COMPILE_TARGET.with(|c| c.get()) as f64)
+                } else if var_name == "__plugins__" {
+                    Some(ENABLED_FEATURES.with(|f| {
+                        if f.borrow().contains("plugins") { 1.0_f64 } else { 0.0_f64 }
+                    }))
+                } else if var_name.starts_with("__feature_") && var_name.ends_with("__") {
+                    let feature_name = &var_name[10..var_name.len()-2];
+                    Some(ENABLED_FEATURES.with(|f| {
+                        if f.borrow().contains(feature_name) { 1.0_f64 } else { 0.0_f64 }
+                    }))
                 } else {
                     match init {
                         Some(Expr::Integer(n)) => Some(*n as f64),

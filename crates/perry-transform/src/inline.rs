@@ -1177,6 +1177,10 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             if let Some(s) = start { substitute_locals(s, param_map, next_local_id); }
             if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
         }
+        Expr::BufferFill { buffer, value } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
         Expr::BufferEquals { buffer, other } => {
             substitute_locals(buffer, param_map, next_local_id);
             substitute_locals(other, param_map, next_local_id);

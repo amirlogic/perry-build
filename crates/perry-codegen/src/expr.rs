@@ -1343,6 +1343,15 @@ pub(crate) fn compile_expr(
             let result_ptr = builder.inst_results(call)[0];
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
         }
+        Expr::BufferFill { buffer, value } => {
+            let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
+            let val_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let buf_ptr = ensure_i64(builder, buf_val);
+            let val_f64 = ensure_f64(builder, val_val);
+            // buffer.fill returns the buffer itself
+            let _ = val_f64;
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), buf_ptr))
+        }
         Expr::BufferConcat(list) => {
             let list_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, list, this_ctx)?;
             let list_ptr = ensure_i64(builder, list_val);
@@ -1422,6 +1431,19 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_buffer_slice not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[buf_ptr, start_val, end_val]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
+        Expr::BufferFill { buffer, value } => {
+            let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
+            let buf_ptr = ensure_i64(builder, buf_val);
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
+            let func = extern_funcs.get("js_buffer_fill")
+                .ok_or_else(|| anyhow!("js_buffer_fill not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[buf_ptr, val_i32]);
             let result_ptr = builder.inst_results(call)[0];
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
         }
@@ -6362,6 +6384,36 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle .fill(value) on any buffer expression (includes chained: new Uint8Array(n).fill(v))
+                    if property == "fill" {
+                        // Check if object is a known buffer expression or a buffer-typed local
+                        let is_buf = match object.as_ref() {
+                            Expr::Uint8ArrayNew(_) | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_)
+                            | Expr::BufferFrom { .. } | Expr::BufferSlice { .. } | Expr::BufferConcat(_)
+                            | Expr::BufferFill { .. } => true,
+                            Expr::LocalGet(id) => locals.get(id).map(|i| {
+                                i.is_buffer || matches!(&i.class_name, Some(name) if name == "Uint8Array" || name == "Buffer")
+                            }).unwrap_or(false),
+                            _ => false,
+                        };
+                        if is_buf {
+                            let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let buf_ptr = ensure_i64(builder, buf_val);
+                            let fill_val = if !arg_vals.is_empty() {
+                                let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                            } else {
+                                builder.ins().iconst(types::I32, 0)
+                            };
+                            let func = extern_funcs.get("js_buffer_fill")
+                                .ok_or_else(|| anyhow!("js_buffer_fill not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[buf_ptr, fill_val]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                        }
+                    }
+
                     // Handle process.argv.includes() specially
                     if matches!(object.as_ref(), Expr::ProcessArgv) && property == "includes" && args.len() >= 1 {
                         // Compile ProcessArgv to get the array pointer
@@ -7989,6 +8041,21 @@ pub(crate) fn compile_expr(
                                         let call = builder.ins().call(func_ref, &[buf_ptr, str_ptr, offset, encoding]);
                                         let result_i32 = builder.inst_results(call)[0];
                                         return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                    }
+                                    "fill" => {
+                                        // buf.fill(value) -> returns same buffer
+                                        let fill_val = if !arg_vals.is_empty() {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                        } else {
+                                            builder.ins().iconst(types::I32, 0)
+                                        };
+                                        let func = extern_funcs.get("js_buffer_fill")
+                                            .ok_or_else(|| anyhow!("js_buffer_fill not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[buf_ptr, fill_val]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
                                     }
                                     _ => {}
                                 }

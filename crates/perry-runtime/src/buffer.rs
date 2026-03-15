@@ -201,6 +201,31 @@ pub extern "C" fn js_buffer_alloc(size: i32, fill: i32) -> *mut BufferHeader {
     buf
 }
 
+/// Fill an existing buffer with a byte value. Returns the same buffer pointer.
+/// Implements Uint8Array.prototype.fill(value)
+#[no_mangle]
+pub extern "C" fn js_buffer_fill(buf: *mut BufferHeader, value: i32) -> *mut BufferHeader {
+    if buf.is_null() || (buf as u64) < 0x1000 {
+        return buf;
+    }
+    // Strip NaN-boxing tags if present
+    let buf = {
+        let bits = buf as u64;
+        let top16 = (bits >> 48) as u16;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *mut BufferHeader
+        } else {
+            buf
+        }
+    };
+    unsafe {
+        let len = (*buf).length as usize;
+        let data = buffer_data_mut(buf);
+        ptr::write_bytes(data, value as u8, len);
+    }
+    buf
+}
+
 /// Allocate an uninitialized buffer
 #[no_mangle]
 pub extern "C" fn js_buffer_alloc_unsafe(size: i32) -> *mut BufferHeader {

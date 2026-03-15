@@ -4082,6 +4082,16 @@ impl Compiler {
             self.extern_funcs.insert("js_buffer_write".to_string(), func_id);
         }
 
+        // js_buffer_fill(buf_ptr: i64, value: i32) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // buf_ptr
+            sig.params.push(AbiParam::new(types::I32)); // fill value
+            sig.returns.push(AbiParam::new(types::I64)); // same buffer ptr
+            let func_id = self.module.declare_function("js_buffer_fill", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_buffer_fill".to_string(), func_id);
+        }
+
         // js_buffer_equals(buf1: i64, buf2: i64) -> i32
         {
             let mut sig = self.module.make_signature();
