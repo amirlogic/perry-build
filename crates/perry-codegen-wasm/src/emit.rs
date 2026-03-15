@@ -13,6 +13,12 @@ use wasm_encoder::{
     Module, RefType, TableSection, TableType, TypeSection, ValType, GlobalSection, GlobalType,
 };
 
+#[derive(Clone)]
+enum EnumResolvedValue {
+    Number(f64),
+    String(String),
+}
+
 /// Helper: create an F64Const instruction from raw f64 bits
 fn f64_const(val: f64) -> Instruction<'static> {
     Instruction::F64Const(Ieee64::from(val))
@@ -318,6 +324,8 @@ struct WasmModuleEmitter {
     func_name_map: BTreeMap<String, u32>,
     /// Class parent map: child_class_name → parent_class_name
     class_parent_map: BTreeMap<String, String>,
+    /// Enum member values: (enum_name, member_name) → numeric value or string
+    enum_values: BTreeMap<(String, String), EnumResolvedValue>,
     /// Async function names (compiled to JS, not WASM)
     async_func_imports: Vec<(String, u32, usize)>, // (name, import_idx, param_count)
     /// Generated JS code for async functions
@@ -343,6 +351,7 @@ impl WasmModuleEmitter {
             class_static_map: BTreeMap::new(),
             func_name_map: BTreeMap::new(),
             class_parent_map: BTreeMap::new(),
+            enum_values: BTreeMap::new(),
             async_func_imports: Vec::new(),
             async_js_code: Vec::new(),
         }
@@ -2066,6 +2075,7 @@ impl WasmModuleEmitter {
         self.intern_string("Authorization");
         self.intern_string("POST");
         self.intern_string("GET");
+        self.intern_string("");
 
         for func in &module.functions {
             self.collect_strings_in_stmts(&func.body);
@@ -2083,8 +2093,20 @@ impl WasmModuleEmitter {
             self.intern_string(&enum_def.name);
             for member in &enum_def.members {
                 self.intern_string(&member.name);
-                if let EnumValue::String(s) = &member.value {
-                    self.intern_string(s);
+                match &member.value {
+                    EnumValue::String(s) => {
+                        self.intern_string(s);
+                        self.enum_values.insert(
+                            (enum_def.name.clone(), member.name.clone()),
+                            EnumResolvedValue::String(s.clone()),
+                        );
+                    }
+                    EnumValue::Number(n) => {
+                        self.enum_values.insert(
+                            (enum_def.name.clone(), member.name.clone()),
+                            EnumResolvedValue::Number(*n as f64),
+                        );
+                    }
                 }
             }
         }
@@ -2660,6 +2682,41 @@ impl<'a> FuncEmitCtx<'a> {
             "toString" => {
                 self.emit_expr(func, object);
                 func.instruction(&Instruction::Call(self.rt().jsvalue_to_string));
+                true
+            }
+            // Array some/every (return i32 → convert to boolean)
+            "some" if !args.is_empty() => {
+                self.emit_expr(func, object);
+                self.emit_expr(func, &args[0]);
+                func.instruction(&Instruction::Call(self.rt().array_some));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+                true
+            }
+            "every" if !args.is_empty() => {
+                self.emit_expr(func, object);
+                self.emit_expr(func, &args[0]);
+                func.instruction(&Instruction::Call(self.rt().array_every));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+                true
+            }
+            // RegExp test
+            "test" if !args.is_empty() => {
+                self.emit_expr(func, object);
+                self.emit_expr(func, &args[0]);
+                func.instruction(&Instruction::Call(self.rt().regexp_test));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
                 true
             }
             _ => false,
@@ -4082,7 +4139,65 @@ impl<'a> FuncEmitCtx<'a> {
 
             // --- Class instantiation ---
             Expr::New { class_name, args, .. } => {
-                // Create new instance via bridge
+                // Handle built-in constructors that need native JS objects
+                match class_name.as_str() {
+                    "RegExp" if args.len() >= 1 => {
+                        self.emit_expr(func, &args[0]);
+                        if args.len() >= 2 {
+                            self.emit_expr(func, &args[1]);
+                        } else {
+                            // Empty flags string
+                            let empty_id = self.emitter.string_map.get("").copied().unwrap_or(0);
+                            let empty_bits = (STRING_TAG << 48) | (empty_id as u64);
+                            func.instruction(&f64_const(f64::from_bits(empty_bits)));
+                        }
+                        func.instruction(&Instruction::Call(self.rt().regexp_new));
+                        return;
+                    }
+                    "Error" => {
+                        if let Some(msg) = args.first() {
+                            self.emit_expr(func, msg);
+                        } else {
+                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                        }
+                        func.instruction(&Instruction::Call(self.rt().error_new));
+                        return;
+                    }
+                    "Date" => {
+                        if let Some(arg) = args.first() {
+                            self.emit_expr(func, arg);
+                        } else {
+                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                        }
+                        func.instruction(&Instruction::Call(self.rt().date_new));
+                        return;
+                    }
+                    "Map" => {
+                        func.instruction(&Instruction::Call(self.rt().map_new));
+                        return;
+                    }
+                    "Set" => {
+                        if let Some(arg) = args.first() {
+                            self.emit_expr(func, arg);
+                            func.instruction(&Instruction::Call(self.rt().set_new_from_array));
+                        } else {
+                            func.instruction(&Instruction::Call(self.rt().set_new));
+                        }
+                        return;
+                    }
+                    "URL" => {
+                        if let Some(arg) = args.first() {
+                            self.emit_expr(func, arg);
+                        } else {
+                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                        }
+                        func.instruction(&Instruction::Call(self.rt().url_parse));
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // User-defined class instantiation
                 let class_name_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_name_id as u64);
                 func.instruction(&f64_const(f64::from_bits(class_bits)));
@@ -4225,13 +4340,24 @@ impl<'a> FuncEmitCtx<'a> {
             }
 
             // --- Enum members ---
-            Expr::EnumMember { enum_name: _, member_name } => {
-                // Enum members are either numeric or string values
-                // Try to parse as number first
-                if let Ok(n) = member_name.parse::<f64>() {
+            Expr::EnumMember { enum_name, member_name } => {
+                // Look up resolved value from enum definitions
+                let key = (enum_name.clone(), member_name.clone());
+                if let Some(resolved) = self.emitter.enum_values.get(&key) {
+                    match resolved.clone() {
+                        EnumResolvedValue::Number(n) => {
+                            func.instruction(&f64_const(n));
+                        }
+                        EnumResolvedValue::String(s) => {
+                            let id = self.emitter.string_map.get(s.as_str()).copied().unwrap_or(0);
+                            let bits = (STRING_TAG << 48) | (id as u64);
+                            func.instruction(&f64_const(f64::from_bits(bits)));
+                        }
+                    }
+                } else if let Ok(n) = member_name.parse::<f64>() {
                     func.instruction(&f64_const(n));
                 } else {
-                    // String enum member — return the member name as a string
+                    // Fallback: return the member name as a string
                     let id = self.emitter.string_map.get(member_name.as_str()).copied().unwrap_or(0);
                     let bits = (STRING_TAG << 48) | (id as u64);
                     func.instruction(&f64_const(f64::from_bits(bits)));
