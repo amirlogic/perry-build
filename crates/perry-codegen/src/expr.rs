@@ -3091,9 +3091,8 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, start_i32, end_i32]);
             let result_ptr = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64) - use simple bitcast to f64
-            // (consistent with Expr::Array which also uses bitcast, not NaN-boxing)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            // Result is an array pointer (i64) - NaN-box with POINTER_TAG
+            Ok(inline_nanbox_pointer(builder, result_ptr))
         }
         Expr::ArraySplice { array_id, start, delete_count, items } => {
             // Get the array from local
@@ -3213,8 +3212,8 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            // Return deleted elements array as f64
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), deleted_ptr))
+            // Return deleted elements array - NaN-box with POINTER_TAG
+            Ok(inline_nanbox_pointer(builder, deleted_ptr))
         }
         Expr::ArrayForEach { array, callback } => {
             // Compile array and callback
@@ -3262,9 +3261,9 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64) - use simple bitcast to f64
-            // (consistent with Expr::Array which also uses bitcast, not NaN-boxing)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Result is an array pointer (i64) - NaN-box with POINTER_TAG
+            // so typeof returns "object" and Array.isArray works
+            Ok(inline_nanbox_pointer(builder, result))
         }
         Expr::ArraySort { array, comparator } => {
             // Compile array and comparator
@@ -3288,8 +3287,8 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, cmp_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Sort returns the same array pointer (in-place) - bitcast to f64
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Sort returns the same array pointer (in-place) - NaN-box with POINTER_TAG
+            Ok(inline_nanbox_pointer(builder, result))
         }
         Expr::ArrayFilter { array, callback } => {
             // Compile array and callback
@@ -3313,9 +3312,8 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64) - use simple bitcast to f64
-            // (consistent with Expr::Array which also uses bitcast, not NaN-boxing)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Result is an array pointer (i64) - NaN-box with POINTER_TAG
+            Ok(inline_nanbox_pointer(builder, result))
         }
         Expr::ArrayFind { array, callback } => {
             // Compile array and callback
@@ -3459,8 +3457,8 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr]);
             let result = builder.inst_results(call)[0];
 
-            // Result is an array pointer (i64) - bitcast to f64
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+            // Result is an array pointer (i64) - NaN-box with POINTER_TAG
+            Ok(inline_nanbox_pointer(builder, result))
         }
         // Map operations
         Expr::MapNew => {
@@ -13899,8 +13897,18 @@ pub(crate) fn compile_expr(
             let obj_ptr = builder.inst_results(call)[0];
 
             // Direct field stores (ObjectHeader is 24 bytes, fields start at offset 24)
+            // Track closures that capture `this` so we can patch them with obj_ptr after
+            let mut this_closures: Vec<Value> = Vec::new();
             for (i, (_key, value_expr)) in props.iter().enumerate() {
+                // Check if this is a closure that captures `this` (object literal method)
+                let is_this_closure = matches!(value_expr, Expr::Closure { captures_this: true, .. });
+
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
+
+                // Track closure pointers that need their `this` capture set to obj_ptr
+                if is_this_closure && builder.func.dfg.value_type(val) == types::I64 {
+                    this_closures.push(val);
+                }
 
                 let is_string = match value_expr {
                     Expr::String(_) => true,
@@ -13963,6 +13971,21 @@ pub(crate) fn compile_expr(
 
                 let offset = (24 + i * 8) as i32;
                 builder.ins().store(MemFlags::new(), final_val, obj_ptr, offset);
+            }
+
+            // Patch object literal method closures: set their capture slot 0 (`this`)
+            // to the newly allocated object pointer. This allows `this.x` inside the
+            // method body to correctly access properties of the enclosing object.
+            if !this_closures.is_empty() {
+                if let Some(set_capture_func) = extern_funcs.get("js_closure_set_capture_f64") {
+                    let set_ref = module.declare_func_in_func(*set_capture_func, builder.func);
+                    let idx_zero = builder.ins().iconst(types::I32, 0);
+                    // Convert obj_ptr (i64) to f64 for the capture storage
+                    let obj_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), obj_ptr);
+                    for closure_ptr in this_closures {
+                        builder.ins().call(set_ref, &[closure_ptr, idx_zero, obj_f64]);
+                    }
+                }
             }
 
             // NaN-box with POINTER_TAG for F64-typed consumers.
@@ -16670,13 +16693,10 @@ pub(crate) fn compile_expr(
                     }
                     "embedNSView" => {
                         // (nsview_ptr) — takes an i64 NSView pointer, returns widget handle
-                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-
+                        // Native library FFI returns i64 bitcast to f64 (no NaN-box tag),
+                        // so use direct bitcast instead of js_nanbox_get_pointer.
                         let ptr_f64 = ensure_f64(builder, arg_vals[0]);
-                        let ptr_call = builder.ins().call(get_ptr_ref, &[ptr_f64]);
-                        let nsview_ptr = builder.inst_results(ptr_call)[0];
+                        let nsview_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), ptr_f64);
 
                         let func = extern_funcs.get("perry_ui_embed_nsview")
                             .ok_or_else(|| anyhow!("perry_ui_embed_nsview not declared"))?;
