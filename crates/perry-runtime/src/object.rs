@@ -395,9 +395,11 @@ pub extern "C" fn js_object_alloc_with_parent(class_id: u32, parent_class_id: u3
         (*ptr).field_count = field_count;
         (*ptr).keys_array = ptr::null_mut();
 
-        // Initialize all fields to undefined
+        // Initialize ALL allocated field slots to undefined (not just field_count)
+        // We allocate max(field_count, 8) slots but must zero all of them to prevent
+        // stale data from previously freed GC objects from bleeding through.
         let fields_ptr = (ptr as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut JSValue;
-        for i in 0..field_count as usize {
+        for i in 0..alloc_field_count {
             ptr::write(fields_ptr.add(i), JSValue::undefined());
         }
 
@@ -1234,7 +1236,27 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             }
         }
 
-        // Key not found - add it to the object
+        // Key not found - add it to the object.
+        // CRITICAL: The keys_array may be SHARED via SHAPE_CACHE (multiple objects with
+        // the same shape hash share the same keys array). We must clone it before mutating
+        // to avoid corrupting other objects' keys.
+        let owned_keys = if key_count == (*obj).field_count as usize {
+            // Keys array matches the original shape — it's potentially shared.
+            // Clone it to get an independent copy before adding new keys.
+            let cloned = crate::array::js_array_alloc(key_count as u32 + 4);
+            let src_data = (keys as *const u8).add(8) as *const f64;
+            let dst_data = (cloned as *mut u8).add(8) as *mut f64;
+            for i in 0..key_count {
+                *dst_data.add(i) = *src_data.add(i);
+            }
+            (*cloned).length = key_count as u32;
+            (*obj).keys_array = cloned;
+            cloned
+        } else {
+            // Already mutated — keys_array is already our own copy
+            keys
+        };
+
         // Check if we have a spare physical slot (js_object_alloc_with_shape allocates max(N,8) slots).
         // Class objects (js_object_alloc_class_with_keys) have only exactly field_count slots;
         // attempting to write to new_index = key_count would overflow into the next heap allocation.
@@ -1247,7 +1269,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                 eprintln!("[WARN_NULL_PTR] overflow new store: null POINTER_TAG at obj={:p} new_index={} — replacing with undefined", obj, new_index);
                 crate::value::TAG_UNDEFINED
             } else { vbits };
-            let new_keys = crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
+            let new_keys = crate::array::js_array_push(owned_keys, JSValue::string_ptr(key as *mut _));
             (*obj).keys_array = new_keys;
             OVERFLOW_FIELDS.with(|m| {
                 m.borrow_mut()
@@ -1258,7 +1280,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             return;
         }
         // First, add the key to the keys array (may reallocate)
-        let new_keys = crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
+        let new_keys = crate::array::js_array_push(owned_keys, JSValue::string_ptr(key as *mut _));
         // Update the object's keys_array pointer in case js_array_push reallocated
         (*obj).keys_array = new_keys;
 

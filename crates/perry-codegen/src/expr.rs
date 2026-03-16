@@ -4169,6 +4169,18 @@ pub(crate) fn compile_expr(
                                                 }
                                                 return true;
                                             }
+                                            // toString/toFixed always return strings, even on non-string objects
+                                            // But they return NaN-boxed strings, so mark as string only when
+                                            // on a string-typed object (otherwise let union path handle NaN-boxing)
+                                            if property == "toString" || property == "toFixed" || property == "toLocaleString" {
+                                                if let Expr::LocalGet(id) = object.as_ref() {
+                                                    if locals.get(id).map(|i| i.is_string).unwrap_or(false) {
+                                                        return true;
+                                                    }
+                                                }
+                                                // Non-string object.toString() — returns NaN-boxed, handle as union
+                                                return false;
+                                            }
                                         }
                                         false
                                     }
