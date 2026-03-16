@@ -1121,6 +1121,12 @@ impl crate::codegen::Compiler {
             Expr::JsCreateCallback { closure, .. } => {
                 self.collect_mutable_captures_from_expr(closure, captures);
             }
+            Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+                self.collect_mutable_captures_from_expr(value, captures);
+            }
+            Expr::ArrayPushSpread { source, .. } => {
+                self.collect_mutable_captures_from_expr(source, captures);
+            }
             _ => {}
         }
     }
