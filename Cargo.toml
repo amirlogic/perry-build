@@ -17,11 +17,11 @@ members = [
     "crates/perry-ui-android",
     "crates/perry-ui-gtk4",
     "crates/perry-ui-windows",
+    "crates/perry-ui-geisterhand",
     "crates/perry-codegen-js",
     "crates/perry-codegen-swiftui",
     "crates/perry-codegen-wasm",
     "crates/perry-ui-test",
-    "crates/perry-ui-geisterhand",
 ]
 # Only build platform-independent crates by default.
 # Platform-specific UI crates (perry-ui-macos, perry-ui-ios, etc.) must be built
@@ -60,8 +60,13 @@ opt-level = 3
 strip = false
 codegen-units = 16
 
+[profile.release.package.perry-ui-gtk4]
+strip = false
+codegen-units = 16
+
 [profile.release.package.perry-ui-geisterhand]
 strip = false
+codegen-units = 16
 
 [profile.release.package.perry-stdlib]
 opt-level = "s"       # Optimize for size in stdlib
