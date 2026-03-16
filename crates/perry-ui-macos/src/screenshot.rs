@@ -12,14 +12,21 @@ pub extern "C" fn perry_ui_screenshot_capture(out_len: *mut usize) -> *mut u8 {
     unsafe { *out_len = 0; }
 
     // Get the main window's windowNumber for CGWindowListCreateImage
-    let window_id: u32 = crate::app::WINDOWS.with(|w| {
-        let windows = w.borrow();
-        if windows.is_empty() {
-            return 0u32;
+    // Check APPS first (main app window), then WINDOWS (multi-window)
+    let window_id: u32 = crate::app::APPS.with(|a| {
+        let apps = a.borrow();
+        if !apps.is_empty() {
+            let num: isize = unsafe { msg_send![&*apps[0].window, windowNumber] };
+            return num as u32;
         }
-        let window = &windows[0].window;
-        let num: isize = unsafe { msg_send![window, windowNumber] };
-        num as u32
+        crate::app::WINDOWS.with(|w| {
+            let windows = w.borrow();
+            if windows.is_empty() {
+                return 0u32;
+            }
+            let num: isize = unsafe { msg_send![&*windows[0].window, windowNumber] };
+            num as u32
+        })
     });
 
     if window_id == 0 {

@@ -517,19 +517,32 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     find_library(lib_name, target)
 }
 
-fn find_geisterhand_library() -> Option<PathBuf> {
-    // Geisterhand libs built in target/geisterhand/release/
-    let candidates = [
-        PathBuf::from("target/geisterhand/release/libperry_ui_geisterhand.a"),
-        PathBuf::from("target/geisterhand/release/perry_ui_geisterhand.lib"),
-    ];
-    for path in &candidates {
+/// Search for a geisterhand library by name, checking both cross-compilation
+/// target dirs (target/geisterhand/{triple}/release/) and host dir (target/geisterhand/release/).
+fn find_geisterhand_lib(name: &str, target: Option<&str>) -> Option<PathBuf> {
+    // Cross-compilation target dir first
+    if let Some(triple) = rust_target_triple(target) {
+        let path = PathBuf::from(format!("target/geisterhand/{}/release/{}", triple, name));
         if path.exists() {
-            return Some(path.clone());
+            return Some(path);
         }
     }
-    // Also check standard target dir
-    find_library(if cfg!(target_os = "windows") { "perry_ui_geisterhand.lib" } else { "libperry_ui_geisterhand.a" }, None)
+    // Host build dir
+    let path = PathBuf::from(format!("target/geisterhand/release/{}", name));
+    if path.exists() {
+        return Some(path);
+    }
+    None
+}
+
+fn find_geisterhand_library(target: Option<&str>) -> Option<PathBuf> {
+    let name = if matches!(target, Some("windows")) || cfg!(target_os = "windows") {
+        "perry_ui_geisterhand.lib"
+    } else {
+        "libperry_ui_geisterhand.a"
+    };
+    find_geisterhand_lib(name, target)
+        .or_else(|| find_library(name, None))
 }
 
 fn find_geisterhand_runtime(target: Option<&str>) -> Option<PathBuf> {
@@ -538,12 +551,7 @@ fn find_geisterhand_runtime(target: Option<&str>) -> Option<PathBuf> {
     } else {
         "libperry_runtime.a"
     };
-    // Try geisterhand build dir first
-    let gh_path = PathBuf::from(format!("target/geisterhand/release/{}", name));
-    if gh_path.exists() {
-        return Some(gh_path);
-    }
-    None
+    find_geisterhand_lib(name, target)
 }
 
 fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
@@ -558,9 +566,97 @@ fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
     } else {
         "libperry_ui_macos.a"
     };
-    let gh_path = PathBuf::from(format!("target/geisterhand/release/{}", name));
-    if gh_path.exists() {
-        return Some(gh_path);
+    find_geisterhand_lib(name, target)
+}
+
+/// Auto-build geisterhand-enabled libraries when they're missing.
+/// Uses a separate target dir (target/geisterhand/) to avoid mixing with normal builds.
+fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<()> {
+    // Determine which UI crate to build based on target platform
+    let ui_crate = match target {
+        Some("ios-simulator") | Some("ios") => "perry-ui-ios",
+        Some("android") => "perry-ui-android",
+        Some("linux") => "perry-ui-gtk4",
+        Some("windows") => "perry-ui-windows",
+        _ if cfg!(target_os = "linux") => "perry-ui-gtk4",
+        _ if cfg!(target_os = "windows") => "perry-ui-windows",
+        _ => "perry-ui-macos",
+    };
+
+    match format {
+        OutputFormat::Text => println!("Building geisterhand libraries ({}, {})...", ui_crate,
+            rust_target_triple(target).unwrap_or("host")),
+        OutputFormat::Json => {}
+    }
+
+    // Find the Perry workspace root by looking for Cargo.toml with [workspace]
+    // relative to the perry executable
+    let workspace_root = find_perry_workspace_root()
+        .ok_or_else(|| anyhow!(
+            "Cannot auto-build geisterhand libraries: Perry workspace not found.\n\
+            Build manually from the Perry source directory:\n  \
+            CARGO_TARGET_DIR=target/geisterhand cargo build --release \\\n    \
+            -p perry-runtime --features geisterhand \\\n    \
+            -p {} --features geisterhand \\\n    \
+            -p perry-ui-geisterhand", ui_crate
+        ))?;
+
+    let mut cargo_cmd = Command::new("cargo");
+    cargo_cmd
+        .current_dir(&workspace_root)
+        .env("CARGO_TARGET_DIR", workspace_root.join("target/geisterhand"))
+        .arg("build")
+        .arg("--release")
+        .arg("-p").arg("perry-runtime").arg("--features").arg("perry-runtime/geisterhand")
+        .arg("-p").arg(ui_crate).arg("--features").arg(format!("{}/geisterhand", ui_crate))
+        .arg("-p").arg("perry-ui-geisterhand");
+
+    // Add cross-compilation target if needed
+    if let Some(triple) = rust_target_triple(target) {
+        cargo_cmd.arg("--target").arg(triple);
+    }
+
+    let status = cargo_cmd.status()
+        .map_err(|e| anyhow!("Failed to run cargo: {}", e))?;
+
+    if !status.success() {
+        return Err(anyhow!("Failed to build geisterhand libraries (cargo exited with {})", status));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Geisterhand libraries built successfully"),
+        OutputFormat::Json => {}
+    }
+    Ok(())
+}
+
+/// Find the Perry workspace root by searching upward from the executable location.
+fn find_perry_workspace_root() -> Option<PathBuf> {
+    // First try: relative to the perry executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Binary in target/release/ → workspace is ../../
+            for ancestor in [dir, &dir.join(".."), &dir.join("../.."), &dir.join("../../..")] {
+                let candidate = std::fs::canonicalize(ancestor).ok()?;
+                if candidate.join("crates/perry-runtime").is_dir()
+                    && candidate.join("crates/perry-ui-geisterhand").is_dir()
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    // Second try: current working directory or its ancestors
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        loop {
+            if dir.join("crates/perry-runtime").is_dir()
+                && dir.join("crates/perry-ui-geisterhand").is_dir()
+            {
+                return Some(dir.to_path_buf());
+            }
+            dir = dir.parent()?;
+        }
     }
     None
 }
@@ -3677,7 +3773,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Link geisterhand libraries if enabled
     if ctx.needs_geisterhand {
-        if let Some(gh_lib) = find_geisterhand_library() {
+        // Auto-build geisterhand libraries if any are missing
+        let gh_missing = find_geisterhand_library(target.as_deref()).is_none()
+            || find_geisterhand_runtime(target.as_deref()).is_none()
+            || (ctx.needs_ui && find_geisterhand_ui(target.as_deref()).is_none());
+        if gh_missing {
+            build_geisterhand_libs(target.as_deref(), format)?;
+        }
+
+        if let Some(gh_lib) = find_geisterhand_library(target.as_deref()) {
             cmd.arg(&gh_lib);
             // Link geisterhand-enabled runtime (has the registry + pump functions)
             if let Some(gh_runtime) = find_geisterhand_runtime(target.as_deref()) {
@@ -3695,11 +3799,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         } else {
             return Err(anyhow!(
-                "--enable-geisterhand requires geisterhand libraries. Build with:\n  \
-                CARGO_TARGET_DIR=target/geisterhand cargo build --release \\\n    \
-                -p perry-runtime --features geisterhand \\\n    \
-                -p perry-ui-macos --features geisterhand \\\n    \
-                -p perry-ui-geisterhand"
+                "Failed to build geisterhand libraries. Check that Perry source crates are available."
             ));
         }
     }

@@ -74,6 +74,10 @@
 - [Creating Plugins](plugins/creating-plugins.md)
 - [Hooks & Events](plugins/hooks-and-events.md)
 
+# Testing
+
+- [Geisterhand (UI Fuzzer)](testing/geisterhand.md)
+
 # CLI Reference
 
 - [Commands](cli/commands.md)

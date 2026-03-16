@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.189
+**Current Version:** 0.2.191
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.191
+- **Geisterhand: in-process input fuzzer for Perry UI**: `--enable-geisterhand` flag embeds HTTP server (port 7676) for programmatic widget interaction; `perry-ui-geisterhand` crate (tiny-http server, chaos mode); global callback registry + main-thread dispatch queue in `perry-runtime/geisterhand_registry.rs` behind `#[cfg(feature = "geisterhand")]`; widget registration in all 5 native platform crates (macOS/iOS/Android/GTK4/Windows) for button, textfield, slider, toggle, picker, menu, click/hover/doubleclick; pump integration in each platform's timer; HTTP endpoints: `/widgets`, `/click/:h`, `/type/:h`, `/slide/:h`, `/toggle/:h`, `/state/:h`, `/hover/:h`, `/doubleclick/:h`, `/screenshot`, `/chaos/start|stop|status`; cross-thread screenshot via Condvar sync; built via `CARGO_TARGET_DIR=target/geisterhand`
+- **Screenshot capture all 5 platforms**: macOS (CGWindowListCreateImage→NSBitmapImageRep→PNG, reads from APPS not WINDOWS), iOS (UIGraphicsImageRenderer→UIImagePNGRepresentation), Android (JNI View.draw→Bitmap.compress PNG), GTK4 (WidgetPaintable→GskRenderer.render_texture→GdkTexture.save_to_png_bytes), Windows (PrintWindow+GetDIBits→inline PNG encoder with stored zlib blocks, CRC32, Adler-32)
+- **Auto-build geisterhand libs**: `--enable-geisterhand` automatically runs `cargo build` for perry-runtime, perry-ui-{platform}, perry-ui-geisterhand with correct features and cross-compilation targets when libs are missing; finds Perry workspace root by searching upward from executable; caches in `target/geisterhand/`
+- **Geisterhand documentation**: `docs/src/testing/geisterhand.md` — full API reference, platform setup (macOS/iOS/Android), example app, architecture overview
 
 ### v0.2.189
 - **WASM target: Firefox NaN canonicalization fix**: replace ALL bridge function calls with memory-based calling convention (`mem_call`/`mem_call_i32`); WASM writes f64 args to memory at 0xFF00 (preserves NaN-boxed payloads), JS reads via Float64Array; fixes Firefox corrupting STRING_TAG/POINTER_TAG values passed as function parameters; `__memDispatch` table routes 150+ bridge functions; `emit_bridgeN`/`emit_bridgeN_i32`/`emit_bridgeN_void` convenience methods; minimum 2 memory pages for arg buffer region

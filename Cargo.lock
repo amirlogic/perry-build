@@ -237,6 +237,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascii"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+
+[[package]]
 name = "ast_node"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -769,6 +775,12 @@ dependencies = [
  "hashbrown 0.14.5",
  "stacker",
 ]
+
+[[package]]
+name = "chunked_transfer"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cipher"
@@ -3983,7 +3995,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "atty",
@@ -4023,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -4042,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4051,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4060,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wasm"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4072,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "serde",
  "serde_json",
@@ -4080,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4092,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4111,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4123,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4143,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4203,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4213,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4221,11 +4233,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.2.189"
+version = "0.2.191"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "itoa",
  "jni",
@@ -4238,8 +4250,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-ui-geisterhand"
+version = "0.2.191"
+dependencies = [
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
 name = "perry-ui-gtk4"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "cairo-rs",
  "gtk4",
@@ -4250,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "block2",
  "libc",
@@ -4264,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
  "libc",
  "objc2",
@@ -4280,8 +4302,9 @@ version = "0.1.0"
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.2.189"
+version = "0.2.191"
 dependencies = [
+ "libc",
  "perry-runtime",
  "perry-ui",
  "windows",
@@ -6511,6 +6534,18 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
 ]
 
 [[package]]

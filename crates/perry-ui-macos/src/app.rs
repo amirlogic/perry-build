@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::widgets;
 
 thread_local! {
-    static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
+    pub(crate) static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
     /// Buffered keyboard shortcuts registered before the menu bar exists.
     static PENDING_SHORTCUTS: RefCell<Vec<PendingShortcut>> = RefCell::new(Vec::new());
 }
@@ -38,9 +38,9 @@ pub(crate) struct WindowEntry {
     pub(crate) window: Retained<NSWindow>,
 }
 
-struct AppEntry {
-    window: Retained<NSWindow>,
-    _root_widget: Option<i64>,
+pub(crate) struct AppEntry {
+    pub(crate) window: Retained<NSWindow>,
+    pub(crate) _root_widget: Option<i64>,
 }
 
 /// Extract a &str from a *const StringHeader pointer.
