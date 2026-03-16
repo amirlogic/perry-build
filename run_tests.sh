@@ -114,6 +114,27 @@ if [[ ${#FAILED_TESTS[@]} -gt 0 ]]; then
     done
 fi
 
+# Run regression tests from tests/ directory
+echo ""
+echo "========================================"
+echo "   Regression Tests"
+echo "========================================"
+for test_script in "$SCRIPT_DIR"/tests/test_*.sh; do
+    [ -f "$test_script" ] || continue
+    test_name=$(basename "$test_script" .sh)
+    script_output=$(bash "$test_script" 2>&1)
+    script_status=$?
+    if [[ $script_status -eq 0 ]]; then
+        echo -e "${GREEN}PASS${NC}  $test_name"
+        ((PASSED++))
+    else
+        echo -e "${RED}FAIL${NC}  $test_name"
+        echo "       $script_output" | head -3
+        ((FAILED++))
+        FAILED_TESTS+=("$test_name (regression)")
+    fi
+done
+
 # Exit with error if any tests failed
 if [[ $FAILED -gt 0 ]]; then
     exit 1
