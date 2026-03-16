@@ -2473,7 +2473,6 @@ pub(crate) fn compile_expr(
         }
         // regex.test(string) -> boolean
         Expr::RegExpTest { regex, string } => {
-            eprintln!("DEBUG: RegExpTest codegen hit, regex={:?}", regex);
             // Compile regex and string expressions
             let regex_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
             let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
@@ -5926,14 +5925,29 @@ pub(crate) fn compile_expr(
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
                     // Check if lhs is null/undefined
-                    // For i64: null/undefined is 0
-                    // For f64: undefined is NaN (TAG_UNDEFINED is NaN when bitcast to f64)
+                    // For i64: null/undefined is 0 or TAG_NULL/TAG_UNDEFINED
+                    // For f64: must use bitcast + integer comparison for TAG_NULL/TAG_UNDEFINED
+                    //          (NOT NaN check, because NaN-boxed strings/pointers are also NaN)
                     let is_null = if lhs_type == types::I64 {
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().icmp(IntCC::Equal, lhs, zero_i64)
+                        let is_zero = builder.ins().icmp(IntCC::Equal, lhs, zero_i64);
+                        let tag_null = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                        let is_tag_null = builder.ins().icmp(IntCC::Equal, lhs, tag_null);
+                        let tag_undef = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                        let is_tag_undef = builder.ins().icmp(IntCC::Equal, lhs, tag_undef);
+                        let is_nullish = builder.ins().bor(is_zero, is_tag_null);
+                        builder.ins().bor(is_nullish, is_tag_undef)
                     } else {
-                        // NaN check: fcmp Unordered with itself is true iff NaN
-                        builder.ins().fcmp(FloatCC::Unordered, lhs, lhs)
+                        // F64 path: bitcast to i64 and check for TAG_NULL / TAG_UNDEFINED specifically.
+                        // We must NOT use NaN detection (fcmp Unordered) because NaN-boxed values
+                        // like strings (STRING_TAG 0x7FFF) and pointers (POINTER_TAG 0x7FFD) are
+                        // also NaN, but they are NOT null/undefined.
+                        let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs);
+                        let tag_null = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                        let is_tag_null = builder.ins().icmp(IntCC::Equal, val_i64, tag_null);
+                        let tag_undef = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                        let is_tag_undef = builder.ins().icmp(IntCC::Equal, val_i64, tag_undef);
+                        builder.ins().bor(is_tag_null, is_tag_undef)
                     };
 
                     // Short-circuit: if lhs is null, evaluate rhs
@@ -12295,6 +12309,60 @@ pub(crate) fn compile_expr(
                     }
                 }
 
+                // No own constructor — check for inherited parent constructor.
+                // TypeScript semantics: `class Dog extends Animal {}` auto-forwards
+                // constructor arguments to the parent constructor.
+                if class_meta.constructor_id.is_none() {
+                    if let Some(ref parent_name) = class_meta.parent_class {
+                        if let Some(parent_meta) = classes.get(parent_name) {
+                            if let Some(parent_ctor_id) = parent_meta.constructor_id {
+                                let arg_vals: Vec<Value> = args.iter()
+                                    .map(|a| compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx))
+                                    .collect::<Result<_>>()?;
+
+                                let mut call_args = vec![obj_ptr];
+                                for arg_val in arg_vals {
+                                    call_args.push(ensure_f64(builder, arg_val));
+                                }
+
+                                let func_ref = module.declare_func_in_func(parent_ctor_id, builder.func);
+                                let actual_sig = module.declarations().get_function_decl(parent_ctor_id);
+                                let expected_param_count = actual_sig.signature.params.len();
+
+                                let mut final_call_args: Vec<Value> = call_args.iter().enumerate()
+                                    .map(|(i, &val)| {
+                                        if i < actual_sig.signature.params.len() {
+                                            let expected_type = actual_sig.signature.params[i].value_type;
+                                            let actual_type = builder.func.dfg.value_type(val);
+                                            if expected_type == types::I64 && actual_type == types::F64 {
+                                                ensure_i64(builder, val)
+                                            } else if expected_type == types::F64 && actual_type == types::I64 {
+                                                inline_nanbox_pointer(builder, val)
+                                            } else {
+                                                val
+                                            }
+                                        } else {
+                                            val
+                                        }
+                                    })
+                                    .collect();
+
+                                while final_call_args.len() < expected_param_count {
+                                    let expected_type = actual_sig.signature.params[final_call_args.len()].value_type;
+                                    if expected_type == types::I64 {
+                                        final_call_args.push(builder.ins().iconst(types::I64, 0));
+                                    } else {
+                                        final_call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
+                                    }
+                                }
+                                final_call_args.truncate(expected_param_count);
+
+                                builder.ins().call(func_ref, &final_call_args);
+                            }
+                        }
+                    }
+                }
+
                 // Return the object pointer as f64-bitcasted with POINTER_TAG (NaN-boxing)
                 // CRITICAL: Must use inline_nanbox_pointer, not plain bitcast, so consumers
                 // can detect it's an object pointer via POINTER_TAG (0x7FFD)
@@ -12572,8 +12640,25 @@ pub(crate) fn compile_expr(
                         let obj_ptr = builder.use_var(ctx.this_var);
                         let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
-                        // Ensure val is f64 for storage (critical for NaN-boxed values)
-                        let val_f64 = ensure_f64(builder, val);
+                        // Store value as NaN-boxed f64. If the value is an i64 pointer
+                        // (e.g., string parameter in setter), NaN-box it with the correct
+                        // tag based on the field type to preserve type identity.
+                        let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                            let is_string_field = ctx.class_meta.field_types.get(property)
+                                .map(|t| matches!(t, perry_types::Type::String))
+                                .unwrap_or(false);
+                            if is_string_field {
+                                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let call = builder.ins().call(nanbox_ref, &[val]);
+                                builder.inst_results(call)[0]
+                            } else {
+                                inline_nanbox_pointer(builder, val)
+                            }
+                        } else {
+                            ensure_f64(builder, val)
+                        };
 
                         // ObjectHeader is 24 bytes, fields start after that
                         let field_offset = 24 + (field_idx as i32) * 8;
@@ -12619,7 +12704,14 @@ pub(crate) fn compile_expr(
 
             // Compile the value
             let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-            let val = ensure_f64(builder, val_raw);
+            // NaN-box I64 pointers with POINTER_TAG so they can be retrieved correctly later.
+            // Raw ensure_f64 bitcast strips the tag, making closures/objects unrecognizable.
+            let val_type = builder.func.dfg.value_type(val_raw);
+            let val = if val_type == types::I64 {
+                inline_nanbox_pointer(builder, val_raw)
+            } else {
+                ensure_f64(builder, val_raw)
+            };
 
             // Call js_object_set_field_by_name(obj_ptr, key_str, value)
             // Ensure key_str_ptr is i64 (js_string_from_bytes returns i64 but it may be bitcast to f64)
@@ -14750,8 +14842,14 @@ pub(crate) fn compile_expr(
                 let str_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
                 let key_ptr = builder.inst_results(str_call)[0];
 
-                // Ensure value is f64 as the runtime function expects f64
-                let val_f64 = ensure_f64(builder, val);
+                // Convert value to f64 for the runtime function.
+                // NaN-box I64 pointers with POINTER_TAG so closures/objects are stored correctly.
+                let val_type = builder.func.dfg.value_type(val);
+                let val_f64 = if val_type == types::I64 {
+                    inline_nanbox_pointer(builder, val)
+                } else {
+                    ensure_f64(builder, val)
+                };
 
                 let set_func = extern_funcs.get("js_object_set_field_by_name")
                     .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
