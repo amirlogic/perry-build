@@ -550,8 +550,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     if let OutputFormat::Text = format {
         println!();
         println!(
-            "  {} Perry Publish v0.2.162",
-            style("▶").cyan().bold()
+            "  {} Perry Publish v{}",
+            style("▶").cyan().bold(),
+            env!("CARGO_PKG_VERSION")
         );
         println!();
         println!("  App:       {}", style(&app_name).bold());
@@ -789,14 +790,14 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
 
     // Auto-trigger iOS/macOS setup if not configured
     if (is_ios || is_macos) && interactive {
+        let has_platform_cert = if is_ios {
+            config.ios.as_ref().and_then(|i| i.certificate.as_deref()).is_some()
+        } else {
+            config.macos.as_ref().and_then(|m| m.certificate.as_deref()).is_some()
+        };
         let has_apple_config = args.certificate.is_some()
             || std::env::var("PERRY_APPLE_CERTIFICATE").is_ok()
-            || saved.apple.as_ref().and_then(|a| a.p8_key_path.as_deref()).is_some()
-            || if is_ios {
-                config.ios.as_ref().and_then(|i| i.certificate.as_deref()).is_some()
-            } else {
-                config.macos.as_ref().and_then(|m| m.certificate.as_deref()).is_some()
-            };
+            || has_platform_cert;
         if !has_apple_config {
             let platform = if is_ios { "iOS" } else { "macOS" };
             println!();
@@ -1802,6 +1803,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                         "notarizing" => "🍎",
                         "packaging" => "💿",
                         "uploading" => "☁️ ",
+                        "verifying" => "🔍",
                         _ => "▶️ ",
                     };
                     pb.set_message(format!("{icon} {message}"));
@@ -1955,90 +1957,6 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                     style(dest.display()).bold()
                 );
                 println!();
-            }
-
-            // --- Integration: Runtime Verification ---
-            if !args.skip_verify {
-                let verify_target = if args.macos {
-                    "macos-arm64"
-                } else if args.ios {
-                    "ios-simulator"
-                } else if args.android {
-                    "android-emulator"
-                } else if args.linux {
-                    "linux-x64"
-                } else {
-                    "" // unknown — skip
-                };
-
-                if !verify_target.is_empty() {
-                    if let OutputFormat::Text = format {
-                        eprintln!(
-                            "  {} Verifying binary ({})...",
-                            style("→").cyan(),
-                            verify_target
-                        );
-                    }
-
-                    let verify_url = if args.verify_url != "https://verify.perryts.com" {
-                        args.verify_url.clone()
-                    } else {
-                        config
-                            .verify
-                            .as_ref()
-                            .and_then(|v| v.url.clone())
-                            .unwrap_or_else(|| "https://verify.perryts.com".to_string())
-                    };
-
-                    let app_type = if args.ios || args.android || args.macos {
-                        "gui"
-                    } else {
-                        "server"
-                    };
-
-                    match super::verify::run_verify_check(
-                        &dest,
-                        &verify_url,
-                        verify_target,
-                        app_type,
-                        "none",
-                        3,
-                        300,
-                        format,
-                    )
-                    .await
-                    {
-                        Ok(status) => {
-                            if status.status == "passed" {
-                                if let OutputFormat::Text = format {
-                                    eprintln!(
-                                        "  {} Verification passed",
-                                        style("✓").green()
-                                    );
-                                }
-                            } else {
-                                // Verify failure is a warning, not a blocker
-                                if let OutputFormat::Text = format {
-                                    eprintln!(
-                                        "  {} Verification: {}",
-                                        style("⚠").yellow(),
-                                        status.status
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Verify failure is a warning, not a blocker
-                            if let OutputFormat::Text = format {
-                                eprintln!(
-                                    "  {} Verification skipped: {}",
-                                    style("⚠").yellow(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
             }
 
             if let OutputFormat::Text = format {
