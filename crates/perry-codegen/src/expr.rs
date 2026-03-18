@@ -8181,6 +8181,25 @@ pub(crate) fn compile_expr(
                                         let result_ptr = builder.inst_results(call)[0];
                                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
                                     }
+                                    "set" => {
+                                        // buf.set(source, offset?) -> void
+                                        // Copies source Uint8Array into this buffer at offset
+                                        if !arg_vals.is_empty() {
+                                            let source = ensure_i64(builder, arg_vals[0]);
+                                            let offset = if arg_vals.len() >= 2 {
+                                                let off_f64 = ensure_f64(builder, arg_vals[1]);
+                                                builder.ins().fcvt_to_sint_sat(types::I32, off_f64)
+                                            } else {
+                                                builder.ins().iconst(types::I32, 0)
+                                            };
+                                            let func = extern_funcs.get("js_buffer_set_from")
+                                                .ok_or_else(|| anyhow!("js_buffer_set_from not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            builder.ins().call(func_ref, &[buf_ptr, source, offset]);
+                                        }
+                                        // .set() returns void (undefined)
+                                        return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
+                                    }
                                     _ => {}
                                 }
                             }
