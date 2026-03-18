@@ -15,25 +15,13 @@ use std::path::{Path, PathBuf};
 use tokio_tungstenite::tungstenite::Message;
 use walkdir::WalkDir;
 
-use crate::OutputFormat;
+use crate::{OutputFormat, Platform};
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
-    /// Build for macOS
-    #[arg(long)]
-    pub macos: bool,
-
-    /// Build for iOS
-    #[arg(long)]
-    pub ios: bool,
-
-    /// Build for Android
-    #[arg(long)]
-    pub android: bool,
-
-    /// Build for Linux
-    #[arg(long)]
-    pub linux: bool,
+    /// Target platform (macos, ios, android, linux)
+    #[arg(value_enum)]
+    pub platform: Option<Platform>,
 
     /// Build server URL
     #[arg(long, default_value = "https://hub.perryts.com")]
@@ -155,6 +143,7 @@ struct AppConfig {
     name: Option<String>,
     version: Option<String>,
     build_number: Option<u64>,
+    bundle_id: Option<String>,
     description: Option<String>,
     entry: Option<String>,
     icons: Option<IconsConfig>,
@@ -412,14 +401,13 @@ pub fn run(args: PublishArgs, format: OutputFormat, use_color: bool, _verbose: u
         bail!("Aborted.");
     }
 
-    let target_hint = if args.ios {
-        Some("ios")
-    } else if args.android {
-        Some("android")
-    } else if args.linux {
-        Some("linux")
-    } else {
-        Some("macos")
+    let target_hint = match args.platform {
+        Some(Platform::Ios) => Some("ios"),
+        Some(Platform::Android) => Some("android"),
+        Some(Platform::Linux) => Some("linux"),
+        Some(Platform::Windows) => Some("windows"),
+        Some(Platform::Web) => Some("web"),
+        _ => Some("macos"),
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -490,14 +478,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         };
 
         // Infer app_type from target
-        let app_type = if args.ios {
-            "gui"
-        } else if args.android {
-            "gui"
-        } else if args.macos {
-            "gui"
-        } else {
-            "server"
+        let app_type = match args.platform {
+            Some(Platform::Ios) | Some(Platform::Android) | Some(Platform::Macos) | Some(Platform::Web) | Some(Platform::Windows) => "gui",
+            _ => "server",
         };
 
         match super::audit::run_audit_check(
@@ -559,21 +542,22 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     }
 
     // --- Resolve target platform ---
-    let target_name = if args.macos {
-        "macos".to_string()
-    } else if args.ios {
-        "ios".to_string()
-    } else if args.android {
-        "android".to_string()
-    } else if args.linux {
-        "linux".to_string()
+    let target_name = if let Some(p) = args.platform {
+        match p {
+            Platform::Macos => "macos".to_string(),
+            Platform::Ios => "ios".to_string(),
+            Platform::Android => "android".to_string(),
+            Platform::Linux => "linux".to_string(),
+            Platform::Windows => "windows".to_string(),
+            Platform::Web => "web".to_string(),
+        }
     } else if let Some(ref t) = saved.default_target {
         // Have a saved default — use it (user can change via prompt below)
         t.clone()
     } else if interactive {
         prompt_target(saved.default_target.as_deref())
     } else {
-        bail!("No target specified. Use --macos, --ios, --android, or --linux.");
+        bail!("No target specified. Use: perry publish <macos|ios|android|linux>");
     };
 
     let target_display = match target_name.as_str() {
@@ -666,20 +650,24 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         toml_build_number
     };
 
+    let app_bundle_id = config.app.as_ref().and_then(|a| a.bundle_id.clone());
     let project_bundle_id = config.project.as_ref().and_then(|p| p.bundle_id.clone());
     let bundle_id = if is_android {
         config.android.as_ref().and_then(|a| a.package_name.clone())
             .or_else(|| config.ios.as_ref().and_then(|i| i.bundle_id.clone()))
             .or_else(|| config.macos.as_ref().and_then(|m| m.bundle_id.clone()))
+            .or_else(|| app_bundle_id.clone())
             .or_else(|| project_bundle_id.clone())
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     } else if is_ios {
         config.ios.as_ref().and_then(|i| i.bundle_id.clone())
+            .or_else(|| app_bundle_id.clone())
             .or_else(|| project_bundle_id.clone())
             .or_else(|| config.macos.as_ref().and_then(|m| m.bundle_id.clone()))
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     } else {
         config.macos.as_ref().and_then(|m| m.bundle_id.clone())
+            .or_else(|| app_bundle_id.clone())
             .or_else(|| project_bundle_id.clone())
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     };

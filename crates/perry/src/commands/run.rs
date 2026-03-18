@@ -7,28 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::compile::{CompileArgs, CompileResult};
-use crate::OutputFormat;
+use crate::{OutputFormat, Platform};
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
+    /// Target platform (macos, ios, android, web). Defaults to host platform.
+    #[arg(value_enum)]
+    pub platform: Option<Platform>,
+
     /// Input TypeScript file
     pub input: Option<PathBuf>,
-
-    /// Run on macOS (default on macOS host)
-    #[arg(long)]
-    pub macos: bool,
-
-    /// Run on iOS (simulator or device)
-    #[arg(long)]
-    pub ios: bool,
-
-    /// Run on web (opens in browser)
-    #[arg(long)]
-    pub web: bool,
-
-    /// Run on Android
-    #[arg(long)]
-    pub android: bool,
 
     /// Specific iOS simulator UDID to target
     #[arg(long)]
@@ -589,7 +577,7 @@ async fn remote_build_and_launch(
             launch_ios_device(&app_dir, &bundle_id, udid, format)
         }
     } else if target == "android" {
-        let serial = device_udid.ok_or_else(|| anyhow!("No Android device serial — use perry run --android with a connected device or emulator"))?;
+        let serial = device_udid.ok_or_else(|| anyhow!("No Android device serial — use perry run android with a connected device or emulator"))?;
         install_and_launch_android(&dest, &bundle_id, &serial, format)
     } else {
         // Native binary
@@ -877,7 +865,7 @@ async fn resign_for_development(
             .context(
                 "Could not create development provisioning profile.\n\
                  Ensure your App Store Connect API key has the right permissions,\n\
-                 or use a simulator instead: perry run --ios --simulator <UDID>"
+                 or use a simulator instead: perry run ios --simulator <UDID>"
             )?
     };
 
@@ -1273,9 +1261,12 @@ fn read_app_metadata(project_root: &Path, input: &Path) -> (String, String) {
     let toml_bundle_id = toml_config
         .as_ref()
         .and_then(|t| {
-            // Check [ios].bundle_id, then top-level bundle_id
+            // Check [ios].bundle_id, [macos].bundle_id, [app].bundle_id, [project].bundle_id, then top-level
             t.get("ios")
                 .and_then(|i| i.get("bundle_id"))
+                .or_else(|| t.get("macos").and_then(|m| m.get("bundle_id")))
+                .or_else(|| t.get("app").and_then(|a| a.get("bundle_id")))
+                .or_else(|| t.get("project").and_then(|p| p.get("bundle_id")))
                 .or_else(|| t.get("bundle_id"))
         })
         .and_then(|v| v.as_str())
@@ -1390,7 +1381,7 @@ fn build_device_credentials(
     if signing_identity.is_none() {
         bail!(
             "No code signing identity found for device builds.\n\
-             Run `perry setup ios` first, or use `perry run --ios --simulator <UDID>` for unsigned builds."
+             Run `perry setup ios` first, or use `perry run ios --simulator <UDID>` for unsigned builds."
         );
     }
 
@@ -1619,74 +1610,67 @@ fn read_perry_toml_entry() -> Option<PathBuf> {
 
 /// Resolve the compilation target and optional device UDID
 fn resolve_target(args: &RunArgs) -> Result<(Option<String>, Option<String>)> {
-    if args.web {
-        return Ok((Some("web".to_string()), None));
+    match args.platform {
+        Some(Platform::Web) => Ok((Some("web".to_string()), None)),
+        Some(Platform::Android) => {
+            let devices = detect_android_devices()?;
+            if devices.is_empty() {
+                return Err(anyhow!(
+                    "No Android devices found. Connect a device or start an emulator, then try again."
+                ));
+            }
+            let serial = if devices.len() == 1 {
+                devices[0].udid.clone()
+            } else {
+                pick_device(&devices, "Android device")?
+            };
+            Ok((Some("android".to_string()), Some(serial)))
+        }
+        Some(Platform::Ios) => {
+            if let Some(ref udid) = args.simulator {
+                return Ok((Some("ios-simulator".to_string()), Some(udid.clone())));
+            }
+            if let Some(ref udid) = args.device {
+                return Ok((Some("ios".to_string()), Some(udid.clone())));
+            }
+
+            // Auto-detect: booted simulators + connected devices
+            let simulators = detect_booted_simulators().unwrap_or_default();
+            let devices = detect_ios_devices().unwrap_or_default();
+
+            let mut all: Vec<(DeviceInfo, &str)> = Vec::new();
+            for s in simulators {
+                all.push((s, "ios-simulator"));
+            }
+            for d in devices {
+                all.push((d, "ios"));
+            }
+
+            if all.is_empty() {
+                return Err(anyhow!(
+                    "No iOS simulators or devices found.\n\
+                     Boot a simulator:  xcrun simctl boot <UDID>\n\
+                     Or specify one:    perry run ios --simulator <UDID>"
+                ));
+            }
+
+            if all.len() == 1 {
+                let (dev, target) = all.remove(0);
+                return Ok((Some(target.to_string()), Some(dev.udid)));
+            }
+
+            // Multiple options: prompt
+            let names: Vec<String> = all
+                .iter()
+                .map(|(d, t)| format!("{} ({})", d.name, t))
+                .collect();
+            let selection = pick_from_list(&names, "Select iOS target")?;
+            let (dev, target) = all.remove(selection);
+            Ok((Some(target.to_string()), Some(dev.udid)))
+        }
+        Some(Platform::Macos) | Some(Platform::Linux) | Some(Platform::Windows) => Ok((None, None)),
+        None => Ok((None, None)),
     }
-
-    if args.android {
-        let devices = detect_android_devices()?;
-        if devices.is_empty() {
-            return Err(anyhow!(
-                "No Android devices found. Connect a device or start an emulator, then try again."
-            ));
-        }
-        let serial = if devices.len() == 1 {
-            devices[0].udid.clone()
-        } else {
-            pick_device(&devices, "Android device")?
-        };
-        return Ok((Some("android".to_string()), Some(serial)));
-    }
-
-    if args.ios {
-        if let Some(ref udid) = args.simulator {
-            return Ok((Some("ios-simulator".to_string()), Some(udid.clone())));
-        }
-        if let Some(ref udid) = args.device {
-            return Ok((Some("ios".to_string()), Some(udid.clone())));
-        }
-
-        // Auto-detect: booted simulators + connected devices
-        let simulators = detect_booted_simulators().unwrap_or_default();
-        let devices = detect_ios_devices().unwrap_or_default();
-
-        let mut all: Vec<(DeviceInfo, &str)> = Vec::new();
-        for s in simulators {
-            all.push((s, "ios-simulator"));
-        }
-        for d in devices {
-            all.push((d, "ios"));
-        }
-
-        if all.is_empty() {
-            return Err(anyhow!(
-                "No iOS simulators or devices found.\n\
-                 Boot a simulator:  xcrun simctl boot <UDID>\n\
-                 Or specify one:    perry run --ios --simulator <UDID>"
-            ));
-        }
-
-        if all.len() == 1 {
-            let (dev, target) = all.remove(0);
-            return Ok((Some(target.to_string()), Some(dev.udid)));
-        }
-
-        // Multiple options: prompt
-        let names: Vec<String> = all
-            .iter()
-            .map(|(d, t)| format!("{} ({})", d.name, t))
-            .collect();
-        let selection = pick_from_list(&names, "Select iOS target")?;
-        let (dev, target) = all.remove(selection);
-        return Ok((Some(target.to_string()), Some(dev.udid)));
-    }
-
-    if args.macos {
-        return Ok((None, None));
-    }
-
-    // Default: native (no target flag)
-    Ok((None, None))
 }
 
 /// Launch the compiled output based on target

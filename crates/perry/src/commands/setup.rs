@@ -853,7 +853,7 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  Set the password in your environment:");
     println!("  export PERRY_APPLE_CERTIFICATE_PASSWORD={p12_password}");
     println!();
-    println!("  Then run: {}", style("perry publish --ios").bold());
+    println!("  Then run: {}", style("perry publish ios").bold());
 
     Ok(())
 }
@@ -1196,7 +1196,7 @@ pub(crate) fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  Distribute:   {}", style(distribute_value).bold());
     println!("  Cert password: auto-managed ({})", style("perry-auto").dim());
     println!();
-    println!("  Then run: {}", style("perry publish --macos").bold());
+    println!("  Then run: {}", style("perry publish macos").bold());
 
     Ok(())
 }

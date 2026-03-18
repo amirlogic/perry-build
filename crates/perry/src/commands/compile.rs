@@ -3952,12 +3952,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let _ = fs::remove_file(&exe_path);
 
         let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
-        // Check package.json for a custom bundleId, fall back to com.perry.{name}
+        // Check perry.toml, then package.json for a custom bundleId, fall back to com.perry.{name}
         // Search relative to the source file, walking up directories
         let bundle_id = (|| -> Option<String> {
             let mut dir = args.input.canonicalize().ok()?;
             for _ in 0..5 {
                 dir = dir.parent()?.to_path_buf();
+                // Check perry.toml first: [ios].bundle_id, then top-level bundle_id
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    if let Ok(data) = fs::read_to_string(&toml_path) {
+                        if let Ok(doc) = data.parse::<toml::Table>() {
+                            let toml_bid = doc.get("ios")
+                                .and_then(|i| i.get("bundle_id"))
+                                .or_else(|| doc.get("app").and_then(|a| a.get("bundle_id")))
+                                .or_else(|| doc.get("project").and_then(|p| p.get("bundle_id")))
+                                .or_else(|| doc.get("bundle_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if toml_bid.is_some() {
+                                return toml_bid;
+                            }
+                        }
+                    }
+                }
+                // Then check package.json
                 let pkg = dir.join("package.json");
                 if pkg.exists() {
                     let data = fs::read_to_string(pkg).ok()?;

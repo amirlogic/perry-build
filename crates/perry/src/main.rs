@@ -42,6 +42,17 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Target platform for run/publish commands.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Platform {
+    Macos,
+    Ios,
+    Android,
+    Linux,
+    Windows,
+    Web,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Compile TypeScript file(s) to native executable

@@ -172,8 +172,8 @@ App(
 ## Cross-Platform Publishing (upcoming, not available yet)
 
 ```bash
-# Build for all platforms via the build server
-perry publish --macos --ios --android
+# Build for a platform via the build server
+perry publish macos   # or: perry publish ios / android / linux
 
 # Build for web (outputs self-contained HTML)
 perry compile src/main.ts --target web -o dist/app.html
@@ -487,7 +487,7 @@ perry init <project-name>
 Builds, signs, and publishes your app for multiple platforms via the cloud build server.
 
 ```bash
-perry publish --macos --ios --android [--license-key KEY]
+perry publish macos [--license-key KEY]   # or: ios / android / linux
 ```
 
 ### `perry doctor`

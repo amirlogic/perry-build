@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.192
+**Current Version:** 0.2.194
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.194
+- **CLI: platform as positional arg for `run` and `publish`**: `perry run ios`, `perry publish macos` instead of `--ios`/`--macos` flags — platform is the primary selector, not a composable modifier; shared `Platform` ValueEnum (macos/ios/android/linux/windows/web); `perry compile --target` unchanged (file is the primary arg there); updated docs and error messages
+
+### v0.2.193
+- **Fix bundle ID not reading from perry.toml**: `perry publish macos` (and all platforms) now reads `[app].bundle_id` from perry.toml — previously `AppConfig` struct was missing the `bundle_id` field so `[app].bundle_id` was silently ignored, falling through to default `com.perry.<name>`; also fixed `perry compile --target ios` and `perry run` to check perry.toml (`[ios]`, `[macos]`, `[app]`, `[project]`) before `package.json`
 
 ### v0.2.192
 - **Configurable geisterhand port**: `--geisterhand-port <PORT>` CLI flag for both `perry compile` and `perry run` (implies `--enable-geisterhand`); port propagated through CompilationContext → Compiler → Cranelift codegen; default remains 7676; also forwarded in remote build manifests

@@ -49,17 +49,17 @@ Compile and launch your app in one step.
 
 ```bash
 perry run                          # Auto-detect entry file
-perry run --ios                    # Run on iOS device/simulator
-perry run --android                # Run on Android device
+perry run ios                      # Run on iOS device/simulator
+perry run android                  # Run on Android device
 perry run -- --port 3000           # Forward args to your program
 ```
 
-| Flag | Description |
+| Argument / Flag | Description |
 |------|-------------|
-| `--ios` | Target iOS (device or simulator) |
-| `--macos` | Target macOS (default on macOS host) |
-| `--web` | Target web (opens in browser) |
-| `--android` | Target Android device |
+| `ios` | Target iOS (device or simulator) |
+| `macos` | Target macOS (default on macOS host) |
+| `web` | Target web (opens in browser) |
+| `android` | Target Android device |
 | `--simulator <UDID>` | Specify iOS simulator by UDID |
 | `--device <UDID>` | Specify iOS physical device by UDID |
 | `--local` | Force local compilation (no remote fallback) |
@@ -75,20 +75,20 @@ perry run -- --port 3000           # Forward args to your program
 
 **Device detection**: When targeting iOS, Perry auto-discovers available simulators (via `simctl`) and physical devices (via `devicectl`). For Android, it uses `adb`. When multiple targets are found, an interactive prompt lets you choose.
 
-**Remote build fallback**: If cross-compilation toolchains aren't installed locally (e.g., iOS targets on a machine without Xcode), `perry run --ios` automatically falls back to Perry Hub's build server — it packages your project, uploads it, streams build progress via WebSocket, downloads the `.ipa`, and installs it on your device. Use `--local` or `--remote` to force either path.
+**Remote build fallback**: If cross-compilation toolchains aren't installed locally (e.g., iOS targets on a machine without Xcode), `perry run ios` automatically falls back to Perry Hub's build server — it packages your project, uploads it, streams build progress via WebSocket, downloads the `.ipa`, and installs it on your device. Use `--local` or `--remote` to force either path.
 
 ```bash
 # Run a CLI program
 perry run
 
 # Run on a specific simulator
-perry run --ios --simulator 12345-ABCDE
+perry run ios --simulator 12345-ABCDE
 
 # Force remote build
-perry run --ios --remote
+perry run ios --remote
 
 # Run web target
-perry run --web
+perry run web
 ```
 
 ## check
@@ -178,17 +178,17 @@ Each explanation includes the error description, example code, and suggested fix
 Build, sign, and distribute your app.
 
 ```bash
-perry publish --macos
-perry publish --ios
-perry publish --android
+perry publish macos
+perry publish ios
+perry publish android
 ```
 
-| Flag | Description |
+| Argument / Flag | Description |
 |------|-------------|
-| `--macos` | Build for macOS (App Store/notarization) |
-| `--ios` | Build for iOS (App Store/TestFlight) |
-| `--android` | Build for Android (Google Play) |
-| `--linux` | Build for Linux (AppImage/deb/rpm) |
+| `macos` | Build for macOS (App Store/notarization) |
+| `ios` | Build for iOS (App Store/TestFlight) |
+| `android` | Build for Android (Google Play) |
+| `linux` | Build for Linux (AppImage/deb/rpm) |
 | `--server <URL>` | Build server (default: `https://hub.perryts.com`) |
 | `--license-key <KEY>` | Perry Hub license key |
 | `--project <PATH>` | Project directory |
