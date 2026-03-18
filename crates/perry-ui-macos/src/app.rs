@@ -265,6 +265,9 @@ fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
 
 /// Run the application event loop (blocks).
 pub fn app_run(_app_handle: i64) {
+    // Install crash reporting hooks before anything else
+    crate::crash_log::install_crash_hooks();
+
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
 
     let app = NSApplication::sharedApplication(mtm);

@@ -315,6 +315,9 @@ fn register_view_controller() {
 
 /// Run the iOS app event loop (calls UIApplicationMain, blocks forever).
 pub fn app_run(_app_handle: i64) {
+    // Install crash reporting hooks before anything else
+    crate::crash_log::install_crash_hooks();
+
     // Force PerryAppDelegate class registration (define_class! registers it lazily)
     let _ = PerryAppDelegate::class();
 
@@ -391,16 +394,18 @@ define_class!(
     impl PerryPumpTarget {
         #[unsafe(method(pump:))]
         fn pump(&self, _sender: &AnyObject) {
-            unsafe {
-                js_callback_timer_tick();
-                js_interval_timer_tick();
-                js_promise_run_microtasks();
-                #[cfg(feature = "geisterhand")]
-                {
-                    extern "C" { fn perry_geisterhand_pump(); }
-                    perry_geisterhand_pump();
+            crate::catch_callback_panic("pump", std::panic::AssertUnwindSafe(|| {
+                unsafe {
+                    js_callback_timer_tick();
+                    js_interval_timer_tick();
+                    js_promise_run_microtasks();
+                    #[cfg(feature = "geisterhand")]
+                    {
+                        extern "C" { fn perry_geisterhand_pump(); }
+                        perry_geisterhand_pump();
+                    }
                 }
-            }
+            }));
         }
     }
 );

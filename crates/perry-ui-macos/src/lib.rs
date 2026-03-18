@@ -1,5 +1,6 @@
 pub mod app;
 pub mod clipboard;
+pub mod crash_log;
 pub mod file_dialog;
 pub mod keychain;
 pub mod location;
@@ -13,9 +14,14 @@ pub mod widgets;
 pub mod screenshot;
 
 /// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.
-/// Logs the panic message to stderr and returns the error if one occurred.
+/// The global panic hook (installed by crash_log) writes to crash.log first;
+/// if we catch the panic here (non-fatal), we clear the log so it doesn't
+/// get reported as a crash on next launch.
 pub fn catch_callback_panic<F: FnOnce() + std::panic::UnwindSafe>(label: &str, f: F) {
     if let Err(e) = std::panic::catch_unwind(f) {
+        // Panic hook already wrote to crash.log — clear it since we caught this one
+        crash_log::clear_crash_log();
+
         let msg = if let Some(s) = e.downcast_ref::<&str>() {
             s.to_string()
         } else if let Some(s) = e.downcast_ref::<String>() {
@@ -23,7 +29,7 @@ pub fn catch_callback_panic<F: FnOnce() + std::panic::UnwindSafe>(label: &str, f
         } else {
             format!("{:?}", e)
         };
-        eprintln!("[perry] panic in {}: {}", label, msg);
+        eprintln!("[perry] panic in {} (caught): {}", label, msg);
     }
 }
 
