@@ -6272,7 +6272,10 @@ pub(crate) fn compile_expr(
                     if async_func_ids.contains(func_id) {
                         Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
                     } else {
-                        // NaN-box string return values so callers detect them for concatenation
+                        // NaN-box string I64 return values so callers detect them
+                        // for concatenation and console.log printing.
+                        // Other I64 returns (arrays, objects) must stay as raw I64 —
+                        // same-module callers use them as pointers directly.
                         let result_type = builder.func.dfg.value_type(result);
                         if result_type == types::I64 && func_hir_return_types.get(func_id)
                             .map(|t| matches!(t, perry_types::Type::String)).unwrap_or(false)
