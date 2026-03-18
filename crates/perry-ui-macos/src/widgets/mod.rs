@@ -41,6 +41,9 @@ thread_local! {
     /// Parent tracking: child_handle -> (parent_handle, insertion_index)
     /// Used by set_hidden to re-insert views that NSStackView detached.
     static PARENT_MAP: RefCell<std::collections::HashMap<i64, (i64, usize)>> = RefCell::new(std::collections::HashMap::new());
+    /// Background color cache: handle -> (r, g, b, a)
+    /// Used to re-apply bg color after NSStackView detach/re-attach.
+    static BG_COLOR_MAP: RefCell<std::collections::HashMap<i64, (f64, f64, f64, f64)>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Store an NSView and return its handle (1-based i64).
@@ -129,6 +132,14 @@ pub fn set_hidden(handle: i64, hidden: bool) {
                         }
                     }
                 }
+            }
+
+            // Re-apply cached background color (NSStackView detach strips CALayer bg)
+            let cached_bg = BG_COLOR_MAP.with(|m| {
+                m.borrow().get(&handle).copied()
+            });
+            if let Some((r, g, b, a)) = cached_bg {
+                apply_background_color(handle, r, g, b, a);
             }
         }
     }
@@ -354,7 +365,16 @@ extern "C" {
 }
 
 /// Set a solid background color on any widget via its layer.
+/// Also caches the color so it can be re-applied after NSStackView detach/re-attach.
 pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    // Cache the color for re-application after hide/show
+    BG_COLOR_MAP.with(|m| {
+        m.borrow_mut().insert(handle, (r, g, b, a));
+    });
+    apply_background_color(handle, r, g, b, a);
+}
+
+fn apply_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
             let _: () = objc2::msg_send![&*view, setWantsLayer: true];
