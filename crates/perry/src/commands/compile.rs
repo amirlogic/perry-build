@@ -3246,6 +3246,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 defined_syms.insert(func.name.clone());
             }
         }
+        // Platform detection for nm tool and symbol prefix
+        let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+        let is_android = matches!(target.as_deref(), Some("android"));
+        let is_linux = matches!(target.as_deref(), Some("linux")) || (!cfg!(target_os = "macos") && !cfg!(target_os = "windows") && target.is_none());
+        let is_windows = matches!(target.as_deref(), Some("windows")) || (cfg!(target_os = "windows") && target.is_none());
         // Find the nm tool: for Windows targets use llvm-nm (reads COFF); otherwise system nm
         let nm_cmd = if is_windows {
             find_llvm_tool("llvm-nm")

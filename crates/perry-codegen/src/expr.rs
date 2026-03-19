@@ -4132,6 +4132,8 @@ pub(crate) fn compile_expr(
                                             let rhs = builder.use_var(right_info.var);
                                             let new_val = builder.ins().iadd(current, rhs);
                                             builder.def_var(info.var, new_val);
+                                            // Write back to module global slot
+                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
                                             return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                                         } else if !right_info.is_boxed && !right_info.is_string && !right_info.is_bigint {
                                             // y is f64: convert to i32 and use iadd (faster than f64 arithmetic)
@@ -4141,6 +4143,8 @@ pub(crate) fn compile_expr(
                                             let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs_f64);
                                             let new_val = builder.ins().iadd(current, rhs_i32);
                                             builder.def_var(info.var, new_val);
+                                            // Write back to module global slot
+                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
                                             return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                                         }
                                     }
@@ -4154,6 +4158,8 @@ pub(crate) fn compile_expr(
                                 let current = builder.use_var(info.var);
                                 let new_val = builder.ins().iadd_imm(current, delta);
                                 builder.def_var(info.var, new_val);
+                                // Write back to module global slot
+                                if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
                                 // Return f64 for expression value
                                 return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                             }
@@ -4165,6 +4171,8 @@ pub(crate) fn compile_expr(
                 let val_f64 = ensure_f64(builder, val);
                 let i32_val = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
                 builder.def_var(info.var, i32_val);
+                // Write back to module global slot
+                if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, i32_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
                 return Ok(val);
             }
 
@@ -16703,6 +16711,22 @@ pub(crate) fn compile_expr(
                             .ok_or_else(|| anyhow!("perry_ui_menu_add_standard_action not declared"))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[menu_handle, title_ptr, sel_ptr, shortcut_ptr]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuClear" => {
+                        // (menuHandle) — extract menu handle and clear all items
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let h_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h_call = builder.ins().call(get_ptr_ref, &[h_f64]);
+                        let menu_handle = builder.inst_results(h_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_menu_clear")
+                            .ok_or_else(|| anyhow!("perry_ui_menu_clear not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[menu_handle]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
