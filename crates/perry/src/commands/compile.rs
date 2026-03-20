@@ -3569,7 +3569,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
-         .arg("/FORCE:MULTIPLE");
+         .arg("/FORCE:MULTIPLE")
+         .arg("/FORCE:UNRESOLVED");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
