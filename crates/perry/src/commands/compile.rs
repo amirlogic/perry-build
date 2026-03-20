@@ -3925,6 +3925,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     cargo_cmd.arg("--target").arg(triple);
                 }
 
+                // For Android, ensure 16 KB page size alignment (required by Google Play)
+                if is_android {
+                    cargo_cmd.env("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS",
+                        "-C link-arg=-Wl,-z,max-page-size=16384");
+                }
+
                 let cargo_status = cargo_cmd.status()?;
                 if !cargo_status.success() {
                     return Err(anyhow!(
