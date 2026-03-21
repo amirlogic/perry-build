@@ -168,6 +168,12 @@ impl crate::codegen::Compiler {
         func.body.iter().all(|s| is_integer_stmt(s, func.id))
     }
 
+    /// Maximum top-level statements before a function is split into continuations.
+    /// Cranelift generates incorrect machine code for very large functions (>3MB
+    /// compiled code) on Windows. Splitting at ~80 statements keeps each piece
+    /// well under that threshold.
+    const LARGE_FUNC_THRESHOLD: usize = 50;
+
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
         CURRENT_FUNC_HIR_ID.with(|c| c.set(Some(func.id)));
@@ -178,7 +184,15 @@ impl crate::codegen::Compiler {
                 self.module_symbol_prefix, func.name, func.id, param_types.join(", "), func.return_type);
         }
 
-        let result = if Self::is_integer_only_function(func) && func.params.len() <= 4 {
+        // Check if the function needs splitting due to large size.
+        // Only split non-async, parameterless functions to keep things simple.
+        let needs_split = func.body.len() > Self::LARGE_FUNC_THRESHOLD
+            && !func.is_async
+            && self.compile_target == 3; // Windows only (target 3)
+
+        let result = if needs_split {
+            self.compile_function_split(func)
+        } else if Self::is_integer_only_function(func) && func.params.len() <= 4 {
             self.compile_integer_specialized_function(func)
         } else {
             self.compile_function_inner(func)
@@ -734,6 +748,436 @@ impl crate::codegen::Compiler {
         }
         self.module.clear_context(&mut self.ctx);
 
+        Ok(())
+    }
+
+    /// Compile a large function by splitting its body into continuation functions.
+    ///
+    /// On Windows, Cranelift generates incorrect machine code for very large
+    /// functions (>3MB compiled code). This method splits the function body into
+    /// smaller chunks, each compiled as a separate Cranelift function, avoiding
+    /// the codegen bug.
+    ///
+    /// Strategy:
+    /// - The original function is compiled with only the FIRST chunk of statements.
+    ///   After the first chunk, it calls continuation functions sequentially.
+    /// - Each continuation function takes a pointer to a stack-allocated "locals
+    ///   buffer" where all local variables are stored as f64 values.
+    /// - At each split boundary, the main function stores all live locals into
+    ///   the buffer before calling the continuation. The continuation loads them
+    ///   at entry and stores them back at exit.
+    /// - Returns are handled by storing a flag + return value in the buffer.
+    ///   Continuations return i32 (0 = continue, 1 = early return).
+    fn compile_function_split(&mut self, func: &Function) -> Result<()> {
+        use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+        use cranelift_module::DataDescription;
+
+        let chunk_size = Self::LARGE_FUNC_THRESHOLD;
+        let total_stmts = func.body.len();
+        let num_chunks = (total_stmts + chunk_size - 1) / chunk_size;
+
+        eprintln!("[FUNC_SPLIT] Splitting '{}' ({} stmts) into {} chunks of ~{} stmts",
+            func.name, total_stmts, num_chunks, chunk_size);
+
+        if num_chunks <= 1 {
+            return self.compile_function_inner(func);
+        }
+
+        // Collect all LocalIds: function parameters + Let statement declarations
+        let mut local_ids: Vec<LocalId> = Vec::new();
+        for param in &func.params {
+            local_ids.push(param.id);
+        }
+        for stmt in &func.body {
+            if let Stmt::Let { id, .. } = stmt {
+                local_ids.push(*id);
+            }
+        }
+        // Add 2 extra slots at the end: return flag + return value
+        let num_slots = local_ids.len() + 2;
+        let return_flag_offset = (local_ids.len() * 8) as i32;
+        let return_value_offset = ((local_ids.len() + 1) * 8) as i32;
+        let buf_total_size = (num_slots * 8) as u32;
+
+        // Create a mapping from LocalId to buffer offset
+        let local_offsets: BTreeMap<LocalId, i32> = local_ids.iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (i * 8) as i32))
+            .collect();
+
+        // Step 1: Declare continuation functions
+        let mut cont_func_ids = Vec::new();
+        for chunk_idx in 1..num_chunks {
+            let cont_name = if self.module_symbol_prefix.is_empty() {
+                format!("__{}_cont{}", func.name, chunk_idx)
+            } else {
+                format!("__{}_{}_cont{}", self.module_symbol_prefix, func.name, chunk_idx)
+            };
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // locals buffer ptr
+            sig.returns.push(AbiParam::new(types::I32)); // 0=continue, 1=returned
+            let cont_id = self.module.declare_function(&cont_name, Linkage::Local, &sig)?;
+            cont_func_ids.push(cont_id);
+        }
+
+        // Step 2: Compile continuation functions (chunks 1..N)
+        let chunks: Vec<&[Stmt]> = func.body.chunks(chunk_size).collect();
+        for (chunk_idx, chunk) in chunks.iter().enumerate().skip(1) {
+            let cont_id = cont_func_ids[chunk_idx - 1];
+            self.compile_continuation_chunk(
+                func, cont_id, chunk, &local_offsets, buf_total_size,
+                return_flag_offset, return_value_offset,
+            )?;
+        }
+
+        // Step 3: Compile the main function with only the first chunk + continuation calls
+        self.compile_main_with_continuations(
+            func, &chunks[0], &cont_func_ids, &local_ids, &local_offsets,
+            buf_total_size, return_flag_offset, return_value_offset,
+        )?;
+
+        Ok(())
+    }
+
+    /// Compile a single continuation chunk as a standalone function.
+    /// Takes (buf_ptr: i64), returns i32 (0=continue, 1=returned).
+    fn compile_continuation_chunk(
+        &mut self,
+        func: &Function,
+        cont_func_id: cranelift_module::FuncId,
+        stmts: &[Stmt],
+        local_offsets: &BTreeMap<LocalId, i32>,
+        buf_size: u32,
+        return_flag_offset: i32,
+        return_value_offset: i32,
+    ) -> Result<()> {
+        use cranelift_codegen::ir::StackSlotData;
+
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // buf ptr
+        sig.returns.push(AbiParam::new(types::I32)); // status
+        self.ctx.func.signature = sig;
+
+        let boxed_vars = self.collect_mutable_captures_from_stmts(stmts);
+        let mut func_build_ctx = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut func_build_ctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            let buf_ptr_param = builder.block_params(entry)[0];
+
+            // Create local variables by loading from the buffer
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut next_var = 0usize;
+
+            for (id, offset) in local_offsets {
+                let var = Variable::new(next_var);
+                next_var += 1;
+                builder.declare_var(var, types::F64);
+                let loaded = builder.ins().load(types::F64, MemFlags::new(), buf_ptr_param, *offset);
+                builder.def_var(var, loaded);
+                locals.insert(*id, LocalInfo {
+                    var,
+                    name: None,
+                    class_name: None,
+                    type_args: Vec::new(),
+                    is_pointer: false,
+                    is_array: false,
+                    is_string: false,
+                    is_bigint: false,
+                    is_closure: false,
+                    closure_func_id: None,
+                    is_boxed: false,
+                    is_map: false,
+                    is_set: false,
+                    is_buffer: false,
+                    is_event_emitter: false,
+                    is_union: true, // treat all as union (f64) for maximum compatibility
+                    is_mixed_array: false,
+                    is_integer: false,
+                    is_integer_array: false,
+                    is_i32: false,
+                    is_boolean: false,
+                    i32_shadow: None,
+                    bounded_by_array: None,
+                    bounded_by_constant: None,
+                    scalar_fields: None,
+                    squared_cache: None,
+                    product_cache: None,
+                    cached_array_ptr: None,
+                    const_value: None,
+                    hoisted_element_loads: None,
+                    hoisted_i32_products: None,
+                    module_var_data_id: None,
+                    class_ref_name: None,
+                });
+            }
+
+            // Store buf_ptr as a local for use in return handling
+            let buf_var = Variable::new(next_var);
+            next_var += 1;
+            builder.declare_var(buf_var, types::I64);
+            builder.def_var(buf_var, buf_ptr_param);
+
+            // Compile the statements
+            for stmt in stmts {
+                let current_block = builder.current_block().unwrap();
+                if is_block_filled(&builder, current_block) {
+                    break;
+                }
+                compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)
+                    .map_err(|e| anyhow!("In continuation of '{}': {}", func.name, e))?;
+            }
+
+            // Store locals back to buffer
+            let current_block = builder.current_block().unwrap();
+            if !is_block_filled(&builder, current_block) {
+                let bp = builder.use_var(buf_var);
+                for (id, offset) in local_offsets {
+                    if let Some(info) = locals.get(id) {
+                        let val = builder.use_var(info.var);
+                        let val_f64 = ensure_f64(&mut builder, val);
+                        builder.ins().store(MemFlags::new(), val_f64, bp, *offset);
+                    }
+                }
+                // Return 0 (continue)
+                let zero = builder.ins().iconst(types::I32, 0);
+                builder.ins().return_(&[zero]);
+            }
+
+            builder.finalize();
+        }
+
+        if let Err(e) = self.module.define_function(cont_func_id, &mut self.ctx) {
+            eprintln!("[FUNC_SPLIT] Error compiling continuation of '{}': {}", func.name, e);
+            return Err(anyhow!("Error compiling continuation of '{}': {}", func.name, e));
+        }
+        self.module.clear_context(&mut self.ctx);
+        Ok(())
+    }
+
+    /// Compile the main function with only the first chunk, then call continuations.
+    fn compile_main_with_continuations(
+        &mut self,
+        func: &Function,
+        first_chunk: &[Stmt],
+        cont_func_ids: &[cranelift_module::FuncId],
+        local_ids: &[LocalId],
+        local_offsets: &BTreeMap<LocalId, i32>,
+        buf_size: u32,
+        return_flag_offset: i32,
+        return_value_offset: i32,
+    ) -> Result<()> {
+        use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+
+        let func_id = *self.func_ids.get(&func.id)
+            .ok_or_else(|| anyhow!("Function not declared: {}", func.name))?;
+
+        self.ctx.func.signature.params.clear();
+        self.ctx.func.signature.returns.clear();
+        // Add parameters with their ABI types
+        let param_abi_types: Vec<types::Type> = func.params.iter()
+            .map(|p| self.type_to_abi(&p.ty))
+            .collect();
+        for abi_type in &param_abi_types {
+            self.ctx.func.signature.params.push(AbiParam::new(*abi_type));
+        }
+        let return_abi = self.type_to_abi(&func.return_type);
+        self.ctx.func.signature.returns.push(AbiParam::new(return_abi));
+
+        let boxed_vars = self.collect_mutable_captures_from_stmts(first_chunk);
+        let mut func_build_ctx = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut func_build_ctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            // Allocate locals buffer on the stack
+            let buf_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot, buf_size, 8,
+            ));
+            let buf_ptr = builder.ins().stack_addr(types::I64, buf_slot, 0);
+
+            // Zero-initialize the buffer
+            // (Perry runtime expects all values to start as 0.0/null)
+            for i in 0..(buf_size / 8) {
+                let zero = builder.ins().f64const(0.0);
+                builder.ins().store(MemFlags::new(), zero, buf_ptr, (i * 8) as i32);
+            }
+
+            // Create local variables for the first chunk
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
+            let mut next_var = 0usize;
+
+            // Store function parameters in the buffer and create local variables
+            for (i, param) in func.params.iter().enumerate() {
+                let var = Variable::new(next_var);
+                next_var += 1;
+                let abi_type = param_abi_types[i];
+                builder.declare_var(var, abi_type);
+                let param_val = builder.block_params(entry)[i];
+                builder.def_var(var, param_val);
+
+                // Store param to buffer for continuations
+                if let Some(&offset) = local_offsets.get(&param.id) {
+                    let val_f64 = ensure_f64(&mut builder, param_val);
+                    builder.ins().store(MemFlags::new(), val_f64, buf_ptr, offset);
+                }
+
+                let is_string = matches!(param.ty, perry_types::Type::String);
+                let is_pointer = abi_type == types::I64;
+                locals.insert(param.id, LocalInfo {
+                    var,
+                    name: Some(param.name.clone()),
+                    class_name: None,
+                    type_args: Vec::new(),
+                    is_pointer,
+                    is_array: matches!(&param.ty, perry_types::Type::Array(_)),
+                    is_string,
+                    is_bigint: matches!(param.ty, perry_types::Type::BigInt),
+                    is_closure: matches!(param.ty, perry_types::Type::Function(_)),
+                    closure_func_id: None,
+                    is_boxed: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false,
+                    is_union: matches!(param.ty, perry_types::Type::Union(_) | perry_types::Type::Any | perry_types::Type::Unknown),
+                    is_mixed_array: false,
+                    is_integer: false, is_integer_array: false, is_i32: false, is_boolean: false,
+                    i32_shadow: None, bounded_by_array: None, bounded_by_constant: None,
+                    scalar_fields: None, squared_cache: None, product_cache: None,
+                    cached_array_ptr: None, const_value: None, hoisted_element_loads: None,
+                    hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
+                });
+            }
+
+            // Store buf_ptr for use in stores
+            let buf_var = Variable::new(next_var);
+            next_var += 1;
+            builder.declare_var(buf_var, types::I64);
+            builder.def_var(buf_var, buf_ptr);
+
+            // Compile the first chunk
+            for stmt in first_chunk {
+                let current_block = builder.current_block().unwrap();
+                if is_block_filled(&builder, current_block) {
+                    break;
+                }
+                compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)
+                    .map_err(|e| anyhow!("In function '{}' (split main): {}", func.name, e))?;
+
+                // Reload module vars
+                if !self.module_var_data_ids.is_empty() {
+                    let cb = builder.current_block().unwrap();
+                    if !is_block_filled(&builder, cb) {
+                        let vars_to_reload: Vec<(Variable, cranelift::prelude::types::Type, cranelift_module::DataId)> = locals.iter()
+                            .filter(|(_, info)| !info.is_boxed && info.module_var_data_id.is_some())
+                            .map(|(_, info)| {
+                                let val = builder.use_var(info.var);
+                                let var_type = builder.func.dfg.value_type(val);
+                                (info.var, var_type, info.module_var_data_id.unwrap())
+                            })
+                            .collect();
+                        for (var, var_type, data_id) in vars_to_reload {
+                            let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, global_val);
+                            let loaded = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                            builder.def_var(var, loaded);
+                        }
+                    }
+                }
+            }
+
+            // Store all locals to the buffer before calling continuations
+            let current_block = builder.current_block().unwrap();
+            if !is_block_filled(&builder, current_block) {
+                let bp = builder.use_var(buf_var);
+                for (id, offset) in local_offsets {
+                    if let Some(info) = locals.get(id) {
+                        let val = builder.use_var(info.var);
+                        let val_f64 = ensure_f64(&mut builder, val);
+                        builder.ins().store(MemFlags::new(), val_f64, bp, *offset);
+                    }
+                }
+
+                // Call each continuation function
+                for &cont_id in cont_func_ids {
+                    let cb = builder.current_block().unwrap();
+                    if is_block_filled(&builder, cb) { break; }
+
+                    let bp = builder.use_var(buf_var);
+                    let cont_ref = self.module.declare_func_in_func(cont_id, builder.func);
+                    let call = builder.ins().call(cont_ref, &[bp]);
+                    let status = builder.inst_results(call)[0];
+
+                    // Check if continuation returned early
+                    let did_return = builder.ins().icmp_imm(IntCC::NotEqual, status, 0);
+                    let return_block = builder.create_block();
+                    let continue_block = builder.create_block();
+                    builder.ins().brif(did_return, return_block, &[], continue_block, &[]);
+
+                    // Return block: load return value from buffer and return
+                    builder.switch_to_block(return_block);
+                    builder.seal_block(return_block);
+                    let bp2 = builder.use_var(buf_var);
+                    let ret_val = builder.ins().load(types::F64, MemFlags::new(), bp2, return_value_offset);
+                    let ret_typed = if return_abi == types::I64 {
+                        ensure_i64(&mut builder, ret_val)
+                    } else if return_abi == types::I32 {
+                        let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, ret_val);
+                        builder.ins().ireduce(types::I32, i64_val)
+                    } else {
+                        ret_val
+                    };
+                    builder.ins().return_(&[ret_typed]);
+
+                    // Continue block
+                    builder.switch_to_block(continue_block);
+                    builder.seal_block(continue_block);
+                }
+
+                // Default return (after all continuations)
+                let cb = builder.current_block().unwrap();
+                if !is_block_filled(&builder, cb) {
+                    // Load locals back from buffer (in case continuations modified them)
+                    let bp = builder.use_var(buf_var);
+                    for (id, offset) in local_offsets {
+                        if let Some(info) = locals.get(id) {
+                            let cur_val = builder.use_var(info.var);
+                            let val_type = builder.func.dfg.value_type(cur_val);
+                            let loaded = builder.ins().load(types::F64, MemFlags::new(), bp, *offset);
+                            let typed = if val_type == types::I64 {
+                                ensure_i64(&mut builder, loaded)
+                            } else {
+                                loaded
+                            };
+                            builder.def_var(info.var, typed);
+                        }
+                    }
+
+                    let zero = match return_abi {
+                        types::I64 => builder.ins().iconst(types::I64, 0),
+                        types::I32 => builder.ins().iconst(types::I32, 0),
+                        _ => builder.ins().f64const(0.0),
+                    };
+                    builder.ins().return_(&[zero]);
+                }
+            }
+
+            builder.finalize();
+        }
+
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("[FUNC_SPLIT] Error compiling main of '{}': {}", func.name, e);
+            // Fall back to normal compilation
+            self.module.clear_context(&mut self.ctx);
+            eprintln!("[FUNC_SPLIT] Falling back to monolithic compilation for '{}'", func.name);
+            return self.compile_function_inner(func);
+        }
+        self.module.clear_context(&mut self.ctx);
         Ok(())
     }
 
