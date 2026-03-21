@@ -55,10 +55,18 @@ pub fn run(args: SetupArgs) -> Result<()> {
     save_config(&saved)?;
     println!();
     println!(
-        "  {} Configuration saved to {}",
+        "  {} Global credentials saved to {}",
         style("✓").green().bold(),
         style(config_path().display()).dim()
     );
+    let perry_toml = std::env::current_dir().unwrap_or_default().join("perry.toml");
+    if perry_toml.exists() {
+        println!(
+            "  {} Project config saved to {}",
+            style("✓").green().bold(),
+            style(perry_toml.display()).dim()
+        );
+    }
     println!();
     Ok(())
 }
@@ -343,10 +351,9 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     let bundle_id = if perry_toml_path.exists() {
         let content = std::fs::read_to_string(&perry_toml_path)?;
         let parsed: toml::Value = toml::from_str(&content)?;
-        parsed.get("project")
-            .and_then(|p| p.get("bundle_id"))
-            .and_then(|v| v.as_str())
-            .or_else(|| parsed.get("ios").and_then(|i| i.get("bundle_id")).and_then(|v| v.as_str()))
+        parsed.get("ios").and_then(|i| i.get("bundle_id")).and_then(|v| v.as_str())
+            .or_else(|| parsed.get("app").and_then(|a| a.get("bundle_id")).and_then(|v| v.as_str()))
+            .or_else(|| parsed.get("project").and_then(|p| p.get("bundle_id")).and_then(|v| v.as_str()))
             .map(|s| s.to_string())
     } else {
         None
@@ -441,9 +448,8 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
             let app_name = if perry_toml_path.exists() {
                 let content = std::fs::read_to_string(&perry_toml_path)?;
                 let parsed: toml::Value = toml::from_str(&content)?;
-                parsed.get("project")
-                    .and_then(|p| p.get("name"))
-                    .and_then(|v| v.as_str())
+                parsed.get("app").and_then(|a| a.get("name")).and_then(|v| v.as_str())
+                    .or_else(|| parsed.get("project").and_then(|p| p.get("name")).and_then(|v| v.as_str()))
                     .map(|s| s.to_string())
             } else {
                 None
@@ -563,6 +569,69 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     };
 
     let mut created_signing_identity: Option<String> = None;
+
+    // If reusing existing cert, auto-detect signing identity from Keychain
+    // so we can save it to perry.toml (otherwise `perry publish` will prompt for it)
+    if existing_cert_id.is_some() {
+        // Check if perry.toml already has a signing_identity
+        let existing_identity = if perry_toml_path.exists() {
+            let content = std::fs::read_to_string(&perry_toml_path).unwrap_or_default();
+            let parsed: toml::Value = toml::from_str(&content).unwrap_or(toml::Value::Table(toml::Table::new()));
+            parsed.get("ios")
+                .and_then(|i| i.get("signing_identity"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        if let Some(id) = existing_identity {
+            println!("  Signing identity from perry.toml: {}", style(&id).bold());
+            created_signing_identity = Some(id);
+        } else {
+            // Try to detect from Keychain
+            let output = Command::new("security")
+                .args(["find-identity", "-v", "-p", "codesigning"])
+                .output();
+            if let Ok(output) = output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut identities: Vec<String> = Vec::new();
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if !line.starts_with(|c: char| c.is_ascii_digit()) { continue; }
+                    if let Some(quote_start) = line.find('"') {
+                        if let Some(quote_end) = line.rfind('"') {
+                            if quote_end > quote_start {
+                                let name = line[quote_start + 1..quote_end].to_string();
+                                if name.contains("Distribution") || name.contains("Developer ID") {
+                                    identities.push(name);
+                                }
+                            }
+                        }
+                    }
+                }
+                if identities.len() == 1 {
+                    println!("  Detected signing identity: {}", style(&identities[0]).bold());
+                    created_signing_identity = Some(identities[0].clone());
+                } else if identities.len() > 1 {
+                    // Filter for "Apple Distribution" for iOS
+                    let dist: Vec<&String> = identities.iter().filter(|n| n.starts_with("Apple Distribution")).collect();
+                    if dist.len() == 1 {
+                        println!("  Detected signing identity: {}", style(dist[0]).bold());
+                        created_signing_identity = Some(dist[0].clone());
+                    } else {
+                        let labels: Vec<&str> = identities.iter().map(|s| s.as_str()).collect();
+                        let selection = Select::new()
+                            .with_prompt("  Select signing identity from Keychain")
+                            .items(&labels)
+                            .default(0)
+                            .interact()?;
+                        created_signing_identity = Some(identities[selection].clone());
+                    }
+                }
+            }
+        }
+    }
+
     let cert_resource_id = if let Some(id) = existing_cert_id {
         id
     } else {
