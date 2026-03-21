@@ -109,6 +109,17 @@ where
     });
 }
 
+/// Register js_stdlib_process_pending with perry-runtime's pump so that
+/// perry-ui-macos can call it without a hard link dependency on perry-stdlib.
+fn ensure_pump_registered() {
+    use std::sync::Once;
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        extern "C" { fn js_register_stdlib_pump(f: extern "C" fn() -> i32); }
+        unsafe { js_register_stdlib_pump(js_stdlib_process_pending); }
+    });
+}
+
 /// Process all pending promise resolutions
 ///
 /// This should be called from the main event loop to process async completions.
@@ -198,6 +209,7 @@ pub unsafe fn spawn_for_promise<F>(promise_ptr: *mut u8, future: F)
 where
     F: Future<Output = Result<u64, String>> + Send + 'static,
 {
+    ensure_pump_registered();
     let ptr = promise_ptr as usize; // Convert to usize for Send
 
     RUNTIME.spawn(async move {
@@ -248,6 +260,7 @@ where
     F: Future<Output = Result<T, String>> + Send + 'static,
     C: FnOnce(T) -> u64 + Send + 'static,
 {
+    ensure_pump_registered();
     let ptr = promise_ptr as usize;
 
     RUNTIME.spawn(async move {

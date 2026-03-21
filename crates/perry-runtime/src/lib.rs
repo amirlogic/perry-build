@@ -75,6 +75,35 @@ pub use array::{js_array_push_f64};
 pub use object::js_object_set_field_by_name;
 pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value};
 
+// Stdlib pump registration — allows perry-ui-macos pump timer to call
+// js_stdlib_process_pending without a hard link dependency on perry-stdlib.
+mod stdlib_pump {
+    use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::ptr::null_mut;
+
+    static STDLIB_PUMP_FN: AtomicPtr<()> = AtomicPtr::new(null_mut());
+
+    /// Register the stdlib's process_pending function pointer.
+    /// Called by perry-stdlib during initialization.
+    #[no_mangle]
+    pub extern "C" fn js_register_stdlib_pump(f: extern "C" fn() -> i32) {
+        STDLIB_PUMP_FN.store(f as *mut (), Ordering::Release);
+    }
+
+    /// Run the registered stdlib pump if available. Safe to call even if perry-stdlib
+    /// is not linked (no-op in that case).
+    #[no_mangle]
+    pub extern "C" fn js_run_stdlib_pump() {
+        let f = STDLIB_PUMP_FN.load(Ordering::Acquire);
+        if !f.is_null() {
+            unsafe {
+                let func: extern "C" fn() -> i32 = std::mem::transmute(f);
+                func();
+            }
+        }
+    }
+}
+
 // Module init guard for preventing circular dependency stack overflow.
 // Uses a simple bitset in the runtime so Cranelift cannot optimize it away.
 mod init_guard {

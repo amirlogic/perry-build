@@ -3,13 +3,24 @@ use objc2::msg_send;
 use objc2::MainThreadOnly;
 use objc2_app_kit::NSView;
 use objc2_foundation::MainThreadMarker;
+use std::cell::RefCell;
+use std::collections::HashSet;
+
+thread_local! {
+    static ZSTACK_HANDLES: RefCell<HashSet<i64>> = RefCell::new(HashSet::new());
+}
+
+/// Check if a widget handle is a ZStack.
+pub fn is_zstack(handle: i64) -> bool {
+    ZSTACK_HANDLES.with(|h| h.borrow().contains(&handle))
+}
 
 /// Create an overlay (ZStack) container — a plain NSView where children are stacked on top.
 /// Returns widget handle.
 pub fn create() -> i64 {
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
 
-    unsafe {
+    let handle = unsafe {
         let view: Retained<NSView> = msg_send![
             NSView::alloc(mtm), initWithFrame: objc2_core_foundation::CGRect::new(
                 objc2_core_foundation::CGPoint::new(0.0, 0.0),
@@ -18,7 +29,9 @@ pub fn create() -> i64 {
         ];
 
         super::register_widget(view)
-    }
+    };
+    ZSTACK_HANDLES.with(|h| { h.borrow_mut().insert(handle); });
+    handle
 }
 
 /// Add a child to the ZStack pinned to fill the parent bounds using Auto Layout constraints.

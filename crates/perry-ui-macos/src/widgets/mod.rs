@@ -258,6 +258,8 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
             PARENT_MAP.with(|m| {
                 m.borrow_mut().insert(child_handle, (parent_handle, index as usize));
             });
+        } else if zstack::is_zstack(parent_handle) {
+            zstack::add_child(parent_handle, child_handle);
         } else {
             parent.addSubview(&child);
         }
@@ -284,6 +286,8 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
             PARENT_MAP.with(|m| {
                 m.borrow_mut().insert(child_handle, (parent_handle, index));
             });
+        } else if zstack::is_zstack(parent_handle) {
+            zstack::add_child(parent_handle, child_handle);
         } else {
             parent.addSubview(&child);
         }

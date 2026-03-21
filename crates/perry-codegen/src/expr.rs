@@ -6351,6 +6351,98 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle namespace import function calls:
+                    // import * as X from './module'; X.foo(args)
+                    // The scoped wrapper __scoped_wrapper__foo was pre-declared by compile.rs
+                    // but the Call { PropertyGet { ExternFuncRef } } path never looked it up.
+                    if let Some(ns_name) = static_class_name {
+                        if tl_is_namespace_import(ns_name) {
+                            let scoped_key = format!("__scoped_wrapper__{}", property);
+                            if let Some(&scoped_func_id) = extern_funcs.get(&scoped_key) {
+                                // Direct call through the pre-declared scoped wrapper
+                                let func_ref = module.declare_func_in_func(scoped_func_id, builder.func);
+                                let param_count = imported_func_param_counts
+                                    .get(property.as_str()).copied()
+                                    .unwrap_or(arg_vals.len());
+
+                                // Build args: [0_i64 (closure_ptr placeholder), ...args as f64]
+                                let mut call_args = vec![builder.ins().iconst(types::I64, 0)];
+                                for (idx, &arg_val) in arg_vals.iter().enumerate() {
+                                    let t = builder.func.dfg.value_type(arg_val);
+                                    let f = if t == types::I64 {
+                                        let is_bigint = idx < args.len() && (
+                                            matches!(args[idx], Expr::BigInt(_) | Expr::BigIntCoerce(_)) ||
+                                            matches!(&args[idx], Expr::LocalGet(id) if locals.get(id).map(|i| i.is_bigint).unwrap_or(false))
+                                        );
+                                        let tag_fn = if is_bigint { "js_nanbox_bigint" } else { "js_nanbox_pointer" };
+                                        let nf = extern_funcs.get(tag_fn)
+                                            .ok_or_else(|| anyhow!("{} not declared", tag_fn))?;
+                                        let nr = module.declare_func_in_func(*nf, builder.func);
+                                        let c = builder.ins().call(nr, &[arg_val]);
+                                        builder.inst_results(c)[0]
+                                    } else if t == types::I32 {
+                                        builder.ins().fcvt_from_sint(types::F64, arg_val)
+                                    } else {
+                                        arg_val
+                                    };
+                                    call_args.push(f);
+                                }
+                                const NS_TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                while call_args.len() < param_count + 1 {
+                                    call_args.push(builder.ins().f64const(f64::from_bits(NS_TAG_UNDEFINED)));
+                                }
+                                call_args.truncate(param_count + 1);
+
+                                let call = builder.ins().call(func_ref, &call_args);
+                                return Ok(builder.inst_results(call)[0]);
+                            }
+
+                            // No scoped wrapper → exported closure/value, call via closure dispatch
+                            let global_name = tl_scoped_export_name(property);
+                            let data_id = module.declare_data(&global_name, Linkage::Import, true, false)
+                                .map_err(|e| anyhow!("Failed to import namespace property {}.{}: {}", ns_name, property, e))?;
+                            let global_val = module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, global_val);
+                            let closure_f64 = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
+
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let get_ptr_call = builder.ins().call(get_ptr_ref, &[closure_f64]);
+                            let closure_ptr = builder.inst_results(get_ptr_call)[0];
+
+                            let call_func_name_owned;
+                            let call_func_name: &str = match arg_vals.len() {
+                                0 => "js_closure_call0",
+                                1 => "js_closure_call1",
+                                2 => "js_closure_call2",
+                                3 => "js_closure_call3",
+                                4 => "js_closure_call4",
+                                5 => "js_closure_call5",
+                                6 => "js_closure_call6",
+                                7 => "js_closure_call7",
+                                8 => "js_closure_call8",
+                                n @ 9..=16 => {
+                                    call_func_name_owned = format!("js_closure_call{}", n);
+                                    &call_func_name_owned
+                                }
+                                n => return Err(anyhow!("Namespace closure calls with {} arguments not supported (max 16)", n)),
+                            };
+
+                            let call_func = extern_funcs.get(call_func_name)
+                                .ok_or_else(|| anyhow!("{} not declared", call_func_name))?;
+                            let call_ref = module.declare_func_in_func(*call_func, builder.func);
+
+                            let mut closure_call_args = vec![closure_ptr];
+                            for &arg_val in arg_vals.iter() {
+                                closure_call_args.push(ensure_f64(builder, arg_val));
+                            }
+
+                            let closure_call = builder.ins().call(call_ref, &closure_call_args);
+                            return Ok(builder.inst_results(closure_call)[0]);
+                        }
+                    }
+
                     // Handle array mutation methods on property access (e.g., this.items.push(value))
                     // These methods return the new array pointer and need to update the property
                     if matches!(property.as_str(), "push" | "unshift") {

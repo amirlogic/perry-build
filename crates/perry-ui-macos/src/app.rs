@@ -604,9 +604,8 @@ define_class!(
 // ============================================
 
 // Separate target class for the run loop pump timer.
-// Only calls timer tick functions from perry-runtime (always linked).
-// Does NOT call js_stdlib_process_pending (which may not be linked in
-// pure UI apps that don't use --enable-js-runtime).
+// Calls timer tick functions from perry-runtime (always linked) and optionally
+// runs the stdlib pump (registered at init if perry-stdlib is linked).
 pub struct PerryPumpTargetIvars;
 
 define_class!(
@@ -619,10 +618,14 @@ define_class!(
         #[unsafe(method(pump:))]
         fn pump(&self, _sender: &AnyObject) {
             crate::catch_callback_panic("pump", std::panic::AssertUnwindSafe(|| {
+                extern "C" { fn js_run_stdlib_pump(); }
                 unsafe {
                     js_callback_timer_tick();
                     js_interval_timer_tick();
                     js_promise_run_microtasks();
+                    // Process deferred promise resolutions from perry-stdlib tokio workers.
+                    // No-op if perry-stdlib is not linked (function pointer not registered).
+                    js_run_stdlib_pump();
                     #[cfg(feature = "geisterhand")]
                     {
                         extern "C" { fn perry_geisterhand_pump(); }

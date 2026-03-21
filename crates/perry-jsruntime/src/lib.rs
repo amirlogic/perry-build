@@ -59,10 +59,10 @@ impl JsRuntimeState {
             ..Default::default()
         });
 
-        // Set a very low stack limit to give V8 plenty of stack space.
-        // Perry's native code can have deep call stacks during module init,
-        // and V8 uses the same thread stack. By setting the limit low, we tell
-        // V8 it has much more stack available.
+        // Set V8 stack limit based on actual thread stack bounds.
+        // Previously set to 0x10000 which disabled V8's stack overflow detection entirely,
+        // causing SIGBUS on arm64 when deep call chains (module init → async → V8 eval)
+        // overflowed past the stack guard page.
         //
         // The Rust v8 bindings (v8 0.106) don't expose Isolate::SetStackLimit,
         // so we call the C++ function directly via its Itanium ABI mangled name.
@@ -73,9 +73,26 @@ impl JsRuntimeState {
             }
             let isolate: &mut deno_core::v8::Isolate = runtime.v8_isolate();
             let isolate_ptr: *mut std::ffi::c_void = (isolate as *mut deno_core::v8::Isolate).cast();
-            // Set stack limit to near the bottom of the address space (0x10000)
-            // so V8 thinks it has the full thread stack available
-            unsafe { v8_isolate_set_stack_limit(isolate_ptr, 0x10000); }
+
+            // Compute stack limit from actual thread stack bounds
+            #[cfg(target_os = "macos")]
+            let stack_limit = {
+                extern "C" {
+                    fn pthread_self() -> *mut std::ffi::c_void;
+                    fn pthread_get_stackaddr_np(thread: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+                    fn pthread_get_stacksize_np(thread: *mut std::ffi::c_void) -> usize;
+                }
+                let thread = unsafe { pthread_self() };
+                let stack_addr = unsafe { pthread_get_stackaddr_np(thread) } as usize;
+                let stack_size = unsafe { pthread_get_stacksize_np(thread) };
+                let stack_bottom = stack_addr - stack_size;
+                // Reserve 64KB above stack bottom as safety margin for V8's stack check
+                stack_bottom + 64 * 1024
+            };
+            #[cfg(not(target_os = "macos"))]
+            let stack_limit: usize = 0x10000;
+
+            unsafe { v8_isolate_set_stack_limit(isolate_ptr, stack_limit); }
         }
 
         // Set up Node.js global polyfills before any modules are loaded

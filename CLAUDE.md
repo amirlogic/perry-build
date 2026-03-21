@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.198
+**Current Version:** 0.2.199
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.199
+- **Fix `import * as X` namespace function calls**: `X.foo()` on namespace imports fell through to `js_native_call_method` fallback instead of using pre-declared scoped wrappers — intercept in `Call { PropertyGet { ExternFuncRef } }` path after class static method check; also handles exported closures via `js_closure_callN` fallback
+- **Fix ScrollView invisible inside ZStack**: ZStack's `add_child` (constraint-based) was dead code — `widgets::add_child` now detects ZStack parents via handle tracking and routes to `zstack::add_child`; also set `translatesAutoresizingMaskIntoConstraints: false` on NSScrollView for proper Auto Layout
+- **Fix SIGBUS during module init with JS runtime async calls**: V8 `SetStackLimit(0x10000)` disabled stack overflow detection — now computes proper limit from `pthread_get_stackaddr_np`; added `js_run_stdlib_pump()` to UI pump timer via function pointer registration so async promise resolutions fire without explicit setTimeout
+- **Fix regex test assertions + fastify URL query stripping**: `js_regexp_test` returns i32 not bool; `FastifyContext` stored full URL with query string instead of path-only
 
 ### v0.2.198
 - **Widget: full iOS + Android + watchOS + Wear OS support**: WidgetDecl extended with `config_params` (AppIntent), `provider_func_name` (native Cranelift provider), `placeholder`, `family_param_name` (family-specific rendering), `app_group` (shared storage), `reload_after_seconds`; new WidgetNode variants: ForEach, Divider, Label, FamilySwitch, Gauge (watchOS); new WidgetModifier variants: MinimumScaleFactor, ContainerBackground, FrameMaxWidth, WidgetURL, PaddingEdge; WidgetFieldType extended with Array/Optional/Object for nested entry structs; new `perry-codegen-glance` crate (Android Glance widgets: GlanceAppWidget, Receiver, ConfigActivity, widget_info XML, manifest snippet); new `perry-codegen-wear-tiles` crate (Wear OS Tiles: TileService, JNI bridge, manifest); SwiftUI codegen enhanced with AppIntentConfiguration, native provider glue (FFI bridge), nested Codable structs, Gauge emission, family switch; 4 new compile targets: `--target watchos-widget`, `--target android-widget`, `--target wearos-tile`, `--target watchos-widget-simulator`; lowering: parse `config`, `provider`, `placeholder`, `appGroup` properties, family-switch detection from if/else on family param, ForEach/Label/Gauge/Divider node parsing, recursive WidgetFieldType parsing (arrays, optionals, nested objects)

@@ -51,6 +51,12 @@ pub fn create() -> i64 {
     scroll.setHasVerticalScroller(true);
     scroll.setAutohidesScrollers(true);
     scroll.setDrawsBackground(false);
+    // Disable autoresizing mask so Auto Layout constraints work when inside ZStack or other
+    // constraint-based containers. Without this, the autoresizing mask conflicts with explicit
+    // constraints, causing the scroll view to have zero size.
+    unsafe {
+        let _: () = msg_send![&*scroll, setTranslatesAutoresizingMaskIntoConstraints: false];
+    }
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(scroll) };
     super::register_widget(view)
 }
