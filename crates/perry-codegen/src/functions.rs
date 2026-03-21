@@ -187,7 +187,7 @@ impl crate::codegen::Compiler {
     /// Maximum top-level statements before a function is split.
     /// Cranelift generates incorrect machine code for very large functions
     /// (>3MB compiled code) on Windows.
-    const LARGE_FUNC_THRESHOLD: usize = 50;
+    const LARGE_FUNC_THRESHOLD: usize = 65;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -781,7 +781,7 @@ impl crate::codegen::Compiler {
         let num_chunks = (total_stmts + chunk_size - 1) / chunk_size;
 
         // Don't split degenerate cases
-        if num_chunks <= 1 || (total_stmts - (num_chunks - 1) * chunk_size) < 5 {
+        if num_chunks <= 1 {
             return self.compile_function_inner(func);
         }
 
@@ -811,6 +811,48 @@ impl crate::codegen::Compiler {
                 desc.define_zeroinit(8);
                 self.module.define_data(data_id, &desc)?;
                 all_slots.push((*id, data_id));
+            }
+        }
+
+        // Build type info map for cross-chunk variable pre-creation
+        use perry_types::Type as HirType;
+        let mut local_type_info: BTreeMap<perry_types::LocalId, SplitLocalInfo> = BTreeMap::new();
+        for param in &func.params {
+            let (abi_type, is_pointer, is_string, is_union) = {
+                let is_s = matches!(param.ty, HirType::String);
+                let is_p = matches!(&param.ty, HirType::String | HirType::Array(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
+                let is_u = matches!(&param.ty, HirType::Union(_) | HirType::Any | HirType::Unknown);
+                let abi = if is_p && !is_u { types::I64 } else { types::F64 };
+                (abi, is_p, is_s, is_u)
+            };
+            local_type_info.insert(param.id, SplitLocalInfo {
+                abi_type, is_pointer, is_string, is_union,
+                is_array: matches!(&param.ty, HirType::Array(_)),
+                is_bigint: matches!(param.ty, HirType::BigInt),
+                is_closure: matches!(param.ty, HirType::Function(_)),
+                is_map: matches!(&param.ty, HirType::Generic { base, .. } if base == "Map"),
+                is_set: matches!(&param.ty, HirType::Generic { base, .. } if base == "Set"),
+                name: Some(param.name.clone()),
+            });
+        }
+        for stmt in &func.body {
+            if let Stmt::Let { id, ty, name, .. } = stmt {
+                let (abi_type, is_pointer, is_string, is_union) = {
+                    let is_s = matches!(ty, HirType::String);
+                    let is_p = matches!(ty, HirType::String | HirType::Array(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
+                    let is_u = matches!(ty, HirType::Union(_) | HirType::Any | HirType::Unknown);
+                    let abi = if is_p && !is_u { types::I64 } else { types::F64 };
+                    (abi, is_p, is_s, is_u)
+                };
+                local_type_info.insert(*id, SplitLocalInfo {
+                    abi_type, is_pointer, is_string, is_union,
+                    is_array: matches!(ty, HirType::Array(_)),
+                    is_bigint: matches!(ty, HirType::BigInt),
+                    is_closure: matches!(ty, HirType::Function(_)),
+                    is_map: matches!(ty, HirType::Generic { base, .. } if base == "Map"),
+                    is_set: matches!(ty, HirType::Generic { base, .. } if base == "Set"),
+                    name: Some(name.clone()),
+                });
             }
         }
 
@@ -856,28 +898,42 @@ impl crate::codegen::Compiler {
                     .filter_map(|s| if let Stmt::Let { id, .. } = s { Some(*id) } else { None })
                     .collect();
 
-                // Pre-create variables for locals from OTHER chunks, loaded from globals
+                // Pre-create variables for locals from OTHER chunks, loaded from globals.
+                // Use SplitLocalInfo to preserve the correct type flags.
                 for (local_id, data_id) in &all_slots {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Will be created by compile_stmt with correct type
                     }
+                    let ti = local_type_info.get(local_id);
+                    let var_type = ti.map(|t| t.abi_type).unwrap_or(types::F64);
                     let var = Variable::new(next_var);
                     next_var += 1;
-                    builder.declare_var(var, types::F64);
+                    builder.declare_var(var, var_type);
 
+                    // Load from global. Globals store raw values (i64 for pointers,
+                    // f64 for numbers). Load with the correct type.
                     let gv = self.module.declare_data_in_func(*data_id, builder.func);
                     let ptr = builder.ins().global_value(types::I64, gv);
-                    let val = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
+                    let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                     builder.def_var(var, val);
 
+                    let is_str = ti.map(|t| t.is_string).unwrap_or(false);
+                    let is_ptr = ti.map(|t| t.is_pointer).unwrap_or(false);
+                    let is_uni = ti.map(|t| t.is_union).unwrap_or(true);
                     locals.insert(*local_id, LocalInfo {
                         var,
-                        name: None, class_name: None, type_args: Vec::new(),
-                        is_pointer: false, is_array: false, is_string: false,
-                        is_bigint: false, is_closure: false, closure_func_id: None,
-                        is_boxed: false, is_map: false, is_set: false,
+                        name: ti.and_then(|t| t.name.clone()), class_name: None, type_args: Vec::new(),
+                        is_pointer: is_ptr,
+                        is_array: ti.map(|t| t.is_array).unwrap_or(false),
+                        is_string: is_str,
+                        is_bigint: ti.map(|t| t.is_bigint).unwrap_or(false),
+                        is_closure: ti.map(|t| t.is_closure).unwrap_or(false),
+                        closure_func_id: None,
+                        is_boxed: false,
+                        is_map: ti.map(|t| t.is_map).unwrap_or(false),
+                        is_set: ti.map(|t| t.is_set).unwrap_or(false),
                         is_buffer: false, is_event_emitter: false,
-                        is_union: true,
+                        is_union: is_uni,
                         is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, is_boolean: false,
                         i32_shadow: None, bounded_by_array: None,
@@ -972,6 +1028,7 @@ impl crate::codegen::Compiler {
             // Call each chunk function. If a chunk returns a non-sentinel
             // value (i.e., it hit a `return` statement), propagate that value.
             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+            // Call only the first chunk, skip rest (debug: isolate crash to chunk mechanism)
             for &chunk_id in &chunk_func_ids {
                 let cb = builder.current_block().unwrap();
                 if is_block_filled(&builder, cb) { break; }
