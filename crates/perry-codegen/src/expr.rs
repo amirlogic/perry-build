@@ -6266,8 +6266,9 @@ pub(crate) fn compile_expr(
                                 let expected_type = actual_sig.signature.params[i].value_type;
                                 let actual_type = builder.func.dfg.value_type(val);
                                 if expected_type == types::I64 && actual_type == types::F64 {
-                                    // Strip NaN-box tag bits to get raw pointer
-                                    ensure_i64(builder, val)
+                                    // Extract raw pointer from NaN-boxed f64
+                                    // (mask lower 48 bits to strip the NaN tag)
+                                    inline_get_string_pointer(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
                                     // i64 pointer -> f64: NaN-box with POINTER_TAG, not just bitcast
                                     // Raw bitcast would produce tiny denormalized floats instead of proper NaN-boxed values
@@ -12497,8 +12498,9 @@ pub(crate) fn compile_expr(
                                 let expected_type = actual_sig.signature.params[i].value_type;
                                 let actual_type = builder.func.dfg.value_type(val);
                                 if expected_type == types::I64 && actual_type == types::F64 {
-                                    // Strip NaN-box tag bits to get raw pointer
-                                    ensure_i64(builder, val)
+                                    // Extract raw pointer from NaN-boxed f64
+                                    // (mask lower 48 bits to strip the NaN tag)
+                                    inline_get_string_pointer(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
                                     // i64 pointer -> f64: NaN-box with POINTER_TAG
                                     inline_nanbox_pointer(builder, val)

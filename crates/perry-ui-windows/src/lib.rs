@@ -1,4 +1,67 @@
 pub mod app;
+
+// Install a vectored exception handler that prints crash info to stderr.
+#[cfg(target_os = "windows")]
+mod crash_handler {
+    #[repr(C)]
+    struct ExceptionRecord {
+        exception_code: u32,
+        exception_flags: u32,
+        exception_record: *mut ExceptionRecord,
+        exception_address: *mut core::ffi::c_void,
+        number_parameters: u32,
+        exception_information: [usize; 15],
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct Context {
+        _padding: [u8; 0x78], // offset to Rip on x64
+        Rip: u64,
+    }
+
+    #[repr(C)]
+    struct ExceptionPointers {
+        exception_record: *mut ExceptionRecord,
+        context_record: *mut Context,
+    }
+
+    extern "system" {
+        fn AddVectoredExceptionHandler(
+            first: u32,
+            handler: unsafe extern "system" fn(*mut ExceptionPointers) -> i32,
+        ) -> *mut core::ffi::c_void;
+    }
+
+    unsafe extern "system" fn handler(info: *mut ExceptionPointers) -> i32 {
+        let info = &*info;
+        let record = &*info.exception_record;
+        // 0xC0000005 = ACCESS_VIOLATION
+        if record.exception_code == 0xC0000005 {
+            let addr = if record.number_parameters >= 2 {
+                record.exception_information[1]
+            } else {
+                0
+            };
+            let rip = record.exception_address as usize;
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(),
+                "[CRASH] ACCESS_VIOLATION at code=0x{:X} accessing 0x{:X}",
+                rip, addr);
+            let _ = std::io::stderr().flush();
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH
+    }
+
+    #[used]
+    #[link_section = ".CRT$XCU"]
+    static INSTALL_HANDLER: unsafe extern "C" fn() = {
+        unsafe extern "C" fn install() {
+            AddVectoredExceptionHandler(1, handler);
+        }
+        install
+    };
+}
 pub mod clipboard;
 pub mod dialog;
 pub mod file_dialog;
