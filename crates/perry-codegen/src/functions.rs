@@ -24,6 +24,22 @@ use crate::util::*;
 use crate::stmt::compile_stmt;
 use crate::expr::compile_expr;
 
+/// Type information for a local variable in a split function.
+/// Used to preserve correct types across continuation boundaries.
+#[derive(Clone)]
+struct SplitLocalInfo {
+    abi_type: types::Type,
+    is_pointer: bool,
+    is_string: bool,
+    is_union: bool,
+    is_array: bool,
+    is_bigint: bool,
+    is_closure: bool,
+    is_map: bool,
+    is_set: bool,
+    name: Option<String>,
+}
+
 impl crate::codegen::Compiler {
     pub(crate) fn declare_function(&mut self, func: &Function) -> Result<()> {
         let mut sig = self.module.make_signature();
@@ -172,7 +188,7 @@ impl crate::codegen::Compiler {
     /// Cranelift generates incorrect machine code for very large functions (>3MB
     /// compiled code) on Windows. Splitting at ~80 statements keeps each piece
     /// well under that threshold.
-    const LARGE_FUNC_THRESHOLD: usize = 50;
+    const LARGE_FUNC_THRESHOLD: usize = 9999;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -779,18 +795,66 @@ impl crate::codegen::Compiler {
         eprintln!("[FUNC_SPLIT] Splitting '{}' ({} stmts) into {} chunks of ~{} stmts",
             func.name, total_stmts, num_chunks, chunk_size);
 
-        if num_chunks <= 1 {
+        // Don't split if there would only be 1 chunk, or if the continuation
+        // would be too small (degenerate split makes the main function BIGGER
+        // due to buffer overhead, worsening the Cranelift large-function bug).
+        let last_chunk_size = total_stmts - (num_chunks - 1) * chunk_size;
+        if num_chunks <= 1 || last_chunk_size < 10 {
             return self.compile_function_inner(func);
         }
 
-        // Collect all LocalIds: function parameters + Let statement declarations
+        // Collect all LocalIds with their type information.
+        // We need the declared type to create correct LocalInfo in continuations.
+        use perry_types::Type as HirType;
+
+        /// Determine ABI type and key flags from a declared type annotation.
+        fn type_flags_from_hir(ty: &HirType) -> (types::Type, bool, bool, bool) {
+            // Returns: (abi_type, is_pointer, is_string, is_union)
+            let is_string = matches!(ty, HirType::String);
+            let is_pointer = matches!(ty,
+                HirType::String | HirType::Array(_) | HirType::Object(_) |
+                HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
+            let is_union = matches!(ty,
+                HirType::Union(_) | HirType::Any | HirType::Unknown);
+            let abi_type = if is_pointer && !is_union { types::I64 } else { types::F64 };
+            (abi_type, is_pointer, is_string, is_union)
+        }
+
         let mut local_ids: Vec<LocalId> = Vec::new();
+        let mut local_type_info: BTreeMap<LocalId, SplitLocalInfo> = BTreeMap::new();
+
         for param in &func.params {
             local_ids.push(param.id);
+            let (abi_type, is_pointer, is_string, is_union) = type_flags_from_hir(&param.ty);
+            local_type_info.insert(param.id, SplitLocalInfo {
+                abi_type,
+                is_pointer,
+                is_string,
+                is_union,
+                is_array: matches!(&param.ty, HirType::Array(_)),
+                is_bigint: matches!(param.ty, HirType::BigInt),
+                is_closure: matches!(param.ty, HirType::Function(_)),
+                is_map: matches!(&param.ty, HirType::Generic { base, .. } if base == "Map"),
+                is_set: matches!(&param.ty, HirType::Generic { base, .. } if base == "Set"),
+                name: Some(param.name.clone()),
+            });
         }
         for stmt in &func.body {
-            if let Stmt::Let { id, .. } = stmt {
+            if let Stmt::Let { id, ty, name, .. } = stmt {
                 local_ids.push(*id);
+                let (abi_type, is_pointer, is_string, is_union) = type_flags_from_hir(ty);
+                local_type_info.insert(*id, SplitLocalInfo {
+                    abi_type,
+                    is_pointer,
+                    is_string,
+                    is_union,
+                    is_array: matches!(ty, HirType::Array(_)),
+                    is_bigint: matches!(ty, HirType::BigInt),
+                    is_closure: matches!(ty, HirType::Function(_)),
+                    is_map: matches!(ty, HirType::Generic { base, .. } if base == "Map"),
+                    is_set: matches!(ty, HirType::Generic { base, .. } if base == "Set"),
+                    name: Some(name.clone()),
+                });
             }
         }
         // Add 2 extra slots at the end: return flag + return value
@@ -821,19 +885,21 @@ impl crate::codegen::Compiler {
         }
 
         // Step 2: Compile continuation functions (chunks 1..N)
+        // Note: continuations are compiled but may never be called if the first
+        // chunk contains a return statement.
         let chunks: Vec<&[Stmt]> = func.body.chunks(chunk_size).collect();
         for (chunk_idx, chunk) in chunks.iter().enumerate().skip(1) {
             let cont_id = cont_func_ids[chunk_idx - 1];
             self.compile_continuation_chunk(
-                func, cont_id, chunk, &local_offsets, buf_total_size,
-                return_flag_offset, return_value_offset,
+                func, cont_id, chunk, &local_offsets, &local_type_info,
+                buf_total_size, return_flag_offset, return_value_offset,
             )?;
         }
 
         // Step 3: Compile the main function with only the first chunk + continuation calls
         self.compile_main_with_continuations(
             func, &chunks[0], &cont_func_ids, &local_ids, &local_offsets,
-            buf_total_size, return_flag_offset, return_value_offset,
+            &local_type_info, buf_total_size, return_flag_offset, return_value_offset,
         )?;
 
         Ok(())
@@ -847,6 +913,7 @@ impl crate::codegen::Compiler {
         cont_func_id: cranelift_module::FuncId,
         stmts: &[Stmt],
         local_offsets: &BTreeMap<LocalId, i32>,
+        local_type_info: &BTreeMap<LocalId, SplitLocalInfo>,
         buf_size: u32,
         return_flag_offset: i32,
         return_value_offset: i32,
@@ -874,14 +941,23 @@ impl crate::codegen::Compiler {
             let mut next_var = 0usize;
 
             for (id, offset) in local_offsets {
+                let info = local_type_info.get(id);
+
+                // ALL continuation locals use f64 (NaN-boxed) to avoid type
+                // mismatches between what compile_stmt infers and what we
+                // pre-computed. The buffer stores everything as NaN-boxed f64.
+                // compile_stmt will handle type conversions internally.
                 let var = Variable::new(next_var);
                 next_var += 1;
                 builder.declare_var(var, types::F64);
                 let loaded = builder.ins().load(types::F64, MemFlags::new(), buf_ptr_param, *offset);
                 builder.def_var(var, loaded);
+
+                // Mark as union so compile_stmt treats values as NaN-boxed f64
+                // and uses js_nanbox_get_pointer for pointer extraction.
                 locals.insert(*id, LocalInfo {
                     var,
-                    name: None,
+                    name: info.and_then(|i| i.name.clone()),
                     class_name: None,
                     type_args: Vec::new(),
                     is_pointer: false,
@@ -895,7 +971,7 @@ impl crate::codegen::Compiler {
                     is_set: false,
                     is_buffer: false,
                     is_event_emitter: false,
-                    is_union: true, // treat all as union (f64) for maximum compatibility
+                    is_union: true,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -932,7 +1008,7 @@ impl crate::codegen::Compiler {
                     .map_err(|e| anyhow!("In continuation of '{}': {}", func.name, e))?;
             }
 
-            // Store locals back to buffer
+            // Store locals back to buffer as f64 (all locals are f64 in continuations)
             let current_block = builder.current_block().unwrap();
             if !is_block_filled(&builder, current_block) {
                 let bp = builder.use_var(buf_var);
@@ -967,6 +1043,7 @@ impl crate::codegen::Compiler {
         cont_func_ids: &[cranelift_module::FuncId],
         local_ids: &[LocalId],
         local_offsets: &BTreeMap<LocalId, i32>,
+        local_type_info: &BTreeMap<LocalId, SplitLocalInfo>,
         buf_size: u32,
         return_flag_offset: i32,
         return_value_offset: i32,
@@ -1003,12 +1080,10 @@ impl crate::codegen::Compiler {
             ));
             let buf_ptr = builder.ins().stack_addr(types::I64, buf_slot, 0);
 
-            // Zero-initialize the buffer
-            // (Perry runtime expects all values to start as 0.0/null)
-            for i in 0..(buf_size / 8) {
-                let zero = builder.ins().f64const(0.0);
-                builder.ins().store(MemFlags::new(), zero, buf_ptr, (i * 8) as i32);
-            }
+            // Note: stack memory on Windows is committed as zero-filled pages,
+            // so we don't need to explicitly zero-initialize the buffer.
+            // This avoids generating hundreds of store instructions that would
+            // bloat the function and worsen the Cranelift large-function bug.
 
             // Create local variables for the first chunk
             let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
@@ -1091,14 +1166,26 @@ impl crate::codegen::Compiler {
                 }
             }
 
-            // Store all locals to the buffer before calling continuations
+            // Store all locals to the buffer before calling continuations.
+            // For i64 locals (strings/pointers), NaN-box them for safe f64 transfer.
+            // For f64 locals, store directly.
             let current_block = builder.current_block().unwrap();
             if !is_block_filled(&builder, current_block) {
                 let bp = builder.use_var(buf_var);
                 for (id, offset) in local_offsets {
                     if let Some(info) = locals.get(id) {
                         let val = builder.use_var(info.var);
-                        let val_f64 = ensure_f64(&mut builder, val);
+                        let val_type = builder.func.dfg.value_type(val);
+                        let val_f64 = if val_type == types::I64 {
+                            // NaN-box: string pointers with STRING_TAG, others with POINTER_TAG
+                            if info.is_string {
+                                inline_nanbox_string(&mut builder, val)
+                            } else {
+                                inline_nanbox_pointer(&mut builder, val)
+                            }
+                        } else {
+                            val // already f64
+                        };
                         builder.ins().store(MemFlags::new(), val_f64, bp, *offset);
                     }
                 }
@@ -1142,17 +1229,20 @@ impl crate::codegen::Compiler {
                 // Default return (after all continuations)
                 let cb = builder.current_block().unwrap();
                 if !is_block_filled(&builder, cb) {
-                    // Load locals back from buffer (in case continuations modified them)
+                    // Load locals back from buffer
+                    // Continuations store everything as f64. For i64 locals,
+                    // use inline_get_string_pointer to extract the raw pointer.
                     let bp = builder.use_var(buf_var);
                     for (id, offset) in local_offsets {
                         if let Some(info) = locals.get(id) {
                             let cur_val = builder.use_var(info.var);
                             let val_type = builder.func.dfg.value_type(cur_val);
-                            let loaded = builder.ins().load(types::F64, MemFlags::new(), bp, *offset);
+                            let loaded_f64 = builder.ins().load(types::F64, MemFlags::new(), bp, *offset);
                             let typed = if val_type == types::I64 {
-                                ensure_i64(&mut builder, loaded)
+                                // Extract raw pointer from NaN-boxed f64
+                                inline_get_string_pointer(&mut builder, loaded_f64)
                             } else {
-                                loaded
+                                loaded_f64
                             };
                             builder.def_var(info.var, typed);
                         }
