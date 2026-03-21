@@ -90,7 +90,7 @@ impl FastifyContext {
             id: CONTEXT_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
             request_id,
             method,
-            url: url,
+            url: path,
             query_string,
             params,
             headers,

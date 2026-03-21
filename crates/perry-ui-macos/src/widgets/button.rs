@@ -115,16 +115,29 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
 }
 
 /// Set whether a button has a border.
+/// When removing the border, re-applies the button's attributed title to preserve text color.
+/// Without this, borderless NSButtons render invisible text in dark mode.
 pub fn set_bordered(handle: i64, bordered: bool) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
             let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            // Save attributed title before style change
+            let attr_title: *const AnyObject = msg_send![btn, attributedTitle];
             btn.setBordered(bordered);
+            if !bordered {
+                // Set plain bezel style to avoid visual artifacts
+                let _: () = msg_send![btn, setBezelStyle: 0i64]; // NSBezelStyleRounded = 0, avoids shadow
+                // Re-apply attributed title (setBordered resets it)
+                if !attr_title.is_null() {
+                    let _: () = msg_send![btn, setAttributedTitle: attr_title];
+                }
+            }
         }
     }
 }
 
-/// Set the text color of a button using NSAttributedString.
+/// Set the text color of a button.
+/// Uses both NSAttributedString (for bordered buttons) and contentTintColor (for borderless).
 pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
@@ -139,7 +152,10 @@ pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
                 alpha: a as objc2_core_foundation::CGFloat
             ];
 
-            // Build attributes dictionary with NSForegroundColorAttributeName
+            // Set contentTintColor — works for borderless buttons in dark mode
+            let _: () = msg_send![btn, setContentTintColor: &*color];
+
+            // Also set attributed string for bordered buttons
             let key = NSString::from_str("NSColor");
             let attrs: Retained<AnyObject> = msg_send![
                 AnyClass::get(c"NSDictionary").unwrap(),
@@ -147,7 +163,6 @@ pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
                 forKey: &*key
             ];
 
-            // Create attributed string with the button's current title
             let title = btn.title();
             let ns_title: *const AnyObject = Retained::as_ptr(&title) as *const AnyObject;
             let cls = AnyClass::get(c"NSAttributedString").unwrap();

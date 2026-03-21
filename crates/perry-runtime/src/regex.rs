@@ -284,10 +284,10 @@ mod tests {
         let re = js_regexp_new(pattern, flags);
 
         let test_str = make_string("hello world");
-        assert!(js_regexp_test(re, test_str));
+        assert!(js_regexp_test(re, test_str) != 0);
 
         let test_str2 = make_string("goodbye world");
-        assert!(!js_regexp_test(re, test_str2));
+        assert!(js_regexp_test(re, test_str2) == 0);
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
         let re = js_regexp_new(pattern, flags);
 
         let test_str = make_string("HELLO World");
-        assert!(js_regexp_test(re, test_str));
+        assert!(js_regexp_test(re, test_str) != 0);
     }
 
     #[test]

@@ -29,6 +29,9 @@ pub fn create(text_ptr: *const u8) -> i64 {
     let label = NSTextField::labelWithString(&ns_string, mtm);
     unsafe {
         let _: () = objc2::msg_send![&*label, setAccessibilityLabel: &*ns_string];
+        // Disable autoresizing mask so Auto Layout can size this view in NSStackView.
+        // Without this, NSTextField collapses to zero size when added via addArrangedSubview.
+        let _: () = objc2::msg_send![&*label, setTranslatesAutoresizingMaskIntoConstraints: false];
     }
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(label) };
     register_widget(view)
