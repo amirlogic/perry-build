@@ -9,6 +9,17 @@ use std::ptr;
 use std::slice;
 use std::str;
 
+/// A static empty string that can be used as a safe fallback for null pointers.
+/// Has length=0, capacity=0. The address is valid and .length returns 0.
+#[no_mangle]
+pub static PERRY_EMPTY_STRING: StringHeader = StringHeader { length: 0, capacity: 0 };
+
+/// Get a pointer to the static empty string (for codegen null guards).
+#[no_mangle]
+pub extern "C" fn js_get_empty_string() -> *const StringHeader {
+    &PERRY_EMPTY_STRING as *const StringHeader
+}
+
 /// Check if a pointer is valid (not null and not a small invalid value from bad NaN-unboxing).
 /// When codegen extracts a "pointer" from TAG_UNDEFINED (0x7FFC_0000_0000_0001), the lower
 /// 48-bit AND yields 1, which passes is_null() but crashes on dereference.

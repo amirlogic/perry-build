@@ -174,16 +174,23 @@ pub(crate) fn ensure_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
         builder.ins().uextend(types::I64, val)
     } else {
         // F64 NaN-boxed pointer - strip the tag bits (top 16 bits)
-        // to get the raw pointer address, BUT preserve JS_HANDLE_TAG (0x7FFB)
-        // which represents V8 object handles that must keep their tag for dispatch.
+        // to get the raw pointer address. Preserve JS_HANDLE_TAG (0x7FFB)
+        // for V8 handles. Return 0 for null/undefined/boolean values
+        // (TAG_NULL=0x7FFC...0002 → masked=0x2, which is not a valid pointer).
         let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFi64);
         let masked = builder.ins().band(val_i64, mask);
+        // Guard: small values (< 0x1000) are TAG_NULL, TAG_UNDEFINED, booleans.
+        // Return 0 (null) for these — callers must null-check before dereferencing.
+        let threshold = builder.ins().iconst(types::I64, 0x1000i64);
+        let zero = builder.ins().iconst(types::I64, 0i64);
+        let is_small = builder.ins().icmp(IntCC::UnsignedLessThan, masked, threshold);
+        let safe_masked = builder.ins().select(is_small, zero, masked);
         // Check for JS_HANDLE_TAG: top16 == 0x7FFB → preserve full bits
         let top16 = builder.ins().ushr_imm(val_i64, 48);
-        let js_handle_tag = builder.ins().iconst(types::I64, 0x7FFB);
+        let js_handle_tag = builder.ins().iconst(types::I64, 0x7FFBi64);
         let is_js_handle = builder.ins().icmp(IntCC::Equal, top16, js_handle_tag);
-        builder.ins().select(is_js_handle, val_i64, masked)
+        builder.ins().select(is_js_handle, val_i64, safe_masked)
     }
 }
 
