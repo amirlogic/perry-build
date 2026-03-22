@@ -579,12 +579,15 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
             candidates.push(PathBuf::from(format!("target/release/{}", name)));
             candidates.push(PathBuf::from(format!("target/debug/{}", name)));
         }
-        // Also check the directory where the perry executable lives,
-        // since perry_runtime.lib / perry_ui_*.lib are typically built
-        // alongside the compiler itself.
+        // Also check directories relative to the perry executable.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                candidates.push(dir.join(name));
+                // For iOS targets, libs next to the binary use an _ios suffix
+                // (e.g. libperry_runtime_ios.a instead of libperry_runtime.a)
+                if matches!(target, Some("ios") | Some("ios-simulator") | Some("ios-widget") | Some("ios-widget-simulator")) {
+                    let ios_name = name.replace(".a", "_ios.a").replace(".lib", "_ios.lib");
+                    candidates.push(dir.join(&ios_name));
+                }
                 // Cross-compile targets are in ../../target/<triple>/release/ relative
                 // to the perry binary (which is in target/release/)
                 if let Some(target_dir) = dir.parent() {
@@ -2502,6 +2505,71 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // --- i18n: parse [i18n] config from perry.toml and load locale files ---
+    let mut i18n_config: Option<perry_transform::i18n::I18nConfig> = None;
+    let mut i18n_translations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    {
+        let toml_path = project_root.join("perry.toml");
+        if toml_path.exists() {
+            if let Ok(content) = fs::read_to_string(&toml_path) {
+                if let Ok(doc) = content.parse::<toml::Table>() {
+                    if let Some(i18n) = doc.get("i18n").and_then(|v| v.as_table()) {
+                        let locales: Vec<String> = i18n.get("locales")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default();
+                        let default_locale = i18n.get("default_locale")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("en")
+                            .to_string();
+                        let dynamic = i18n.get("dynamic")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        if !locales.is_empty() {
+                            match format {
+                                OutputFormat::Text => println!("  i18n: {} locale(s) [{}], default: {}",
+                                    locales.len(), locales.join(", "), default_locale),
+                                OutputFormat::Json => {}
+                            }
+
+                            // Load locale files
+                            let locales_dir = project_root.join("locales");
+                            for locale in &locales {
+                                let locale_file = locales_dir.join(format!("{}.json", locale));
+                                if locale_file.exists() {
+                                    if let Ok(json_content) = fs::read_to_string(&locale_file) {
+                                        match serde_json::from_str::<BTreeMap<String, String>>(&json_content) {
+                                            Ok(translations) => {
+                                                match format {
+                                                    OutputFormat::Text => println!("    Loaded locales/{}.json ({} keys)", locale, translations.len()),
+                                                    OutputFormat::Json => {}
+                                                }
+                                                i18n_translations.insert(locale.clone(), translations);
+                                            }
+                                            Err(e) => {
+                                                eprintln!("  Warning: Failed to parse locales/{}.json: {}", locale, e);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("  Warning: Locale file locales/{}.json not found", locale);
+                                }
+                            }
+
+                            i18n_config = Some(perry_transform::i18n::I18nConfig {
+                                locales,
+                                default_locale,
+                                dynamic,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Initialize tsgo type checker if --type-check is enabled
     if args.type_check {
         match super::typecheck::TsGoClient::spawn(&project_root) {
@@ -2713,6 +2781,45 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         perry_hir::monomorphize_module(hir_module);
     }
 
+    // --- i18n: apply i18n transform pass ---
+    let i18n_table = if let Some(ref config) = i18n_config {
+        let table = perry_transform::i18n::apply_i18n(
+            &mut ctx.native_modules, config, &i18n_translations
+        );
+        // Report diagnostics
+        for diag in &table.diagnostics {
+            match diag.severity {
+                perry_transform::i18n::I18nSeverity::Warning => {
+                    match format {
+                        OutputFormat::Text => eprintln!("  i18n warning: {}", diag.message),
+                        OutputFormat::Json => {}
+                    }
+                }
+                perry_transform::i18n::I18nSeverity::Error => {
+                    match format {
+                        OutputFormat::Text => eprintln!("  i18n error: {}", diag.message),
+                        OutputFormat::Json => {}
+                    }
+                }
+            }
+        }
+        match format {
+            OutputFormat::Text => if !table.keys.is_empty() {
+                println!("  i18n: {} localizable string(s) detected", table.keys.len());
+            },
+            OutputFormat::Json => {}
+        }
+        // Set the thread-local i18n table for codegen
+        perry_codegen::set_i18n_table(
+            table.translations.clone(),
+            table.keys.len(),
+            table.locale_count,
+        );
+        Some(table)
+    } else {
+        None
+    };
+
     if args.print_hir {
         for (path, hir_module) in &ctx.native_modules {
             println!("\n=== HIR (after monomorphization): {} ===", path.display());
@@ -2752,6 +2859,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 println!("  {} -> {}", specifier, module.path.display());
             }
             println!("===========\n");
+        }
+    }
+
+    // --- i18n: write key registry ---
+    if let Some(ref table) = i18n_table {
+        if !table.keys.is_empty() {
+            let perry_dir = ctx.project_root.join(".perry");
+            let _ = fs::create_dir_all(&perry_dir);
+            let registry: Vec<serde_json::Value> = table.keys.iter().enumerate().map(|(i, key)| {
+                serde_json::json!({
+                    "key": key,
+                    "string_idx": i,
+                })
+            }).collect();
+            let registry_json = serde_json::json!({ "keys": registry });
+            let _ = fs::write(perry_dir.join("i18n-keys.json"),
+                serde_json::to_string_pretty(&registry_json).unwrap_or_default());
         }
     }
 
