@@ -253,7 +253,7 @@ pub extern "C" fn js_date_get_milliseconds(timestamp: f64) -> f64 {
 
 /// Convert Unix timestamp (seconds) to date components (year, month, day, hour, minute, second)
 /// Returns components in UTC
-fn timestamp_to_components(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+pub fn timestamp_to_components(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     // Handle negative timestamps (dates before 1970)
     let is_negative = secs < 0;
     let abs_secs = if is_negative { -secs } else { secs } as u64;

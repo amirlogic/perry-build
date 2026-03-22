@@ -63,6 +63,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/plugin",
     // Perry widget extensions (WidgetKit / Glance)
     "perry/widget",
+    // Perry i18n
+    "perry/i18n",
     // Node.js worker threads
     "worker_threads",
     // SQLite
@@ -89,6 +91,7 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "perry/ui",
     "perry/system",
     "perry/widget",
+    "perry/i18n",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.
@@ -703,6 +706,24 @@ pub enum Expr {
     Integer(i64), // Integer literal that fits in i64 (for optimization)
     BigInt(String), // Store as string to preserve precision
     String(String),
+    /// Localizable string — resolved at compile time from locale files.
+    /// The string_idx indexes into the global i18n string table (2D: [locale][key]).
+    /// For parameterized strings like "Hello, {name}!", params contains the values to interpolate.
+    /// For plural strings, plural_forms maps CLDR category (0-5) → string_idx.
+    I18nString {
+        key: String,
+        string_idx: u32,
+        /// Parameters for interpolation: (param_name, value_expr).
+        /// Empty for simple strings like "Next".
+        params: Vec<(String, Box<Expr>)>,
+        /// Plural forms: (category_id, string_idx) pairs.
+        /// Categories: 0=zero, 1=one, 2=two, 3=few, 4=many, 5=other.
+        /// Empty for non-plural strings.
+        plural_forms: Vec<(u8, u32)>,
+        /// The param name that controls plural selection (e.g., "count").
+        /// Only set when plural_forms is non-empty.
+        plural_param: Option<String>,
+    },
 
     // Variables
     LocalGet(LocalId),

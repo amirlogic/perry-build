@@ -55,6 +55,13 @@
 - [Utilities](stdlib/utilities.md)
 - [Other Modules](stdlib/other.md)
 
+# Internationalization
+
+- [Overview](i18n/overview.md)
+- [Interpolation & Plurals](i18n/interpolation.md)
+- [Formatting](i18n/formatting.md)
+- [CLI Tools](i18n/cli.md)
+
 # System APIs
 
 - [Overview](system/overview.md)

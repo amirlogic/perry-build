@@ -2527,6 +2527,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
 
+                        // Parse [i18n.currencies] — locale → currency code
+                        let mut currencies = HashMap::new();
+                        if let Some(curr_table) = i18n.get("currencies").and_then(|v| v.as_table()) {
+                            for (locale, code) in curr_table {
+                                if let Some(code_str) = code.as_str() {
+                                    currencies.insert(locale.clone(), code_str.to_string());
+                                }
+                            }
+                        }
+
                         if !locales.is_empty() {
                             match format {
                                 OutputFormat::Text => println!("  i18n: {} locale(s) [{}], default: {}",
@@ -2562,6 +2572,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 locales,
                                 default_locale,
                                 dynamic,
+                                currencies,
                             });
                         }
                     }
@@ -2814,6 +2825,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             table.translations.clone(),
             table.keys.len(),
             table.locale_count,
+            table.locale_codes.clone(),
         );
         Some(table)
     } else {
@@ -4930,6 +4942,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
+        // --- i18n: generate .lproj bundles for iOS/macOS ---
+        if let (Some(ref table), Some(ref config)) = (&i18n_table, &i18n_config) {
+            if !table.keys.is_empty() {
+                for (locale_idx, locale) in config.locales.iter().enumerate() {
+                    let lproj_dir = app_dir.join(format!("{}.lproj", locale));
+                    let _ = fs::create_dir_all(&lproj_dir);
+                    let mut strings_content = String::new();
+                    for (key_idx, key) in table.keys.iter().enumerate() {
+                        let flat_idx = locale_idx * table.keys.len() + key_idx;
+                        let value = table.translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                        // Escape for .strings format
+                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+                        let escaped_val = value.replace('\\', "\\\\").replace('"', "\\\"");
+                        strings_content.push_str(&format!("\"{}\" = \"{}\";\n", escaped_key, escaped_val));
+                    }
+                    let _ = fs::write(lproj_dir.join("Localizable.strings"), &strings_content);
+                }
+                match format {
+                    OutputFormat::Text => println!("  Generated {}.lproj bundles for {} locale(s)",
+                        config.locales.join(", "), config.locales.len()),
+                    OutputFormat::Json => {}
+                }
+            }
+        }
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote iOS app bundle: {}", app_dir.display());
@@ -4960,6 +4997,43 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     "js_modules": ctx.js_modules.len(),
                 });
                 println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+    }
+
+    // --- i18n: generate Android values-xx/ resources ---
+    if is_android {
+        if let (Some(ref table), Some(ref config)) = (&i18n_table, &i18n_config) {
+            if !table.keys.is_empty() {
+                let output_dir = exe_path.parent().unwrap_or(Path::new("."));
+                let res_dir = output_dir.join("res");
+                for (locale_idx, locale) in config.locales.iter().enumerate() {
+                    let values_dir = if locale_idx == 0 {
+                        res_dir.join("values") // default locale
+                    } else {
+                        res_dir.join(format!("values-{}", locale))
+                    };
+                    let _ = fs::create_dir_all(&values_dir);
+                    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n");
+                    for (key_idx, key) in table.keys.iter().enumerate() {
+                        let flat_idx = locale_idx * table.keys.len() + key_idx;
+                        let value = table.translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                        // Sanitize key for Android resource name (alphanumeric + underscore)
+                        let res_name: String = key.chars().map(|c| {
+                            if c.is_alphanumeric() || c == '_' { c } else { '_' }
+                        }).collect();
+                        // Escape XML special chars
+                        let escaped = value.replace('&', "&amp;").replace('<', "&lt;")
+                            .replace('>', "&gt;").replace('"', "&quot;").replace('\'', "\\'");
+                        xml.push_str(&format!("    <string name=\"{}\">{}</string>\n", res_name, escaped));
+                    }
+                    xml.push_str("</resources>\n");
+                    let _ = fs::write(values_dir.join("strings.xml"), &xml);
+                }
+                match format {
+                    OutputFormat::Text => println!("  Generated res/values-*/strings.xml for {} locale(s)", config.locales.len()),
+                    OutputFormat::Json => {}
+                }
             }
         }
     }

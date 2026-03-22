@@ -53,21 +53,6 @@ pub fn run(args: SetupArgs) -> Result<()> {
     }
 
     save_config(&saved)?;
-    println!();
-    println!(
-        "  {} Global credentials saved to {}",
-        style("✓").green().bold(),
-        style(config_path().display()).dim()
-    );
-    let perry_toml = std::env::current_dir().unwrap_or_default().join("perry.toml");
-    if perry_toml.exists() {
-        println!(
-            "  {} Project config saved to {}",
-            style("✓").green().bold(),
-            style(perry_toml.display()).dim()
-        );
-    }
-    println!();
     Ok(())
 }
 
@@ -235,24 +220,39 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
     }
     let gp_key = saved.android.as_ref().and_then(|a| a.google_play_key_path.as_deref());
     match update_perry_toml_android(&perry_toml_path, &keystore_path, &key_alias, gp_key) {
-        Ok(()) => {
-            println!();
-            println!(
-                "  {} Updated perry.toml with [android] settings",
-                style("✓").green()
-            );
-        }
+        Ok(()) => {}
         Err(e) => {
             println!();
             println!("  {} Could not update perry.toml: {e}", style("!").yellow());
             println!("  Add these manually to your perry.toml [android] section:");
+            println!("    keystore = \"{}\"", keystore_path);
+            println!("    key_alias = \"{}\"", key_alias);
             println!("    distribute = \"playstore\"");
         }
     }
 
+    // --- Summary ---
+    println!();
+    println!("  {}", style("Setup complete!").green().bold());
+    println!();
+    println!("  {} {} {}",
+        style("Global").bold(),
+        style("→").dim(),
+        style(config_path().display()).dim(),
+    );
+    println!("    keystore_path, key_alias, google_play_key_path");
+    println!();
+    println!("  {} {} {}",
+        style("Project").bold(),
+        style("→").dim(),
+        style(perry_toml_path.display()).dim(),
+    );
+    println!("    keystore, key_alias, google_play_key, distribute");
     println!();
     println!("  Tip: to target a specific track, use:");
     println!("  distribute = \"playstore:beta\"  {} :internal, :alpha, :beta, :production", style("#").dim());
+    println!();
+    println!("  Then run: {}", style("perry publish android").bold());
 
     Ok(())
 }
@@ -905,6 +905,20 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     // --- Summary ---
     println!("  {}", style("Setup complete!").green().bold());
     println!();
+    println!("  {} {} {}",
+        style("Global").bold(),
+        style("→").dim(),
+        style(config_path().display()).dim(),
+    );
+    println!("    p8_key_path, key_id, issuer_id, team_id");
+    println!();
+    println!("  {} {} {}",
+        style("Project").bold(),
+        style("→").dim(),
+        style(perry_toml_path.display()).dim(),
+    );
+    println!("    bundle_id, certificate, provisioning_profile, signing_identity, encryption_exempt");
+    println!();
     println!("  Certificate:  {}", style(p12_path.display()).dim());
     println!("  Profile:      {}", style(profile_path.display()).dim());
     println!("  Cert password: {}", style(p12_password).bold());
@@ -1224,6 +1238,20 @@ pub(crate) fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
 
     // --- Summary ---
     println!("  {}", style("Setup complete!").green().bold());
+    println!();
+    println!("  {} {} {}",
+        style("Global").bold(),
+        style("→").dim(),
+        style(config_path().display()).dim(),
+    );
+    println!("    p8_key_path, key_id, issuer_id, team_id");
+    println!();
+    println!("  {} {} {}",
+        style("Project").bold(),
+        style("→").dim(),
+        style(perry_toml_path.display()).dim(),
+    );
+    println!("    distribute, certificate, signing_identity, encryption_exempt");
     println!();
     match distribute_value {
         "both" => {

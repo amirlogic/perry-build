@@ -860,7 +860,7 @@ impl crate::codegen::Compiler {
             }
             // Expressions with no inner expressions to traverse
             Expr::Undefined | Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::Integer(_) |
-            Expr::BigInt(_) | Expr::String(_) | Expr::LocalGet(_) | Expr::GlobalGet(_) |
+            Expr::BigInt(_) | Expr::String(_) | Expr::I18nString { .. } | Expr::LocalGet(_) | Expr::GlobalGet(_) |
             Expr::Update { .. } | Expr::FuncRef(_) | Expr::ExternFuncRef { .. } |
             Expr::NativeModuleRef(_) | Expr::StaticFieldGet { .. } | Expr::This |
             Expr::EnumMember { .. } | Expr::ClassRef(_) | Expr::EnvGet(_) |

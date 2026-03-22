@@ -87,6 +87,9 @@ enum Commands {
 
     /// Compile and run a TypeScript file in one step
     Run(commands::run::RunArgs),
+
+    /// Internationalization tools (extract strings, manage locales)
+    I18n(commands::i18n::I18nArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -228,6 +231,9 @@ fn main_inner() -> Result<()> {
         }
         Commands::Verify(args) => {
             commands::verify::run(args, cli.format, use_color)
+        }
+        Commands::I18n(args) => {
+            commands::i18n::run(args, cli.format)
         }
     };
 

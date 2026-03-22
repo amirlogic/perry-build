@@ -10299,6 +10299,100 @@ impl Compiler {
             self.extern_funcs.insert(func_name.clone(), func_id);
         }
 
+        // --- i18n runtime functions ---
+
+        // perry_i18n_get_locale_index() -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("perry_i18n_get_locale_index", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_get_locale_index".to_string(), func_id);
+        }
+
+        // perry_i18n_init(locale_codes: *const *const u8, locale_lens: *const u32, count: u32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // locale_codes array pointer
+            sig.params.push(AbiParam::new(types::I64)); // locale_lens array pointer
+            sig.params.push(AbiParam::new(types::I32)); // count
+            let func_id = self.module.declare_function("perry_i18n_init", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_init".to_string(), func_id);
+        }
+
+        // perry_i18n_interpolate(template: *mut StringHeader, names: *const *mut StringHeader,
+        //                        values: *const *mut StringHeader, count: u32) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // template_ptr
+            sig.params.push(AbiParam::new(types::I64)); // param_names array
+            sig.params.push(AbiParam::new(types::I64)); // param_values array
+            sig.params.push(AbiParam::new(types::I32)); // param_count
+            sig.returns.push(AbiParam::new(types::I64)); // result string ptr
+            let func_id = self.module.declare_function("perry_i18n_interpolate", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_interpolate".to_string(), func_id);
+        }
+
+        // perry_i18n_plural_category(locale_idx: i32, count: f64) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // locale_idx
+            sig.params.push(AbiParam::new(types::F64)); // count
+            sig.returns.push(AbiParam::new(types::I32)); // category (0-5)
+            let func_id = self.module.declare_function("perry_i18n_plural_category", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_plural_category".to_string(), func_id);
+        }
+
+        // perry_i18n_format_number(value: f64, locale_idx: i32) -> i64 (StringHeader*)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_i18n_format_number", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_format_number".to_string(), func_id);
+        }
+
+        // perry_i18n_format_currency(value: f64, locale_idx: i32) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_i18n_format_currency", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_format_currency".to_string(), func_id);
+        }
+
+        // perry_i18n_format_percent(value: f64, locale_idx: i32) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_i18n_format_percent", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_format_percent".to_string(), func_id);
+        }
+
+        // perry_i18n_format_date(timestamp: f64, style: i32, locale_idx: i32) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_i18n_format_date", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_format_date".to_string(), func_id);
+        }
+
+        // perry_i18n_format_time(timestamp: f64, locale_idx: i32) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_i18n_format_time", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_i18n_format_time".to_string(), func_id);
+        }
+
         Ok(())
     }
 }

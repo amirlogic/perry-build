@@ -246,6 +246,54 @@ impl crate::codegen::Compiler {
                     self.module.declare_function("perry_debug_trace_init_done", Linkage::Import, &done_sig).ok()
                 };
 
+                // i18n: call perry_i18n_init() with locale codes if i18n is configured
+                {
+                    let locale_codes = crate::util::I18N_TABLE.with(|t| {
+                        let t = t.borrow();
+                        if t.locale_count > 0 {
+                            // Extract locale codes from compile.rs's i18n config
+                            // The I18nCodegenTable doesn't store locale codes, so we use
+                            // a separate thread-local for them.
+                            crate::util::I18N_LOCALE_CODES.with(|c| c.borrow().clone())
+                        } else {
+                            Vec::new()
+                        }
+                    });
+                    if !locale_codes.is_empty() {
+                        let init_func_id = *self.extern_funcs.get("perry_i18n_init")
+                            .expect("perry_i18n_init not declared");
+                        let init_func_ref = self.module.declare_func_in_func(init_func_id, builder.func);
+
+                        let count = locale_codes.len();
+                        // Create stack slots for locale code pointers and lengths
+                        let ptrs_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot, (count * 8) as u32, 0,
+                        ));
+                        let lens_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot, (count * 4) as u32, 0,
+                        ));
+
+                        for (i, code) in locale_codes.iter().enumerate() {
+                            let bytes = code.as_bytes();
+                            let data_name = format!("_perry_i18n_locale_{}", i);
+                            let data_id = self.module.declare_data(&data_name, Linkage::Local, false, false)?;
+                            let mut data_desc = cranelift_module::DataDescription::new();
+                            data_desc.define(bytes.to_vec().into_boxed_slice());
+                            self.module.define_data(data_id, &data_desc)?;
+                            let gv = self.module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, gv);
+                            builder.ins().stack_store(ptr, ptrs_slot, (i * 8) as i32);
+                            let len = builder.ins().iconst(types::I32, bytes.len() as i64);
+                            builder.ins().stack_store(len, lens_slot, (i * 4) as i32);
+                        }
+
+                        let ptrs_addr = builder.ins().stack_addr(types::I64, ptrs_slot, 0);
+                        let lens_addr = builder.ins().stack_addr(types::I64, lens_slot, 0);
+                        let count_val = builder.ins().iconst(types::I32, count as i64);
+                        builder.ins().call(init_func_ref, &[ptrs_addr, lens_addr, count_val]);
+                    }
+                }
+
                 for (i, init_func_name) in self.native_module_inits.clone().iter().enumerate() {
                     // Emit debug trace call before each init
                     if let Some(trace_id) = trace_func_id {

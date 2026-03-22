@@ -2,6 +2,47 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.3.0 — Compile-Time Internationalization
+
+Major release adding a complete compile-time i18n system to Perry.
+
+### Core Mechanism
+- `[i18n]` section in perry.toml: `locales`, `default_locale`, `dynamic`, `[i18n.currencies]`
+- Embedded 2D string table: `translations[locale_idx * key_count + string_idx]` — all locales baked into binary
+- UI widget string detection: string literals in `Button`, `Text`, `Label`, `TextField`, `TextArea`, `Tab`, `NavigationTitle`, `SectionHeader`, `SecureField`, `Alert` automatically treated as localizable keys
+- `Expr::I18nString` HIR variant with transform pass (`perry-transform/src/i18n.rs`) and Cranelift codegen with locale branching
+- Compile-time validation: warns on missing translations, unused keys, parameter mismatches
+- Key registry: `.perry/i18n-keys.json` updated on every build
+
+### Locale Detection (all 6 platforms)
+- macOS/iOS: `CFLocaleCopyCurrent()` (CoreFoundation) — works for GUI apps launched from Finder/SpringBoard
+- Windows: `GetUserDefaultLocaleName()` (Win32)
+- Android: `__system_property_get("persist.sys.locale")` (bionic libc)
+- Linux: `LANG` / `LC_ALL` / `LC_MESSAGES` env vars
+- Platform-native APIs tried first, env vars as fallback
+- Fuzzy matching: `de_DE.UTF-8` matches `de`, normalizes `_` to `-`
+
+### Interpolation & Plurals
+- Parameterized strings: `Text("Hello, {name}!", { name: user.name })` — runtime `perry_i18n_interpolate()` does `{param}` → value substitution
+- CLDR plural rules for 30+ locales: `.one`/`.other`/`.few`/`.many`/`.zero`/`.two` suffixes, compile-time validation, runtime `perry_i18n_plural_category()` category selection
+- `perry/i18n` native module: `import { t } from "perry/i18n"` for non-UI string localization
+
+### Format Wrappers
+- `Currency(value)`, `Percent(value)`, `ShortDate(timestamp)`, `LongDate(timestamp)`, `FormatNumber(value)`, `FormatTime(timestamp)`, `Raw(value)` — importable from `perry/i18n`
+- Hand-rolled formatting rules for 25+ locales: number grouping, decimal/thousands separators, currency symbol placement, date ordering (MDY/DMY/YMD), 12h vs 24h time, percent spacing
+- `[i18n.currencies]` config: locale → ISO 4217 code mapping
+
+### CLI & Platform Output
+- `perry i18n extract`: scans `.ts`/`.tsx` files, generates/updates `locales/*.json` scaffolds
+- iOS: `{locale}.lproj/Localizable.strings` generated inside `.app` bundle
+- Android: `res/values-{locale}/strings.xml` generated alongside `.so`
+
+### New Files
+- `crates/perry-transform/src/i18n.rs` — HIR transform pass
+- `crates/perry-runtime/src/i18n.rs` — Runtime: locale detection, interpolation, plural rules, formatters
+- `crates/perry/src/commands/i18n.rs` — CLI extract command
+- `docs/src/i18n/` — 4 documentation pages (overview, interpolation, formatting, CLI)
+
 ## v0.2.202
 - Fix `perry setup ios` not saving bundle_id to perry.toml — bundle ID was used for provisioning profile creation but never written to `[ios].bundle_id`; `perry publish` fell back to default `com.perry.<name>`, causing profile/bundle mismatch
 

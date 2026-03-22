@@ -1,6 +1,6 @@
 # CLI Commands
 
-Perry provides 9 commands for compiling, checking, running, publishing, and managing your projects.
+Perry provides 10 commands for compiling, checking, running, publishing, and managing your projects.
 
 See also: [perry.toml Reference](perry-toml.md) for project configuration.
 
@@ -250,6 +250,22 @@ Update sources (checked in order):
 3. GitHub API
 
 Opt out of automatic update checks with `PERRY_NO_UPDATE_CHECK=1` or `CI=true`.
+
+## i18n
+
+Internationalization tools for managing locale files and extracting localizable strings.
+
+### `perry i18n extract`
+
+Scan source files and generate/update locale JSON scaffolds:
+
+```bash
+perry i18n extract src/main.ts
+```
+
+Detects string literals in UI component calls (`Button`, `Text`, `Label`, etc.) and `t()` calls. Creates `locales/*.json` files based on the `[i18n]` config in `perry.toml`.
+
+See the [i18n documentation](../i18n/overview.md) for full details.
 
 ## Next Steps
 

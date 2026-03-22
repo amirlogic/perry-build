@@ -45,6 +45,26 @@ thread_local! {
     /// Current static method's class name, so `this.method()` inside static methods
     /// can be resolved to direct static method calls on the same class.
     pub(crate) static CURRENT_STATIC_CLASS_NAME: RefCell<Option<String>> = RefCell::new(None);
+    /// i18n string table set from compile.rs before compiling each module.
+    /// Contains all translations for lookup during I18nString codegen.
+    pub(crate) static I18N_TABLE: RefCell<I18nCodegenTable> = RefCell::new(I18nCodegenTable::empty());
+    /// i18n locale codes (e.g., ["en", "de", "fr"]) — set from compile.rs, read by module_init.rs.
+    pub(crate) static I18N_LOCALE_CODES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+/// Lightweight i18n table data for codegen thread-local access.
+#[derive(Clone)]
+pub(crate) struct I18nCodegenTable {
+    pub locale_count: usize,
+    pub key_count: usize,
+    /// Flat array: translations[locale_idx * key_count + string_idx]
+    pub translations: Vec<String>,
+}
+
+impl I18nCodegenTable {
+    pub const fn empty() -> Self {
+        Self { locale_count: 0, key_count: 0, translations: Vec::new() }
+    }
 }
 
 /// Global counter for generating unique temporary variable IDs

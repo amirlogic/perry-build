@@ -696,6 +696,10 @@ impl JsEmitter {
             Expr::String(s) => {
                 self.output.push_str(&self.quote_string(s));
             }
+            Expr::I18nString { key, .. } => {
+                // JS codegen: emit as regular string (i18n handled by JS runtime)
+                self.output.push_str(&self.quote_string(key));
+            }
 
             // --- Variables ---
             Expr::LocalGet(id) => {

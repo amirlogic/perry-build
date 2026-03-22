@@ -16,3 +16,18 @@ pub mod codegen;
 
 pub use codegen::Compiler;
 pub use stubs::generate_stub_object;
+
+/// Set the i18n string table and locale codes for the current compilation thread.
+/// Must be called before compiling any module that contains I18nString expressions.
+pub fn set_i18n_table(translations: Vec<String>, key_count: usize, locale_count: usize, locale_codes: Vec<String>) {
+    util::I18N_TABLE.with(|t| {
+        *t.borrow_mut() = util::I18nCodegenTable {
+            locale_count,
+            key_count,
+            translations,
+        };
+    });
+    util::I18N_LOCALE_CODES.with(|c| {
+        *c.borrow_mut() = locale_codes;
+    });
+}

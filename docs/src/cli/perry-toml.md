@@ -82,6 +82,15 @@ format = "appimage"
 category = "Development"
 description = "A cross-platform Perry application"
 
+[i18n]
+locales = ["en", "de", "fr"]
+default_locale = "en"
+
+[i18n.currencies]
+en = "USD"
+de = "EUR"
+fr = "EUR"
+
 [publish]
 server = "https://hub.perryts.com"
 
@@ -308,6 +317,26 @@ Linux-specific configuration for `perry publish linux`.
 | `format` | string | — | Package format: `"appimage"`, `"deb"`, or `"rpm"` |
 | `category` | string | — | Desktop application category (e.g., `"Development"`, `"Utility"`, `"Game"`) |
 | `description` | string | Falls back to `[project]`/`[app]` | Application description for package metadata |
+
+---
+
+### `[i18n]`
+
+Internationalization configuration. See the [i18n documentation](../i18n/overview.md) for full details.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `locales` | string[] | — | Supported locale codes (e.g., `["en", "de", "fr"]`). Locale files must exist in `/locales` |
+| `default_locale` | string | `"en"` | Fallback locale. Used when a key is missing in another locale |
+| `dynamic` | boolean | `false` | `false`: locale set at launch, strings inlined. `true`: locale switchable at runtime |
+
+### `[i18n.currencies]`
+
+Maps locale codes to default ISO 4217 currency codes. Used by the `Currency()` format wrapper.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `{locale}` | string | Currency code for the locale (e.g., `en = "USD"`, `de = "EUR"`) |
 
 ---
 

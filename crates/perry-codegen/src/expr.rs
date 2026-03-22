@@ -245,6 +245,255 @@ pub(crate) fn compile_expr(
             let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
             Ok(builder.inst_results(nanbox_call)[0])
         }
+        Expr::I18nString { key, string_idx, params, plural_forms, plural_param } => {
+            // Look up the translated string based on current locale.
+            // The i18n translations are stored in the I18N_TRANSLATIONS thread-local,
+            // set by compile.rs before compiling each module.
+            // Layout: translations[locale_idx * key_count + string_idx]
+
+            let (locale_count, key_count, translations) = I18N_TABLE.with(|t| {
+                let t = t.borrow();
+                (t.locale_count, t.key_count, t.translations.clone())
+            });
+
+            if (key_count == 0 || locale_count == 0) && params.is_empty() {
+                // No i18n and no params — compile the key as a regular string
+                return compile_expr(builder, module, func_ids, closure_func_ids,
+                    func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                    func_param_types, func_union_params, func_return_types,
+                    func_hir_return_types, func_rest_param_index,
+                    imported_func_param_counts, locals,
+                    &Expr::String(key.clone()), this_ctx);
+            }
+
+            if locale_count <= 1 && params.is_empty() {
+                // Single locale, no params — emit the translated string directly
+                let s = if key_count > 0 {
+                    let flat_idx = *string_idx as usize;
+                    translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone())
+                } else {
+                    key.clone()
+                };
+                return compile_expr(builder, module, func_ids, closure_func_ids,
+                    func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                    func_param_types, func_union_params, func_return_types,
+                    func_hir_return_types, func_rest_param_index,
+                    imported_func_param_counts, locals,
+                    &Expr::String(s), this_ctx);
+            }
+
+            // --- Plural handling ---
+            // If plural forms exist, branch on the plural category and recursively
+            // compile each form as a non-plural I18nString.
+            if !plural_forms.is_empty() && plural_param.is_some() {
+                let plural_param_name = plural_param.as_ref().unwrap();
+                let count_expr = params.iter()
+                    .find(|(name, _)| name == plural_param_name)
+                    .map(|(_, expr)| expr.as_ref());
+
+                if let Some(count_expr) = count_expr {
+                    let count_val = compile_expr(builder, module, func_ids, closure_func_ids,
+                        func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                        func_param_types, func_union_params, func_return_types,
+                        func_hir_return_types, func_rest_param_index,
+                        imported_func_param_counts, locals,
+                        count_expr, this_ctx)?;
+                    let count_f64 = ensure_f64(builder, count_val);
+
+                    let get_locale_func = extern_funcs.get("perry_i18n_get_locale_index")
+                        .ok_or_else(|| anyhow!("perry_i18n_get_locale_index not declared"))?;
+                    let get_locale_ref = module.declare_func_in_func(*get_locale_func, builder.func);
+                    let locale_call = builder.ins().call(get_locale_ref, &[]);
+                    let locale_idx_val = builder.inst_results(locale_call)[0];
+
+                    let plural_func = extern_funcs.get("perry_i18n_plural_category")
+                        .ok_or_else(|| anyhow!("perry_i18n_plural_category not declared"))?;
+                    let plural_ref = module.declare_func_in_func(*plural_func, builder.func);
+                    let plural_call = builder.ins().call(plural_ref, &[locale_idx_val, count_f64]);
+                    let category = builder.inst_results(plural_call)[0]; // i32 (0-5)
+
+                    // Create merge block for the final result
+                    let result_merge = builder.create_block();
+                    builder.append_block_param(result_merge, types::F64);
+
+                    // For each plural form, create a block that compiles the form as a non-plural I18nString
+                    for (i, &(cat, form_idx)) in plural_forms.iter().enumerate() {
+                        if i == plural_forms.len() - 1 {
+                            // Last form: fallback (unconditional)
+                            let form_result = compile_expr(builder, module, func_ids, closure_func_ids,
+                                func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                                func_param_types, func_union_params, func_return_types,
+                                func_hir_return_types, func_rest_param_index,
+                                imported_func_param_counts, locals,
+                                &Expr::I18nString {
+                                    key: key.clone(), string_idx: form_idx,
+                                    params: params.clone(), plural_forms: vec![], plural_param: None,
+                                }, this_ctx)?;
+                            builder.ins().jump(result_merge, &[form_result.into()]);
+                        } else {
+                            let cat_val = builder.ins().iconst(types::I32, cat as i64);
+                            let cmp = builder.ins().icmp(IntCC::Equal, category, cat_val);
+                            let match_block = builder.create_block();
+                            let next_block = builder.create_block();
+                            builder.ins().brif(cmp, match_block, &[], next_block, &[]);
+
+                            builder.switch_to_block(match_block);
+                            builder.seal_block(match_block);
+                            let form_result = compile_expr(builder, module, func_ids, closure_func_ids,
+                                func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                                func_param_types, func_union_params, func_return_types,
+                                func_hir_return_types, func_rest_param_index,
+                                imported_func_param_counts, locals,
+                                &Expr::I18nString {
+                                    key: key.clone(), string_idx: form_idx,
+                                    params: params.clone(), plural_forms: vec![], plural_param: None,
+                                }, this_ctx)?;
+                            builder.ins().jump(result_merge, &[form_result.into()]);
+
+                            builder.switch_to_block(next_block);
+                            builder.seal_block(next_block);
+                        }
+                    }
+
+                    builder.switch_to_block(result_merge);
+                    builder.seal_block(result_merge);
+                    return Ok(builder.block_params(result_merge)[0]);
+                }
+            }
+
+            // Compile the locale-appropriate template string
+            let template_f64 = if locale_count <= 1 {
+                // Single locale (with params, since no-params was handled above)
+                let s = if key_count > 0 {
+                    let flat_idx = *string_idx as usize;
+                    translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone())
+                } else {
+                    key.clone()
+                };
+                compile_expr(builder, module, func_ids, closure_func_ids,
+                    func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                    func_param_types, func_union_params, func_return_types,
+                    func_hir_return_types, func_rest_param_index,
+                    imported_func_param_counts, locals,
+                    &Expr::String(s), this_ctx)?
+            } else {
+                // Multiple locales: get locale index, branch per locale
+                let get_locale_func = extern_funcs.get("perry_i18n_get_locale_index")
+                    .ok_or_else(|| anyhow!("perry_i18n_get_locale_index not declared"))?;
+                let get_locale_ref = module.declare_func_in_func(*get_locale_func, builder.func);
+                let locale_call = builder.ins().call(get_locale_ref, &[]);
+                let locale_idx = builder.inst_results(locale_call)[0]; // i32
+
+                let merge_block = builder.create_block();
+                builder.append_block_param(merge_block, types::F64);
+
+                let mut locale_blocks = Vec::with_capacity(locale_count);
+                for _ in 0..locale_count {
+                    locale_blocks.push(builder.create_block());
+                }
+
+                for i in 0..locale_count {
+                    if i == locale_count - 1 {
+                        builder.ins().jump(locale_blocks[i], &[]);
+                    } else {
+                        let locale_val = builder.ins().iconst(types::I32, i as i64);
+                        let cmp = builder.ins().icmp(IntCC::Equal, locale_idx, locale_val);
+                        let next_check = builder.create_block();
+                        builder.ins().brif(cmp, locale_blocks[i], &[], next_check, &[]);
+                        builder.switch_to_block(next_check);
+                        builder.seal_block(next_check);
+                    }
+                }
+
+                for i in 0..locale_count {
+                    builder.switch_to_block(locale_blocks[i]);
+                    builder.seal_block(locale_blocks[i]);
+
+                    let flat_idx = i * key_count + *string_idx as usize;
+                    let s = translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                    let str_f64 = compile_expr(builder, module, func_ids, closure_func_ids,
+                        func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                        func_param_types, func_union_params, func_return_types,
+                        func_hir_return_types, func_rest_param_index,
+                        imported_func_param_counts, locals,
+                        &Expr::String(s), this_ctx)?;
+                    builder.ins().jump(merge_block, &[str_f64.into()]);
+                }
+
+                builder.switch_to_block(merge_block);
+                builder.seal_block(merge_block);
+                builder.block_params(merge_block)[0]
+            };
+
+            // If params are present, apply interpolation
+            if params.is_empty() {
+                Ok(template_f64)
+            } else {
+                // Extract raw string pointer from NaN-boxed value
+                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                let str_call = builder.ins().call(get_str_ref, &[template_f64]);
+                let template_ptr = builder.inst_results(str_call)[0]; // i64
+
+                let param_count = params.len();
+
+                // Create stack slots for param names and values arrays
+                let names_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot, (param_count * 8) as u32, 0,
+                ));
+                let values_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot, (param_count * 8) as u32, 0,
+                ));
+
+                for (i, (name, value_expr)) in params.iter().enumerate() {
+                    // Create param name string
+                    let name_str = compile_expr(builder, module, func_ids, closure_func_ids,
+                        func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                        func_param_types, func_union_params, func_return_types,
+                        func_hir_return_types, func_rest_param_index,
+                        imported_func_param_counts, locals,
+                        &Expr::String(name.clone()), this_ctx)?;
+                    // Extract raw pointer from NaN-boxed name string
+                    let name_call = builder.ins().call(get_str_ref, &[name_str]);
+                    let name_ptr = builder.inst_results(name_call)[0];
+                    builder.ins().stack_store(name_ptr, names_slot, (i * 8) as i32);
+
+                    // Compile param value expression
+                    let value_f64 = compile_expr(builder, module, func_ids, closure_func_ids,
+                        func_wrapper_ids, extern_funcs, async_func_ids, classes, enums,
+                        func_param_types, func_union_params, func_return_types,
+                        func_hir_return_types, func_rest_param_index,
+                        imported_func_param_counts, locals,
+                        value_expr, this_ctx)?;
+                    // Convert value to string
+                    let to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                        .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                    let to_str_ref = module.declare_func_in_func(*to_str_func, builder.func);
+                    let value_f64_ensured = ensure_f64(builder, value_f64);
+                    let to_str_call = builder.ins().call(to_str_ref, &[value_f64_ensured]);
+                    let value_ptr = builder.inst_results(to_str_call)[0];
+                    builder.ins().stack_store(value_ptr, values_slot, (i * 8) as i32);
+                }
+
+                let names_addr = builder.ins().stack_addr(types::I64, names_slot, 0);
+                let values_addr = builder.ins().stack_addr(types::I64, values_slot, 0);
+                let count_val = builder.ins().iconst(types::I32, param_count as i64);
+
+                let interp_func = extern_funcs.get("perry_i18n_interpolate")
+                    .ok_or_else(|| anyhow!("perry_i18n_interpolate not declared"))?;
+                let interp_ref = module.declare_func_in_func(*interp_func, builder.func);
+                let interp_call = builder.ins().call(interp_ref, &[template_ptr, names_addr, values_addr, count_val]);
+                let result_ptr = builder.inst_results(interp_call)[0];
+
+                // NaN-box the result string
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                Ok(builder.inst_results(nanbox_call)[0])
+            }
+        }
         Expr::BigInt(s) => {
             // Create a BigInt from the string representation
             // BigInt literals in JS look like "123n" but HIR stores just the digits
@@ -17576,6 +17825,110 @@ pub(crate) fn compile_expr(
                         let result = builder.inst_results(call)[0];
                         return Ok(result);
                     }
+                }
+            }
+
+            // ========================================================================
+            // Perry i18n format wrappers (inject locale_idx automatically)
+            // ========================================================================
+            if native_module == "perry/i18n" && object.is_none() {
+                match method.as_str() {
+                    "Currency" | "FormatNumber" | "Percent" => {
+                        let func_name = match method.as_str() {
+                            "Currency" => "perry_i18n_format_currency",
+                            "Percent" => "perry_i18n_format_percent",
+                            _ => "perry_i18n_format_number",
+                        };
+                        let value_f64 = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        // Get locale index
+                        let get_locale_func = extern_funcs.get("perry_i18n_get_locale_index")
+                            .ok_or_else(|| anyhow!("perry_i18n_get_locale_index not declared"))?;
+                        let get_locale_ref = module.declare_func_in_func(*get_locale_func, builder.func);
+                        let locale_call = builder.ins().call(get_locale_ref, &[]);
+                        let locale_idx = builder.inst_results(locale_call)[0];
+                        // Call format function
+                        let format_func = extern_funcs.get(func_name)
+                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+                        let format_ref = module.declare_func_in_func(*format_func, builder.func);
+                        let call = builder.ins().call(format_ref, &[value_f64, locale_idx]);
+                        let result_ptr = builder.inst_results(call)[0];
+                        // NaN-box the result string
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                        return Ok(builder.inst_results(nanbox_call)[0]);
+                    }
+                    "ShortDate" | "LongDate" | "FormatDate" => {
+                        let timestamp = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let style = match method.as_str() {
+                            "ShortDate" => 1i64,
+                            "LongDate" => 2i64,
+                            _ => 0i64, // medium (default)
+                        };
+                        let style_val = builder.ins().iconst(types::I32, style);
+                        let get_locale_func = extern_funcs.get("perry_i18n_get_locale_index")
+                            .ok_or_else(|| anyhow!("perry_i18n_get_locale_index not declared"))?;
+                        let get_locale_ref = module.declare_func_in_func(*get_locale_func, builder.func);
+                        let locale_call = builder.ins().call(get_locale_ref, &[]);
+                        let locale_idx = builder.inst_results(locale_call)[0];
+                        let format_func = extern_funcs.get("perry_i18n_format_date")
+                            .ok_or_else(|| anyhow!("perry_i18n_format_date not declared"))?;
+                        let format_ref = module.declare_func_in_func(*format_func, builder.func);
+                        let call = builder.ins().call(format_ref, &[timestamp, style_val, locale_idx]);
+                        let result_ptr = builder.inst_results(call)[0];
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                        return Ok(builder.inst_results(nanbox_call)[0]);
+                    }
+                    "FormatTime" => {
+                        let timestamp = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+                        let get_locale_func = extern_funcs.get("perry_i18n_get_locale_index")
+                            .ok_or_else(|| anyhow!("perry_i18n_get_locale_index not declared"))?;
+                        let get_locale_ref = module.declare_func_in_func(*get_locale_func, builder.func);
+                        let locale_call = builder.ins().call(get_locale_ref, &[]);
+                        let locale_idx = builder.inst_results(locale_call)[0];
+                        let format_func = extern_funcs.get("perry_i18n_format_time")
+                            .ok_or_else(|| anyhow!("perry_i18n_format_time not declared"))?;
+                        let format_ref = module.declare_func_in_func(*format_func, builder.func);
+                        let call = builder.ins().call(format_ref, &[timestamp, locale_idx]);
+                        let result_ptr = builder.inst_results(call)[0];
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                        return Ok(builder.inst_results(nanbox_call)[0]);
+                    }
+                    "Raw" => {
+                        // Raw(value) — pass through without formatting (escape hatch)
+                        if !arg_vals.is_empty() {
+                            return Ok(ensure_f64(builder, arg_vals[0]));
+                        }
+                        return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                    }
+                    "t" => {
+                        // i18n.t("key") — handled by the I18nString transform, just pass through
+                        // This case should not normally be reached (transform replaces the arg)
+                        if !arg_vals.is_empty() {
+                            return Ok(ensure_f64(builder, arg_vals[0]));
+                        }
+                        return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                    }
+                    _ => {} // Fall through to generic dispatch
                 }
             }
 
