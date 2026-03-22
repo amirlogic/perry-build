@@ -876,6 +876,7 @@ pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         &p12_str,
         &profile_str,
         created_signing_identity.as_deref(),
+        &bundle_id,
     ) {
         Ok(()) => {
             println!("  {} Project credentials saved to {}", style("✓").green().bold(),
@@ -1678,6 +1679,7 @@ fn update_perry_toml_ios(
     certificate: &str,
     provisioning_profile: &str,
     signing_identity: Option<&str>,
+    bundle_id: &str,
 ) -> Result<()> {
     let content = std::fs::read_to_string(perry_toml_path)?;
     let mut doc = content.parse::<toml::Table>()
@@ -1688,6 +1690,7 @@ fn update_perry_toml_ios(
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("[ios] in perry.toml is not a table"))?;
 
+    ios.insert("bundle_id".into(), toml::Value::String(bundle_id.into()));
     ios.insert("certificate".into(), toml::Value::String(certificate.into()));
     ios.insert("provisioning_profile".into(), toml::Value::String(provisioning_profile.into()));
     if let Some(identity) = signing_identity {

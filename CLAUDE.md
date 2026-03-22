@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.201
+**Current Version:** 0.2.202
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.202
+- **Fix `perry setup ios` not saving bundle_id to perry.toml**: the bundle ID entered during setup was used for provisioning profile creation but never written to `[ios].bundle_id` in perry.toml — `perry publish` then fell back to default `com.perry.<name>`, causing a profile/bundle mismatch
 
 ### v0.2.201
 - **`perry setup` improvements**: auto-detect signing identity from Keychain when reusing existing certificate (was left blank → `perry publish` prompted); final message now shows both global and project config paths; bundle_id lookup checks `[ios]` → `[app]` → `[project]` priority; app name checks `[app]` → `[project]`
