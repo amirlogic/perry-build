@@ -582,11 +582,17 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
         // Also check directories relative to the perry executable.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                // For iOS targets, libs next to the binary use an _ios suffix
-                // (e.g. libperry_runtime_ios.a instead of libperry_runtime.a)
+                // For iOS targets, check the exe directory for libs with _ios naming:
+                // - Libs already named with _ios (e.g. libperry_ui_ios.a) → direct lookup
+                // - Libs using _ios suffix convention (e.g. libperry_runtime.a stored as
+                //   libperry_runtime_ios.a next to the binary)
                 if matches!(target, Some("ios") | Some("ios-simulator") | Some("ios-widget") | Some("ios-widget-simulator")) {
-                    let ios_name = name.replace(".a", "_ios.a").replace(".lib", "_ios.lib");
-                    candidates.push(dir.join(&ios_name));
+                    if name.contains("_ios") {
+                        candidates.push(dir.join(name));
+                    } else {
+                        let ios_name = name.replace(".a", "_ios.a");
+                        candidates.push(dir.join(&ios_name));
+                    }
                 }
                 // Cross-compile targets are in ../../target/<triple>/release/ relative
                 // to the perry binary (which is in target/release/)
