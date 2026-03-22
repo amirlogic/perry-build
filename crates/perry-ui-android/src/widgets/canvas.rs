@@ -1,7 +1,7 @@
 //! Canvas — ImageView with Bitmap-backed Canvas drawing
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use jni::objects::{JObject, JValue};
 use crate::jni_bridge;
 
@@ -23,9 +23,9 @@ struct CanvasState {
     cmds: Vec<DrawCmd>,
 }
 
-thread_local! {
-    static CANVAS_STATES: RefCell<HashMap<i64, CanvasState>> = RefCell::new(HashMap::new());
-}
+// Global (not thread-local) because canvas is created on the perry-native thread
+// but drawing commands arrive from the UI thread via setInterval callbacks.
+static CANVAS_STATES: LazyLock<Mutex<HashMap<i64, CanvasState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn create(width: f64, height: f64) -> i64 {
     let mut env = jni_bridge::get_env();
@@ -51,19 +51,42 @@ pub fn create(width: f64, height: f64) -> i64 {
         &[JValue::Object(&activity)],
     ).expect("Failed to create ImageView");
 
+    // Set explicit layout params so the ImageView has a visible size
+    let layout_params = env.new_object(
+        "android/widget/LinearLayout$LayoutParams",
+        "(II)V",
+        &[JValue::Int(w), JValue::Int(h)],
+    ).expect("Failed to create LayoutParams");
+    let _ = env.call_method(
+        &image_view,
+        "setLayoutParams",
+        "(Landroid/view/ViewGroup$LayoutParams;)V",
+        &[JValue::Object(&layout_params)],
+    );
+
+    // Scale type: FIT_XY so the bitmap fills the allocated space
+    let scale_class = env.find_class("android/widget/ImageView$ScaleType").expect("ScaleType");
+    let fit_xy = env.get_static_field(
+        &scale_class, "FIT_XY", "Landroid/widget/ImageView$ScaleType;",
+    ).expect("FIT_XY").l().expect("scale type");
+    let _ = env.call_method(
+        &image_view,
+        "setScaleType",
+        "(Landroid/widget/ImageView$ScaleType;)V",
+        &[JValue::Object(&fit_xy)],
+    );
+
     // Create initial bitmap and set it
     create_and_set_bitmap(&mut env, &image_view, w, h);
 
     let global = env.new_global_ref(image_view).expect("Failed to create global ref");
     let handle = super::register_widget(global);
 
-    CANVAS_STATES.with(|s| {
-        s.borrow_mut().insert(handle, CanvasState {
-            width: w,
-            height: h,
-            density,
-            cmds: Vec::new(),
-        });
+    CANVAS_STATES.lock().unwrap().insert(handle, CanvasState {
+        width: w,
+        height: h,
+        density,
+        cmds: Vec::new(),
     });
 
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
@@ -95,10 +118,10 @@ fn create_and_set_bitmap(env: &mut jni::JNIEnv, image_view: &JObject, w: i32, h:
 }
 
 fn repaint(handle: i64) {
-    let cmds = CANVAS_STATES.with(|s| {
-        let states = s.borrow();
+    let cmds = {
+        let states = CANVAS_STATES.lock().unwrap();
         states.get(&handle).map(|st| (st.width, st.height, st.cmds.clone()))
-    });
+    };
 
     if let Some((w, h, cmds)) = cmds {
         if let Some(view_ref) = super::get_widget(handle) {
@@ -143,12 +166,17 @@ fn repaint(handle: i64) {
             for cmd in &cmds {
                 match cmd {
                     DrawCmd::Clear => {
-                        // Fill with white
+                        // Fill with transparent (clear the bitmap)
+                        // Use PorterDuff.Mode.CLEAR to erase all pixels
+                        let mode_class = env.find_class("android/graphics/PorterDuff$Mode").expect("PorterDuff$Mode");
+                        let clear_mode = env.get_static_field(
+                            &mode_class, "CLEAR", "Landroid/graphics/PorterDuff$Mode;",
+                        ).expect("CLEAR").l().expect("mode");
                         let _ = env.call_method(
                             &canvas,
                             "drawColor",
-                            "(I)V",
-                            &[JValue::Int(0xFFFFFFFFu32 as i32)],
+                            "(ILandroid/graphics/PorterDuff$Mode;)V",
+                            &[JValue::Int(0), JValue::Object(&clear_mode)],
                         );
                     }
                     DrawCmd::BeginPath => {
@@ -183,7 +211,7 @@ fn repaint(handle: i64) {
                             let _ = env.call_method(
                                 &canvas,
                                 "drawLine",
-                                "(FFFF Landroid/graphics/Paint;)V",
+                                "(FFFFLandroid/graphics/Paint;)V",
                                 &[
                                     JValue::Float(x1),
                                     JValue::Float(y1),
@@ -272,43 +300,43 @@ fn repaint(handle: i64) {
 }
 
 pub fn clear(handle: i64) {
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             state.cmds.clear();
             state.cmds.push(DrawCmd::Clear);
         }
-    });
+    }
     repaint(handle);
 }
 
 pub fn begin_path(handle: i64) {
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             state.cmds.push(DrawCmd::BeginPath);
         }
-    });
+    }
 }
 
 pub fn move_to(handle: i64, x: f64, y: f64) {
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             let d = state.density;
             state.cmds.push(DrawCmd::MoveTo(x as f32 * d, y as f32 * d));
         }
-    });
+    }
 }
 
 pub fn line_to(handle: i64, x: f64, y: f64) {
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             let d = state.density;
             state.cmds.push(DrawCmd::LineTo(x as f32 * d, y as f32 * d));
         }
-    });
+    }
 }
 
 pub fn stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64) {
@@ -318,13 +346,13 @@ pub fn stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64) {
     let bi = (b * 255.0) as u32;
     let color = ((ai << 24) | (ri << 16) | (gi << 8) | bi) as i32;
 
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             let d = state.density;
             state.cmds.push(DrawCmd::Stroke(color, line_width as f32 * d));
         }
-    });
+    }
     repaint(handle);
 }
 
@@ -332,12 +360,12 @@ pub fn fill_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g
     let c1 = argb(a1, r1, g1, b1);
     let c2 = argb(a2, r2, g2, b2);
 
-    CANVAS_STATES.with(|s| {
-        let mut states = s.borrow_mut();
+    {
+        let mut states = CANVAS_STATES.lock().unwrap();
         if let Some(state) = states.get_mut(&handle) {
             state.cmds.push(DrawCmd::FillGradient(c1, c2, direction));
         }
-    });
+    }
     repaint(handle);
 }
 
