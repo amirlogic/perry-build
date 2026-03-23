@@ -79,6 +79,30 @@ perry fetch.ts -o fetch
 
 Perry compiles async/await to a native async runtime backed by Tokio.
 
+## Multi-Threading
+
+Perry can do something no JavaScript runtime can — run your code on multiple CPU cores:
+
+```typescript
+import { parallelMap, parallelFilter, spawn } from "perry/thread";
+
+const data = [1, 2, 3, 4, 5, 6, 7, 8];
+
+// Process all elements across all CPU cores
+const doubled = parallelMap(data, (x) => x * 2);
+console.log(doubled); // [2, 4, 6, 8, 10, 12, 14, 16]
+
+// Run heavy work in the background
+const result = await spawn(() => {
+  let sum = 0;
+  for (let i = 0; i < 100_000_000; i++) sum += i;
+  return sum;
+});
+console.log(result);
+```
+
+This is real OS-level parallelism, not web workers or separate isolates. See [Multi-Threading](../threading/overview.md) for details.
+
 ## What the Compiler Produces
 
 When you run `perry file.ts -o output`, Perry:

@@ -111,11 +111,11 @@ class CustomError extends Error {
 }
 ```
 
-## Single-Threaded Execution
+## Threading Model
 
-User code runs on a single thread. Async I/O runs on Tokio worker threads, but there's no `SharedArrayBuffer` or true multi-threading for user code.
+Perry supports real multi-threading via `parallelMap` and `spawn` from `perry/thread`. See [Multi-Threading](../threading/overview.md).
 
-`worker_threads` is supported for background tasks, but workers communicate via message passing (not shared memory).
+Threads do not share mutable state — closures passed to thread primitives cannot capture mutable variables (enforced at compile time). Values are deep-copied across thread boundaries. There is no `SharedArrayBuffer` or `Atomics`.
 
 ## No Computed Property Names
 

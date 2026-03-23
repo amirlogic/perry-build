@@ -307,6 +307,9 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
     // Process any scheduled resolutions (simulates async completions)
     ran += process_scheduled_resolves();
 
+    // Process pending thread results (from perry/thread spawn)
+    ran += crate::thread::js_thread_process_pending();
+
     // Then process the task queue
     loop {
         let task = TASK_QUEUE.with(|q| q.borrow_mut().pop());

@@ -3245,6 +3245,51 @@ impl Compiler {
         }
 
         // ========================================================================
+        // Perry threading primitives (perry/thread)
+        // ========================================================================
+
+        // js_thread_parallel_map(array_val: f64, closure_val: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // array (NaN-boxed)
+            sig.params.push(AbiParam::new(types::F64)); // closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::F64)); // result array (NaN-boxed)
+            let func_id = self.module.declare_function(
+                "js_thread_parallel_map",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_thread_parallel_map".to_string(), func_id);
+        }
+
+        // js_thread_parallel_filter(array_val: f64, closure_val: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // array (NaN-boxed)
+            sig.params.push(AbiParam::new(types::F64)); // predicate closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::F64)); // filtered array (NaN-boxed)
+            let func_id = self.module.declare_function(
+                "js_thread_parallel_filter",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_thread_parallel_filter".to_string(), func_id);
+        }
+
+        // js_thread_spawn(closure_val: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::F64)); // promise (NaN-boxed)
+            let func_id = self.module.declare_function(
+                "js_thread_spawn",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_thread_spawn".to_string(), func_id);
+        }
+
+        // ========================================================================
         // MySQL2 stdlib functions
         // ========================================================================
 

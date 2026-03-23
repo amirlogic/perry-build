@@ -17,6 +17,13 @@
 - [Type System](language/type-system.md)
 - [Limitations](language/limitations.md)
 
+# Multi-Threading
+
+- [Overview](threading/overview.md)
+- [parallelMap](threading/parallel-map.md)
+- [parallelFilter](threading/parallel-filter.md)
+- [spawn](threading/spawn.md)
+
 # Native UI
 
 - [Overview](ui/overview.md)

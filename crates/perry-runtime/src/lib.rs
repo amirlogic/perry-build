@@ -44,6 +44,7 @@ pub mod stdlib_stubs;
 pub mod redis_client;
 #[cfg(feature = "full")]
 pub mod plugin;
+pub mod thread;
 pub mod geisterhand_registry;
 #[cfg(target_os = "ios")]
 pub mod ios_game_loop;

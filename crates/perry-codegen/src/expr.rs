@@ -17932,6 +17932,68 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // ========================================================================
+            // Perry threading primitives (parallelMap, spawn)
+            // ========================================================================
+            if native_module == "perry/thread" && object.is_none() {
+                match method.as_str() {
+                    "parallelMap" => {
+                        // parallelMap(array, closure) -> array
+                        // Both args are f64 (NaN-boxed pointers)
+                        let array_val = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)) // undefined
+                        };
+                        let closure_val = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)) // undefined
+                        };
+                        let pmap_func = extern_funcs.get("js_thread_parallel_map")
+                            .ok_or_else(|| anyhow!("js_thread_parallel_map not declared"))?;
+                        let pmap_ref = module.declare_func_in_func(*pmap_func, builder.func);
+                        let call = builder.ins().call(pmap_ref, &[array_val, closure_val]);
+                        // Returns f64 (NaN-boxed POINTER_TAG array pointer)
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "parallelFilter" => {
+                        // parallelFilter(array, predicate) -> array
+                        let array_val = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001))
+                        };
+                        let closure_val = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001))
+                        };
+                        let pfilter_func = extern_funcs.get("js_thread_parallel_filter")
+                            .ok_or_else(|| anyhow!("js_thread_parallel_filter not declared"))?;
+                        let pfilter_ref = module.declare_func_in_func(*pfilter_func, builder.func);
+                        let call = builder.ins().call(pfilter_ref, &[array_val, closure_val]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "spawn" => {
+                        // spawn(closure) -> Promise
+                        // Closure arg is f64 (NaN-boxed pointer)
+                        let closure_val = if !arg_vals.is_empty() {
+                            ensure_f64(builder, arg_vals[0])
+                        } else {
+                            builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)) // undefined
+                        };
+                        let spawn_func = extern_funcs.get("js_thread_spawn")
+                            .ok_or_else(|| anyhow!("js_thread_spawn not declared"))?;
+                        let spawn_ref = module.declare_func_in_func(*spawn_func, builder.func);
+                        let call = builder.ins().call(spawn_ref, &[closure_val]);
+                        // Returns f64 (NaN-boxed POINTER_TAG promise pointer)
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    _ => {} // Fall through to generic dispatch
+                }
+            }
+
             // Determine which FFI function to call based on module, class, and method
             let func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
                 // mysql2 module functions (no object)

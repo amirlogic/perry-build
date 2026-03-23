@@ -67,6 +67,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/i18n",
     // Node.js worker threads
     "worker_threads",
+    // Perry threading primitives (parallelMap, spawn)
+    "perry/thread",
     // SQLite
     "better-sqlite3",
 ];
@@ -92,6 +94,7 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "perry/system",
     "perry/widget",
     "perry/i18n",
+    "perry/thread",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.

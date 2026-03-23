@@ -56,9 +56,21 @@ impl ArenaBlock {
 }
 
 /// Thread-local arena allocator
+///
+/// When a thread exits (e.g., worker threads from `perry/thread`), the Drop
+/// impl frees all arena blocks so memory isn't leaked.
 struct Arena {
     blocks: Vec<ArenaBlock>,
     current: usize,
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        for block in &self.blocks {
+            let layout = std::alloc::Layout::from_size_align(block.size, 16).unwrap();
+            unsafe { std::alloc::dealloc(block.data, layout); }
+        }
+    }
 }
 
 impl Arena {

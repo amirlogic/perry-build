@@ -864,21 +864,103 @@ pub extern "C" fn js_array_sort_with_comparator(arr: *mut ArrayHeader, comparato
         }
         let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
 
-        // Insertion sort — stable, simple, and works well for typical JS array sizes.
-        // Each comparison calls the closure via js_closure_call2.
-        for i in 1..length {
-            let key = *elements_ptr.add(i);
-            let mut j = i as isize - 1;
-            while j >= 0 {
-                let cmp = js_closure_call2(comparator, *elements_ptr.add(j as usize), key);
-                if cmp > 0.0 {
-                    ptr::write(elements_ptr.add((j + 1) as usize), *elements_ptr.add(j as usize));
-                    j -= 1;
-                } else {
-                    break;
+        // TimSort-style hybrid: insertion sort for small runs, merge sort for large arrays.
+        // Stable, O(n log n) worst case. Insertion sort is used for runs <= 32 elements
+        // because it has lower overhead for small inputs.
+        const INSERTION_THRESHOLD: usize = 32;
+
+        if length <= INSERTION_THRESHOLD {
+            // Insertion sort for small arrays
+            for i in 1..length {
+                let key = *elements_ptr.add(i);
+                let mut j = i as isize - 1;
+                while j >= 0 {
+                    let cmp = js_closure_call2(comparator, *elements_ptr.add(j as usize), key);
+                    if cmp > 0.0 {
+                        ptr::write(elements_ptr.add((j + 1) as usize), *elements_ptr.add(j as usize));
+                        j -= 1;
+                    } else {
+                        break;
+                    }
                 }
+                ptr::write(elements_ptr.add((j + 1) as usize), key);
             }
-            ptr::write(elements_ptr.add((j + 1) as usize), key);
+        } else {
+            // Bottom-up merge sort for large arrays — O(n log n) stable sort
+            let mut buf: Vec<f64> = Vec::with_capacity(length);
+            buf.set_len(length);
+
+            // Phase 1: Sort small runs with insertion sort
+            let mut run_start = 0;
+            while run_start < length {
+                let run_end = (run_start + INSERTION_THRESHOLD).min(length);
+                for i in (run_start + 1)..run_end {
+                    let key = *elements_ptr.add(i);
+                    let mut j = i as isize - 1;
+                    while j >= run_start as isize {
+                        let cmp = js_closure_call2(comparator, *elements_ptr.add(j as usize), key);
+                        if cmp > 0.0 {
+                            ptr::write(elements_ptr.add((j + 1) as usize), *elements_ptr.add(j as usize));
+                            j -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    ptr::write(elements_ptr.add((j + 1) as usize), key);
+                }
+                run_start = run_end;
+            }
+
+            // Phase 2: Merge runs, doubling width each pass
+            let buf_ptr = buf.as_mut_ptr();
+            let mut width = INSERTION_THRESHOLD;
+            let mut src = elements_ptr;
+            let mut dst = buf_ptr;
+
+            while width < length {
+                let mut i = 0;
+                while i < length {
+                    let left = i;
+                    let mid = (i + width).min(length);
+                    let right = (i + 2 * width).min(length);
+
+                    // Merge [left..mid) and [mid..right) into dst
+                    let mut l = left;
+                    let mut r = mid;
+                    let mut k = left;
+                    while l < mid && r < right {
+                        let cmp = js_closure_call2(comparator, *src.add(l), *src.add(r));
+                        if cmp <= 0.0 {
+                            *dst.add(k) = *src.add(l);
+                            l += 1;
+                        } else {
+                            *dst.add(k) = *src.add(r);
+                            r += 1;
+                        }
+                        k += 1;
+                    }
+                    while l < mid {
+                        *dst.add(k) = *src.add(l);
+                        l += 1;
+                        k += 1;
+                    }
+                    while r < right {
+                        *dst.add(k) = *src.add(r);
+                        r += 1;
+                        k += 1;
+                    }
+
+                    i += 2 * width;
+                }
+                // Swap src and dst for next pass
+                std::mem::swap(&mut src, &mut dst);
+                width *= 2;
+            }
+
+            // If final result is in buf, copy back to elements
+            if src != elements_ptr {
+                ptr::copy_nonoverlapping(src, elements_ptr, length);
+            }
         }
 
         arr

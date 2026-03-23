@@ -688,6 +688,7 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
         Some("android") => "libperry_ui_android.a",
+        Some("watchos-simulator") | Some("watchos") => "libperry_ui_watchos.a",
         Some("linux") => "libperry_ui_gtk4.a",
         Some("windows") => "perry_ui_windows.lib",
         #[cfg(target_os = "windows")]
@@ -2795,11 +2796,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         return compile_for_wearos_tile(&ctx, &args, format);
     }
 
-    // Transform JS imports into runtime calls
+    // Transform JS imports into runtime calls (parallel)
+    use rayon::prelude::*;
     if ctx.needs_js_runtime {
-        for (_, hir_module) in ctx.native_modules.iter_mut() {
+        ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
             perry_hir::transform_js_imports(hir_module);
-        }
+        });
     }
 
     // Build map of exported native instances from all modules
@@ -2832,31 +2834,27 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Fix local native instance method calls within each module
-    // This handles cases like: const pool = mysql.createPool(); pool.execute();
-    for (_, hir_module) in ctx.native_modules.iter_mut() {
+    // Fix local native instance method calls within each module (parallel)
+    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
         perry_hir::fix_local_native_instances(hir_module);
-    }
+    });
 
-    // Fix cross-module native instance method calls
+    // Fix cross-module native instance method calls (parallel — reads immutable maps)
     if !exported_instances.is_empty() || !exported_func_return_instances.is_empty() {
-        for (_, hir_module) in ctx.native_modules.iter_mut() {
+        ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
             perry_hir::fix_cross_module_native_instances(hir_module, &exported_instances, &exported_func_return_instances);
-        }
+        });
     }
 
-    // Re-run local native instance fix after cross-module fixes.
-    // Cross-module fixes may have created new NativeMethodCall expressions
-    // (e.g., db.prepare(sql) → NativeMethodCall) that produce native instances
-    // which need local tracking (e.g., const stmt = db.prepare(sql); stmt.all()).
-    for (_, hir_module) in ctx.native_modules.iter_mut() {
+    // Re-run local native instance fix after cross-module fixes (parallel)
+    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
         perry_hir::fix_local_native_instances(hir_module);
-    }
+    });
 
-    // Run monomorphization pass on all native modules
-    for (_, hir_module) in ctx.native_modules.iter_mut() {
+    // Run monomorphization pass on all native modules (parallel)
+    ctx.native_modules.par_iter_mut().for_each(|(_, hir_module)| {
         perry_hir::monomorphize_module(hir_module);
-    }
+    });
 
     // --- i18n: apply i18n transform pass ---
     let i18n_table = if let Some(ref config) = i18n_config {
@@ -3544,236 +3542,224 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let target = args.target.clone();
 
-    // Compile native modules
-    let mut failed_modules: Vec<String> = Vec::new();
-    for (path, hir_module) in &ctx.native_modules {
-        let mut compiler = perry_codegen::Compiler::new(target.as_deref())?;
+    // Pre-compute feature flags (moved out of parallel loop to avoid ctx mutation)
+    let compiled_features: Vec<String> = if let Some(ref features_str) = args.features {
+        let mut features: Vec<String> = features_str.split(',')
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
+        let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator"));
+        if is_mobile {
+            features.retain(|f| f != "plugins");
+        }
+        if features.iter().any(|f| f == "plugins") {
+            ctx.needs_plugins = true;
+        }
+        features
+    } else {
+        Vec::new()
+    };
 
-        // Check if this is the entry module
-        let is_entry = path == &entry_path;
-        compiler.set_is_entry_module(is_entry);
+    // Pre-compute native library FFI functions
+    let ffi_functions: Vec<(String, Vec<String>, String)> = ctx.native_libraries.iter()
+        .flat_map(|lib| lib.functions.iter().map(|f| {
+            (f.name.clone(), f.params.clone(), f.returns.clone())
+        }))
+        .collect();
 
-        // Set output type for dylib support
-        compiler.set_output_type(args.output_type.clone());
+    // Pre-compute JS module specifiers
+    let js_module_specifiers: Vec<String> = ctx.js_modules.keys().cloned().collect();
+    let needs_js_runtime = ctx.needs_js_runtime || args.enable_js_runtime;
 
-        // Pass compile-time feature flags
-        if let Some(ref features_str) = args.features {
-            let mut features: Vec<String> = Vec::new();
-            for f in features_str.split(',') {
-                let trimmed = f.trim();
-                if !trimmed.is_empty() {
-                    features.push(trimmed.to_string());
+    // Compile native modules in parallel using rayon
+    use rayon::prelude::*;
+
+    let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
+        .map(|(path, hir_module)| {
+            let mut compiler = perry_codegen::Compiler::new(target.as_deref())
+                .map_err(|e| format!("Failed to create compiler: {}", e))?;
+
+            let is_entry = path == &entry_path;
+            compiler.set_is_entry_module(is_entry);
+            compiler.set_output_type(args.output_type.clone());
+
+            if !compiled_features.is_empty() {
+                compiler.set_enabled_features(compiled_features.clone());
+            }
+
+            if is_entry {
+                for module_name in &non_entry_module_names {
+                    compiler.add_native_module_init(module_name.clone());
                 }
-            }
-            // Auto-disable plugins on mobile targets (App Store policies)
-            let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator"));
-            if is_mobile {
-                features.retain(|f| f != "plugins");
-            }
-            // If "plugins" feature is enabled, set needs_plugins for -export_dynamic
-            if features.iter().any(|f| f == "plugins") {
-                ctx.needs_plugins = true;
-            }
-            compiler.set_enabled_features(features);
-        }
-
-        // For entry module, add init function calls for all other native modules
-        if is_entry {
-            for module_name in &non_entry_module_names {
-                compiler.add_native_module_init(module_name.clone());
-            }
-
-            // Register bundled extensions for static plugin registration in init
-            if !bundled_extensions.is_empty() {
-                for (ext_path, _plugin_id) in &bundled_extensions {
-                    let ext_prefix = compute_module_prefix(
-                        &ext_path.to_string_lossy(),
-                        &ctx.project_root,
-                    );
-                    compiler.add_bundled_extension(
-                        ext_path.to_string_lossy().to_string(),
-                        ext_prefix,
-                    );
-                }
-            }
-        }
-
-        // Tell codegen whether stdlib functions are available
-        compiler.set_needs_stdlib(ctx.needs_stdlib);
-        compiler.set_needs_geisterhand(ctx.needs_geisterhand);
-        compiler.set_geisterhand_port(ctx.geisterhand_port);
-
-        // Pass external native library FFI functions to codegen
-        if !ctx.native_libraries.is_empty() {
-            let ffi_functions: Vec<(String, Vec<String>, String)> = ctx.native_libraries.iter()
-                .flat_map(|lib| lib.functions.iter().map(|f| {
-                    (f.name.clone(), f.params.clone(), f.returns.clone())
-                }))
-                .collect();
-            compiler.set_native_library_functions(ffi_functions);
-        }
-
-        // If we need JS runtime, tell the compiler to generate init code
-        // Also enable when --enable-js-runtime is passed (for native modules
-        // that need V8 fallback, e.g., ethers.Contract)
-        if ctx.needs_js_runtime || args.enable_js_runtime {
-            compiler.set_needs_js_runtime(true);
-            // Pass JS module paths for loading
-            for (specifier, _module) in &ctx.js_modules {
-                compiler.add_js_module(specifier.clone());
-            }
-        }
-
-        // Register imported classes from other native modules
-        for import in &hir_module.imports {
-            // Only process imports from other native TypeScript modules
-            if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
-                continue;
-            }
-
-            let resolved_path = match &import.resolved_path {
-                Some(p) => p.clone(),
-                None => continue,
-            };
-
-            let resolved_path_str = resolved_path.clone();
-            let source_module_prefix = compute_module_prefix(&resolved_path_str, &ctx.project_root);
-
-            for spec in &import.specifiers {
-                match spec {
-                    perry_hir::ImportSpecifier::Namespace { local } => {
-                        // Handle namespace imports: import * as X from './module'
-                        // Register the local name so codegen intercepts PropertyGet on it
-                        compiler.register_namespace_import(local.clone());
-                        // Pre-declare all exports from the target module so PropertyGet resolves them
-                        if let Some(exports) = all_module_exports.get(&resolved_path_str) {
-                            for (export_name, origin_path) in exports {
-                                let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
-                                let _ = compiler.pre_declare_import_export(export_name, export_name, &origin_prefix);
-
-                                // Also handle functions if re-exported
-                                let key = (origin_path.clone(), export_name.clone());
-                                if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                                    compiler.register_imported_func_param_count(export_name.clone(), param_count);
-                                    let _ = compiler.pre_declare_import_wrapper(export_name, &origin_prefix, param_count);
-                                }
-
-                                // Register imported classes
-                                if let Some(class) = exported_classes.get(&key) {
-                                    compiler.register_imported_class(class, None, &origin_prefix)?;
-                                }
-
-                                // Register imported enums
-                                if let Some(members) = exported_enums.get(&key) {
-                                    compiler.register_imported_enum(export_name, members);
-                                }
-                            }
-                        }
-                        continue;
+                if !bundled_extensions.is_empty() {
+                    for (ext_path, _plugin_id) in &bundled_extensions {
+                        let ext_prefix = compute_module_prefix(
+                            &ext_path.to_string_lossy(),
+                            &ctx.project_root,
+                        );
+                        compiler.add_bundled_extension(
+                            ext_path.to_string_lossy().to_string(),
+                            ext_prefix,
+                        );
                     }
-                    _ => {}
+                }
+            }
+
+            compiler.set_needs_stdlib(ctx.needs_stdlib);
+            compiler.set_needs_geisterhand(ctx.needs_geisterhand);
+            compiler.set_geisterhand_port(ctx.geisterhand_port);
+
+            if !ffi_functions.is_empty() {
+                compiler.set_native_library_functions(ffi_functions.clone());
+            }
+
+            if needs_js_runtime {
+                compiler.set_needs_js_runtime(true);
+                for specifier in &js_module_specifiers {
+                    compiler.add_js_module(specifier.clone());
+                }
+            }
+
+            // Register imported classes from other native modules
+            for import in &hir_module.imports {
+                if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
+                    continue;
                 }
 
-                let (local_name, exported_name) = match spec {
-                    perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
-                    perry_hir::ImportSpecifier::Default { local } => (local.clone(), "default".to_string()),
-                    perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
+                let resolved_path = match &import.resolved_path {
+                    Some(p) => p.clone(),
+                    None => continue,
                 };
 
-                let key = (resolved_path_str.clone(), exported_name.clone());
+                let resolved_path_str = resolved_path.clone();
+                let source_module_prefix = compute_module_prefix(&resolved_path_str, &ctx.project_root);
 
-                // Resolve through re-export chains to find the origin module prefix.
-                // When importing from a barrel file (e.g., lib.ts with `export * from "./lib/db.js"`),
-                // we need to link to the ORIGIN module's wrapper (___wrapper_lib_db_ts__executeQuery),
-                // not the barrel file's wrapper (___wrapper_lib_ts__executeQuery) which would be a stub.
-                let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
-                    if let Some(origin_path) = exports.get(&exported_name) {
-                        if origin_path != &resolved_path_str {
-                            compute_module_prefix(origin_path, &ctx.project_root)
+                for spec in &import.specifiers {
+                    match spec {
+                        perry_hir::ImportSpecifier::Namespace { local } => {
+                            compiler.register_namespace_import(local.clone());
+                            if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                                for (export_name, origin_path) in exports {
+                                    let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
+                                    let _ = compiler.pre_declare_import_export(export_name, export_name, &origin_prefix);
+
+                                    let key = (origin_path.clone(), export_name.clone());
+                                    if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                                        compiler.register_imported_func_param_count(export_name.clone(), param_count);
+                                        let _ = compiler.pre_declare_import_wrapper(export_name, &origin_prefix, param_count);
+                                    }
+
+                                    if let Some(class) = exported_classes.get(&key) {
+                                        let _ = compiler.register_imported_class(class, None, &origin_prefix);
+                                    }
+
+                                    if let Some(members) = exported_enums.get(&key) {
+                                        compiler.register_imported_enum(export_name, members);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    let (local_name, exported_name) = match spec {
+                        perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
+                        perry_hir::ImportSpecifier::Default { local } => (local.clone(), "default".to_string()),
+                        perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
+                    };
+
+                    let key = (resolved_path_str.clone(), exported_name.clone());
+
+                    let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                        if let Some(origin_path) = exports.get(&exported_name) {
+                            if origin_path != &resolved_path_str {
+                                compute_module_prefix(origin_path, &ctx.project_root)
+                            } else {
+                                source_module_prefix.clone()
+                            }
                         } else {
                             source_module_prefix.clone()
                         }
                     } else {
                         source_module_prefix.clone()
+                    };
+
+                    if let Some(class) = exported_classes.get(&key) {
+                        let _ = compiler.register_imported_class(class, Some(&local_name), &effective_prefix);
                     }
-                } else {
-                    source_module_prefix.clone()
-                };
 
-                // Check if this import is a class from another module
-                if let Some(class) = exported_classes.get(&key) {
-                    // Register this class as an import in the current compiler
-                    // Pass the local_name as an alias so the class can be found when used with that name
-                    // effective_prefix resolves through re-export chains to the origin module
-                    compiler.register_imported_class(class, Some(&local_name), &effective_prefix)?;
-                }
+                    if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                        compiler.register_imported_func_param_count(exported_name.clone(), param_count);
+                        let _ = compiler.pre_declare_import_wrapper(&exported_name, &effective_prefix, param_count);
+                        if local_name != exported_name {
+                            compiler.register_imported_func_param_count(local_name.clone(), param_count);
+                            compiler.register_import_wrapper_alias(&local_name, &exported_name, param_count);
+                        }
+                    }
+                    if let Some(return_type) = exported_func_return_types.get(&key) {
+                        compiler.register_imported_func_return_type(local_name.clone(), return_type.clone());
+                    }
 
-                // Check if this import is a function from another module
-                // Register its param count, return type, and pre-declare the scoped wrapper
-                if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                    compiler.register_imported_func_param_count(exported_name.clone(), param_count);
-                    let _ = compiler.pre_declare_import_wrapper(&exported_name, &effective_prefix, param_count);
-                    // When local name differs (e.g., default imports), also register wrapper under local name
-                    if local_name != exported_name {
-                        compiler.register_imported_func_param_count(local_name.clone(), param_count);
-                        compiler.register_import_wrapper_alias(&local_name, &exported_name, param_count);
+                    let _ = compiler.pre_declare_import_export(&exported_name, &local_name, &effective_prefix);
+
+                    if let Some(members) = exported_enums.get(&key) {
+                        compiler.register_imported_enum(&local_name, members);
                     }
                 }
-                // Register the imported function's return type for await type resolution
-                if let Some(return_type) = exported_func_return_types.get(&key) {
-                    compiler.register_imported_func_return_type(local_name.clone(), return_type.clone());
+            }
+
+            let module_name = hir_module.name.clone();
+            let module_path = path.display().to_string();
+            let object_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compiler.compile_module(hir_module)
+            })) {
+                Ok(Ok(code)) => code,
+                Ok(Err(e)) => {
+                    return Err(format!("Error compiling module '{}' ({}): {}", module_name, module_path, e));
                 }
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    return Err(format!("PANIC compiling module '{}' ({}): {}", module_name, module_path, msg));
+                }
+            };
 
-                // Pre-declare scoped export global for this import
-                let _ = compiler.pre_declare_import_export(&exported_name, &local_name, &effective_prefix);
+            let obj_name = hir_module.name
+                .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+                .trim_matches('_')
+                .to_string();
+            let obj_path = PathBuf::from(format!("{}.o", obj_name));
 
-                // Check if this import is an enum from another module
-                if let Some(members) = exported_enums.get(&key) {
-                    compiler.register_imported_enum(&local_name, members);
+            Ok((obj_path, object_code))
+        })
+        .collect();
+
+    // Write object files and collect results (sequential — I/O + error reporting)
+    let mut failed_modules: Vec<String> = Vec::new();
+    for result in compile_results {
+        match result {
+            Ok((obj_path, object_code)) => {
+                fs::write(&obj_path, &object_code)?;
+                match format {
+                    OutputFormat::Text => println!("Wrote object file: {}", obj_path.display()),
+                    OutputFormat::Json => {}
+                }
+                obj_paths.push(obj_path);
+            }
+            Err(msg) => {
+                eprintln!("{}", msg);
+                // Extract module name from error message for failed_modules
+                if let Some(name) = msg.split('\'').nth(1) {
+                    failed_modules.push(name.to_string());
                 }
             }
         }
-
-        let module_name_for_err = hir_module.name.clone();
-        let module_path_for_err = path.display().to_string();
-        let object_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compiler.compile_module(hir_module)
-        })) {
-            Ok(Ok(code)) => code,
-            Ok(Err(e)) => {
-                eprintln!("Error compiling module '{}' ({}): {}", module_name_for_err, module_path_for_err, e);
-                failed_modules.push(module_name_for_err);
-                continue;
-            }
-            Err(panic_info) => {
-                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                eprintln!("PANIC compiling module '{}' ({}): {}", module_name_for_err, module_path_for_err, msg);
-                failed_modules.push(module_name_for_err);
-                continue;
-            }
-        };
-
-        // Generate a unique object file name using the full sanitized module name.
-        // Module names are derived from relative paths and are guaranteed unique,
-        // so this avoids collisions like channels/plugins/types.ts vs plugins/types.ts.
-        let obj_name = hir_module.name
-            .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
-            .trim_matches('_')
-            .to_string();
-        let obj_path = PathBuf::from(format!("{}.o", obj_name));
-
-        fs::write(&obj_path, &object_code)?;
-        match format {
-            OutputFormat::Text => println!("Wrote object file: {}", obj_path.display()),
-            OutputFormat::Json => {}
-        }
-        obj_paths.push(obj_path);
     }
 
     // Generate stubs for missing symbols from unresolved imports (npm packages etc.)
@@ -3828,49 +3814,48 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         // COFF (Windows targets): no prefix
         // ELF (Linux/Android targets): no prefix
         let is_macho = !is_windows && !is_linux && !is_android && !is_ios && cfg!(target_os = "macos");
-        for scan_path in &all_scan_paths {
-            if let Ok(output) = std::process::Command::new(&nm_cmd).arg("-g").arg(scan_path).output() {
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
-                        // Strip leading `_` only for Mach-O objects (native macOS builds)
-                        let cn = if is_macho {
-                            sn.strip_prefix('_').unwrap_or(sn)
-                        } else {
-                            sn
-                        };
-                        if st == "U" {
-                            // Add export/wrapper symbols to undefined list
-                            if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
-                                undefined_syms.insert(cn.to_string());
+        // Scan object files in parallel for symbol resolution
+        let scan_results: Vec<(HashSet<String>, HashSet<String>)> = all_scan_paths.par_iter()
+            .map(|scan_path| {
+                let mut local_undef = HashSet::new();
+                let mut local_def = HashSet::new();
+                if let Ok(output) = std::process::Command::new(&nm_cmd).arg("-g").arg(scan_path).output() {
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
+                            let cn = if is_macho {
+                                sn.strip_prefix('_').unwrap_or(sn)
+                            } else {
+                                sn
+                            };
+                            if st == "U" {
+                                if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
+                                    local_undef.insert(cn.to_string());
+                                } else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle"
+                                    || cn == "js_new_instance" || cn == "js_create_callback" || cn == "js_runtime_init"
+                                    || cn == "js_set_property" || cn == "js_get_export" || cn == "js_await_js_promise") {
+                                    local_undef.insert(cn.to_string());
+                                } else if is_windows && (
+                                    cn.starts_with("perry_ui_") || cn.starts_with("perry_system_") ||
+                                    cn.starts_with("perry_plugin_") || cn.starts_with("perry_get_")
+                                ) {
+                                    local_undef.insert(cn.to_string());
+                                }
+                            } else if matches!(st, "T" | "t" | "D" | "d" | "S" | "s" | "B" | "b") {
+                                local_def.insert(cn.to_string());
                             }
-                            // Only add jsruntime symbols if jsruntime is NOT being used
-                            // (these are defined in libperry_jsruntime.a)
-                            else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle"
-                                || cn == "js_new_instance" || cn == "js_create_callback" || cn == "js_runtime_init"
-                                || cn == "js_set_property" || cn == "js_get_export" || cn == "js_await_js_promise") {
-                                undefined_syms.insert(cn.to_string());
-                            }
-                            // On Windows (MSVC/lld-link), the linker resolves ALL symbols in
-                            // linked .lib archives, unlike macOS/Linux which only pull in needed
-                            // objects. Collect UI/system/plugin symbols so stubs are generated
-                            // for any that aren't defined in the platform UI lib. This handles
-                            // both the no-UI case and incomplete UI lib implementations (e.g.
-                            // perry_ui_windows.lib may not implement all functions that exist
-                            // on macOS).
-                            else if is_windows && (
-                                cn.starts_with("perry_ui_") || cn.starts_with("perry_system_") ||
-                                cn.starts_with("perry_plugin_") || cn.starts_with("perry_get_")
-                            ) {
-                                undefined_syms.insert(cn.to_string());
-                            }
-                        } else if matches!(st, "T" | "t" | "D" | "d" | "S" | "s" | "B" | "b") {
-                            defined_syms.insert(cn.to_string());
                         }
                     }
                 }
-            }
+                (local_undef, local_def)
+            })
+            .collect();
+
+        // Merge parallel scan results
+        for (local_undef, local_def) in scan_results {
+            undefined_syms.extend(local_undef);
+            defined_syms.extend(local_def);
         }
         let missing: Vec<String> = undefined_syms.difference(&defined_syms).cloned().collect();
         if !missing.is_empty() {
@@ -4080,9 +4065,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
             ))?;
 
+        // Rename _main to _perry_main_init in the entry object file so it doesn't
+        // conflict with the SwiftUI @main entry point in PerryWatchApp.swift.
+        // The Swift runtime calls perry_main_init() to initialize the compiled TS code.
+        if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
+            // Use rustup's llvm-objcopy to rename _main to _perry_main_init
+            let objcopy = std::env::var("HOME").ok()
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+            let _ = Command::new(&objcopy)
+                .args(["--redefine-sym", "_main=_perry_main_init"])
+                .arg(entry_obj)
+                .status();
+        }
+
         let mut c = Command::new(swiftc);
         c.arg("-target").arg(triple)
          .arg("-sdk").arg(&sysroot)
+         .arg("-parse-as-library")
          .arg(&swift_runtime);
         c
     } else if is_ios {
@@ -4193,6 +4194,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
+        } else if is_watchos {
+            cmd.arg("-Xlinker").arg("-dead_strip");
         } else {
             cmd.arg("-Wl,-dead_strip");
         }
@@ -4207,7 +4210,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // For Android (ELF), skip the extra runtime when UI provides it.
     // On Windows (MSVC), always link the runtime — the UI lib's rlib dependency on
     // perry-runtime may not include all symbols (e.g., perry_init_guard_check_and_set).
-    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    // watchOS: swiftc treats duplicate symbols as errors (not warnings like clang),
+    // so skip the standalone runtime when the UI lib already bundles it.
+    let skip_runtime = (is_android || is_watchos) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);

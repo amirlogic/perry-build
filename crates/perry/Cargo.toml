@@ -47,3 +47,5 @@ tar.workspace = true
 base64.workspace = true
 zip.workspace = true
 jsonwebtoken = "9.3"
+dotenvy = "0.15"
+rayon = "1.10"
