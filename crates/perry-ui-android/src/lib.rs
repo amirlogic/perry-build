@@ -136,6 +136,7 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeShutdown(
     app::signal_shutdown();
 }
 
+#[cfg(not(test))]
 extern "C" {
     fn main();
 }
@@ -145,6 +146,7 @@ extern "C" {
 /// Called from the native thread to run the compiled TypeScript entry point.
 /// This wraps the compiler-generated `main()` function as a JNI method on PerryBridge,
 /// so the Activity doesn't need its own native method (which would require package-specific JNI names).
+#[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn Java_com_perry_app_PerryBridge_nativeMain(
     _env: jni::JNIEnv,
