@@ -774,7 +774,13 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let minimum_os = config.macos.as_ref().and_then(|m| m.minimum_os.clone());
     let entitlements = config.macos.as_ref().and_then(|m| m.entitlements.clone());
     // macos_distribute already extracted above (before build_number auto-increment)
-    let macos_signing_identity = config.macos.as_ref().and_then(|m| m.signing_identity.clone());
+    let macos_signing_identity = if args.notarize {
+        config.macos.as_ref()
+            .and_then(|m| m.notarize_signing_identity.clone())
+            .or_else(|| config.macos.as_ref().and_then(|m| m.signing_identity.clone()))
+    } else {
+        config.macos.as_ref().and_then(|m| m.signing_identity.clone())
+    };
 
     // iOS-specific config from perry.toml
     let ios_deployment_target = config.ios.as_ref().and_then(|i| {
