@@ -1,0 +1,9 @@
+{
+  "name": "@perry/threads",
+  "version": "0.1.0",
+  "description": "Parallel array processing via Web Workers — parallelMap, parallelFilter, spawn",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "keywords": ["perry", "threads", "parallel", "web-workers", "parallelMap", "parallelFilter"],
+  "license": "MIT"
+}

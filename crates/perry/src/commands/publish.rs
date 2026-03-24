@@ -507,7 +507,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
 
         // Infer app_type from target
         let app_type = match args.platform {
-            Some(Platform::Ios) | Some(Platform::Android) | Some(Platform::Macos) | Some(Platform::Web) | Some(Platform::Windows) => "gui",
+            Some(Platform::Ios) | Some(Platform::Android) | Some(Platform::Macos) | Some(Platform::Tvos) | Some(Platform::Web) | Some(Platform::Windows) => "gui",
             _ => "server",
         };
 
@@ -575,6 +575,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             Platform::Macos => "macos".to_string(),
             Platform::Ios => "ios".to_string(),
             Platform::Watchos => "watchos".to_string(),
+            Platform::Tvos => "tvos".to_string(),
             Platform::Android => "android".to_string(),
             Platform::Linux => "linux".to_string(),
             Platform::Windows => "windows".to_string(),

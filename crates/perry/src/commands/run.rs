@@ -70,7 +70,7 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
     let (target, device_udid) = resolve_target(&args)?;
 
     // 3. Decide local vs remote compilation
-    let needs_cross = matches!(target.as_deref(), Some("ios-simulator") | Some("ios") | Some("android") | Some("watchos-simulator") | Some("watchos"));
+    let needs_cross = matches!(target.as_deref(), Some("ios-simulator") | Some("ios") | Some("android") | Some("watchos-simulator") | Some("watchos") | Some("tvos-simulator") | Some("tvos"));
     let can_local = !needs_cross || can_compile_locally(target.as_deref());
 
     let use_remote = if args.remote {
@@ -144,6 +144,8 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
         Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") => Some("aarch64-apple-ios"),
+        Some("tvos-simulator") => Some("aarch64-apple-tvos-sim"),
+        Some("tvos") => Some("aarch64-apple-tvos"),
         Some("android") => Some("aarch64-linux-android"),
         _ => None,
     }
@@ -1697,6 +1699,35 @@ fn resolve_target(args: &RunArgs) -> Result<(Option<String>, Option<String>)> {
             let dev = &simulators[selection];
             Ok((Some("watchos-simulator".to_string()), Some(dev.udid.clone())))
         }
+        Some(Platform::Tvos) => {
+            if let Some(ref udid) = args.simulator {
+                return Ok((Some("tvos-simulator".to_string()), Some(udid.clone())));
+            }
+            if let Some(ref udid) = args.device {
+                return Ok((Some("tvos".to_string()), Some(udid.clone())));
+            }
+
+            // Auto-detect booted Apple TV simulators
+            let simulators = detect_booted_tv_simulators().unwrap_or_default();
+
+            if simulators.is_empty() {
+                return Err(anyhow!(
+                    "No Apple TV simulators found.\n\
+                     Boot a simulator:  xcrun simctl boot <UDID>\n\
+                     Or specify one:    perry run tvos --simulator <UDID>"
+                ));
+            }
+
+            if simulators.len() == 1 {
+                let dev = simulators.into_iter().next().unwrap();
+                return Ok((Some("tvos-simulator".to_string()), Some(dev.udid)));
+            }
+
+            let names: Vec<String> = simulators.iter().map(|d| d.name.clone()).collect();
+            let selection = pick_from_list(&names, "Select Apple TV simulator")?;
+            let dev = &simulators[selection];
+            Ok((Some("tvos-simulator".to_string()), Some(dev.udid.clone())))
+        }
         Some(Platform::Macos) | Some(Platform::Linux) | Some(Platform::Windows) => Ok((None, None)),
         None => Ok((None, None)),
     }
@@ -1737,6 +1768,16 @@ fn launch(
                 .as_deref()
                 .ok_or_else(|| anyhow!("No bundle ID found for watchOS app"))?;
             // Reuse iOS simulator launch — simctl install/launch works the same for watchOS
+            launch_ios_simulator(&result.output_path, bundle_id, udid, format)
+        }
+        "tvos-simulator" => {
+            let udid =
+                device_udid.ok_or_else(|| anyhow!("No simulator UDID — use --simulator <UDID>"))?;
+            let bundle_id = result
+                .bundle_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("No bundle ID found for tvOS app"))?;
+            // Reuse iOS simulator launch — simctl install/launch works the same for tvOS
             launch_ios_simulator(&result.output_path, bundle_id, udid, format)
         }
         "android" => {
@@ -2278,6 +2319,49 @@ fn detect_booted_watch_simulators() -> Result<Vec<DeviceInfo>> {
         for (runtime, device_list) in device_map {
             // Only include watchOS runtimes
             if !runtime.contains("watchOS") && !runtime.contains("WatchOS") {
+                continue;
+            }
+            if let Some(arr) = device_list.as_array() {
+                for dev in arr {
+                    let state = dev.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                    if state == "Booted" {
+                        if let (Some(udid), Some(name)) = (
+                            dev.get("udid").and_then(|s| s.as_str()),
+                            dev.get("name").and_then(|s| s.as_str()),
+                        ) {
+                            devices.push(DeviceInfo {
+                                udid: udid.to_string(),
+                                name: name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(devices)
+}
+
+/// Auto-detect booted Apple TV simulators via xcrun simctl
+fn detect_booted_tv_simulators() -> Result<Vec<DeviceInfo>> {
+    let output = Command::new("xcrun")
+        .args(["simctl", "list", "devices", "booted", "--json"])
+        .output()
+        .map_err(|e| anyhow!("Failed to run xcrun simctl: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
+
+    let mut devices = Vec::new();
+    if let Some(device_map) = json.get("devices").and_then(|d| d.as_object()) {
+        for (runtime, device_list) in device_map {
+            // Only include tvOS runtimes
+            if !runtime.contains("tvOS") && !runtime.contains("AppleTV") {
                 continue;
             }
             if let Some(arr) = device_list.as_array() {

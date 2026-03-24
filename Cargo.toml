@@ -18,6 +18,7 @@ members = [
     "crates/perry-ui-gtk4",
     "crates/perry-ui-windows",
     "crates/perry-ui-watchos",
+    "crates/perry-ui-tvos",
     "crates/perry-ui-geisterhand",
     "crates/perry-codegen-js",
     "crates/perry-codegen-swiftui",
@@ -80,7 +81,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"

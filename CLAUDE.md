@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.3
+**Current Version:** 0.4.5
 
 ## Workflow Requirements
 
@@ -44,7 +44,7 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 | **perry-codegen** | Cranelift-based native code generation |
 | **perry-runtime** | Runtime: value.rs, object.rs, array.rs, string.rs, gc.rs, arena.rs, thread.rs |
 | **perry-stdlib** | Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
-| **perry-ui** / **perry-ui-macos** / **perry-ui-ios** | Native UI (AppKit/UIKit) |
+| **perry-ui** / **perry-ui-macos** / **perry-ui-ios** / **perry-ui-tvos** | Native UI (AppKit/UIKit) |
 | **perry-jsruntime** | JavaScript interop via QuickJS |
 
 ## NaN-Boxing
@@ -80,7 +80,7 @@ Values cross threads via `SerializedValue` deep-copy (zero-cost for numbers, O(n
 
 ## Native UI (`perry/ui`)
 
-Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI functions. Handle-based widget system (1-based i64 handles, NaN-boxed with POINTER_TAG). 5 reactive binding types dispatched from `state_set()`. `--target ios-simulator`/`--target ios` for cross-compilation.
+Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI functions. Handle-based widget system (1-based i64 handles, NaN-boxed with POINTER_TAG). 5 reactive binding types dispatched from `state_set()`. `--target ios-simulator`/`--target ios`/`--target tvos-simulator`/`--target tvos` for cross-compilation.
 
 **To add a new widget** — change 4 places:
 1. Runtime: `crates/perry-ui-macos/src/widgets/` — create widget, `register_widget(view)`
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.5
+- feat: `@perry/threads` npm package — standalone Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) + perry/thread WASM integration via worker pool with per-worker WASM instances
+
+### v0.4.4
+- feat: tvOS (Apple TV) target support — `--target tvos`/`--target tvos-simulator`, UIKit-based perry-ui-tvos crate, `__platform__ === 6`, app bundle creation, simulator detection
 
 ### v0.4.3
 - fix: fetch().then() callbacks never fired in native UI apps — `spawn()` didn't call `ensure_pump_registered()`, so resolved promises were never drained

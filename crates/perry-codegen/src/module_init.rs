@@ -40,7 +40,7 @@ impl crate::codegen::Compiler {
         // generate "_perry_user_main" instead of "main". The runtime provides the
         // actual "main" which calls UIApplicationMain on the main thread and spawns
         // _perry_user_main on a background game thread.
-        let ios_game_loop = self.compile_target == 1 && self.enabled_features.contains("ios-game-loop");
+        let ios_game_loop = (self.compile_target == 1 || self.compile_target == 6) && self.enabled_features.contains("ios-game-loop");
 
         let func_id = if self.is_entry_module && is_dylib {
             // Dylib: generate "plugin_activate" as the entry point

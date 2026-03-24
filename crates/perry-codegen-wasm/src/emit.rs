@@ -2583,6 +2583,14 @@ impl WasmModuleEmitter {
                     let bridge_name = map_ui_method(method, class_name.as_deref());
                     self.intern_string(bridge_name);
                 }
+                if normalized == "perry/thread" {
+                    match method.as_str() {
+                        "parallelMap" => { self.intern_string("thread_parallel_map"); }
+                        "parallelFilter" => { self.intern_string("thread_parallel_filter"); }
+                        "spawn" => { self.intern_string("thread_spawn"); }
+                        _ => {}
+                    }
+                }
             }
             Expr::Array(elems) => {
                 for e in elems { self.collect_strings_in_expr(e); }
@@ -4041,6 +4049,30 @@ impl<'a> FuncEmitCtx<'a> {
                             slot += 1;
                         }
                         self.emit_memcall(func, bridge_name, slot);
+                    }
+                    "perry/thread" => {
+                        match method.as_str() {
+                            "parallelMap" if args.len() >= 2 => {
+                                self.emit_frame_begin(func, 2);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_store_arg(func, 1, &args[1]);
+                                self.emit_memcall(func, "thread_parallel_map", 2);
+                            }
+                            "parallelFilter" if args.len() >= 2 => {
+                                self.emit_frame_begin(func, 2);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_store_arg(func, 1, &args[1]);
+                                self.emit_memcall(func, "thread_parallel_filter", 2);
+                            }
+                            "spawn" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "thread_spawn", 1);
+                            }
+                            _ => {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
+                        }
                     }
                     _ => {
                         // Handle instance method calls on objects

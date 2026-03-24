@@ -160,6 +160,16 @@ impl Compiler {
                     .finish(settings::Flags::new(flag_builder))
                     .map_err(|e| anyhow!("{}", e))?
             }
+            Some("tvos") | Some("tvos-simulator") => {
+                // Cross-compile for aarch64-apple-tvos (Mach-O)
+                let triple = target_lexicon::Triple::from_str("aarch64-apple-tvos")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create tvOS ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
             Some("android") => {
                 // Cross-compile for aarch64-linux-android (ELF)
                 let triple = target_lexicon::Triple::from_str("aarch64-unknown-linux-android")
@@ -208,11 +218,12 @@ impl Compiler {
         let ctx = module.make_context();
 
         // Determine the compile-time platform constant for __platform__:
-        // 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = watchOS
+        // 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = watchOS, 6 = tvOS
         let compile_target: i64 = match target {
             Some("ios") | Some("ios-simulator") => 1,
             Some("android") => 2,
             Some("watchos") | Some("watchos-simulator") => 5,
+            Some("tvos") | Some("tvos-simulator") => 6,
             Some("windows") => 3,
             Some("linux") => 4,
             _ => {

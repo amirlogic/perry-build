@@ -48,6 +48,7 @@ pub enum Platform {
     Macos,
     Ios,
     Watchos,
+    Tvos,
     Android,
     Linux,
     Windows,

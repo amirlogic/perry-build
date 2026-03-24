@@ -213,6 +213,8 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
         Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
         Some("watchos-simulator") => Some("aarch64-apple-watchos-sim"),
         Some("watchos") => Some("aarch64-apple-watchos"),
+        Some("tvos-simulator") => Some("aarch64-apple-tvos-sim"),
+        Some("tvos") => Some("aarch64-apple-tvos"),
         Some("android") => Some("aarch64-linux-android"),
         Some("linux") => Some("x86_64-unknown-linux-gnu"),
         Some("windows") => Some("x86_64-pc-windows-msvc"),
@@ -604,6 +606,14 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
                         candidates.push(dir.join(&watchos_name));
                     }
                 }
+                if matches!(target, Some("tvos") | Some("tvos-simulator")) {
+                    if name.contains("_tvos") {
+                        candidates.push(dir.join(name));
+                    } else {
+                        let tvos_name = name.replace(".a", "_tvos.a");
+                        candidates.push(dir.join(&tvos_name));
+                    }
+                }
                 // Cross-compile targets are in ../../target/<triple>/release/ relative
                 // to the perry binary (which is in target/release/)
                 if let Some(target_dir) = dir.parent() {
@@ -689,6 +699,7 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
         Some("android") => "libperry_ui_android.a",
         Some("watchos-simulator") | Some("watchos") => "libperry_ui_watchos.a",
+        Some("tvos-simulator") | Some("tvos") => "libperry_ui_tvos.a",
         Some("linux") => "libperry_ui_gtk4.a",
         Some("windows") => "perry_ui_windows.lib",
         #[cfg(target_os = "windows")]
@@ -927,6 +938,7 @@ fn parse_native_library_manifest(
     let target_key = match target {
         Some("ios-simulator") | Some("ios") => "ios",
         Some("android") => "android",
+        Some("tvos-simulator") | Some("tvos") => "tvos",
         Some("linux") => "linux",
         Some("windows") => "windows",
         Some("web") => "web",
@@ -3548,7 +3560,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             .map(|f| f.trim().to_string())
             .filter(|f| !f.is_empty())
             .collect();
-        let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator"));
+        let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator") | Some("tvos") | Some("tvos-simulator"));
         if is_mobile {
             features.retain(|f| f != "plugins");
         }
@@ -3959,7 +3971,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_windows = matches!(target.as_deref(), Some("windows"))
         || (target.is_none() && cfg!(target_os = "windows"));
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
-    // Note: is_watchos was already defined earlier near jsruntime_lib
+    // Note: is_watchos and is_tvos were already defined earlier near jsruntime_lib
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
     if is_dylib {
@@ -4022,7 +4034,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     };
     let stdlib_lib = find_stdlib_library(target.as_deref());
     let is_watchos = matches!(target.as_deref(), Some("watchos") | Some("watchos-simulator"));
-    let jsruntime_lib = if !is_ios && !is_android && !is_watchos && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let is_tvos = matches!(target.as_deref(), Some("tvos") | Some("tvos-simulator"));
+    let jsruntime_lib = if !is_ios && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -4113,6 +4126,30 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          // Swift standard library .tbd stubs in the SDK (swiftCore, swift_Concurrency, etc.)
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
          // Swift compatibility static archives in the toolchain
+         .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/{}", developer_dir, sdk));
+        c
+    } else if is_tvos {
+        let sdk = if target.as_deref() == Some("tvos-simulator") { "appletvsimulator" } else { "appletvos" };
+        let clang = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--find", "clang"]).output()?.stdout
+        )?.trim().to_string();
+        let sysroot = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
+        )?.trim().to_string();
+        let triple = if target.as_deref() == Some("tvos-simulator") {
+            "arm64-apple-tvos17.0-simulator"
+        } else {
+            "arm64-apple-tvos17.0"
+        };
+
+        let developer_dir = String::from_utf8(
+            Command::new("xcode-select").arg("-p").output()?.stdout
+        )?.trim().to_string();
+
+        let mut c = Command::new(clang);
+        c.arg("-target").arg(triple)
+         .arg("-isysroot").arg(&sysroot)
+         .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
          .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/{}", developer_dir, sdk));
         c
     } else if is_android {
@@ -4334,6 +4371,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lSystem");
+    } else if is_tvos {
+        // tvOS frameworks (UIKit-based, like iOS)
+        cmd.arg("-framework").arg("UIKit")
+           .arg("-framework").arg("Foundation")
+           .arg("-framework").arg("CoreGraphics")
+           .arg("-framework").arg("Security")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("SystemConfiguration")
+           .arg("-framework").arg("QuartzCore")
+           .arg("-framework").arg("AVFoundation")
+           .arg("-framework").arg("GameController")
+           .arg("-liconv")
+           .arg("-lresolv")
+           .arg("-lSystem");
     } else if is_android {
         // Android system libraries
         cmd.arg("-Wl,--allow-multiple-definition")
@@ -4439,7 +4490,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
             if is_watchos {
                 // SwiftUI/WatchKit already linked above
-            } else if is_ios {
+            } else if is_ios || is_tvos {
                 // UIKit already linked above
             } else if is_android {
                 // Allow multiple definitions from perry-runtime in both UI lib and native libs
@@ -4480,6 +4531,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         } else {
             let (lib_name, build_cmd) = if is_watchos {
                 ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target aarch64-apple-watchos")
+            } else if is_tvos {
+                ("libperry_ui_tvos.a", "cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos")
             } else if is_ios {
                 ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
             } else if is_android {
@@ -5203,6 +5256,70 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 println!("{}", serde_json::to_string(&result)?);
             }
         }
+    } else if is_tvos {
+        // Create tvOS .app bundle
+        let app_dir = exe_path.with_extension("app");
+        let _ = fs::create_dir_all(&app_dir);
+        let bundle_exe = app_dir.join(exe_path.file_name().unwrap_or_default());
+        fs::copy(&exe_path, &bundle_exe)?;
+        let _ = fs::remove_file(&exe_path);
+
+        let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
+        let bundle_id = lookup_bundle_id_from_toml(&args.input, "tvos")
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "app"))
+            .unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+        result_bundle_id = Some(bundle_id.clone());
+        result_app_dir = Some(app_dir.clone());
+
+        let info_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>3</integer>
+    </array>
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+</dict>
+</plist>"#
+        );
+        fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        match format {
+            OutputFormat::Text => {
+                println!("Wrote tvOS app bundle: {}", app_dir.display());
+                println!();
+                println!("To run on Apple TV Simulator:");
+                println!("  xcrun simctl install booted {}", app_dir.display());
+                println!("  xcrun simctl launch booted {}", bundle_id);
+            }
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": app_dir.to_string_lossy(),
+                    "bundle_id": bundle_id,
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
     } else {
         match format {
             OutputFormat::Text => println!("Wrote executable: {}", exe_path.display()),
@@ -5257,7 +5374,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
-    if !is_dylib && !is_ios && target.as_deref() != Some("android") {
+    if !is_dylib && !is_ios && !is_tvos && target.as_deref() != Some("android") {
         if ctx.needs_plugins {
             // When plugins are enabled, use strip -x to keep exported symbols
             // (dlopen'd plugins need to resolve hone_host_api_* from the main executable)

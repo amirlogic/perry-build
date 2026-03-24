@@ -1961,7 +1961,334 @@ const __memDispatch = {
     return newP;
   },
   await_promise: (val) => val,
+
+  // === perry/thread — Web Worker parallelism ===
+  thread_parallel_map: (array, closure) => {
+    if (!Array.isArray(array)) return [];
+    return __threadPool.map(array, closure);
+  },
+  thread_parallel_filter: (array, closure) => {
+    if (!Array.isArray(array)) return [];
+    return __threadPool.filter(array, closure);
+  },
+  thread_spawn: (closure) => {
+    return __threadPool.spawn(closure);
+  },
 };
+
+// --- perry/thread Worker Pool ---
+// Manages a pool of Web Workers that each instantiate the WASM module.
+// Workers call compiled WASM functions via the indirect function table.
+const __threadPool = (() => {
+  const MIN_PARALLEL_SIZE = 1024;
+  let workers = null;
+  let wasmBinary = null;
+
+  // Minimal runtime bridge for workers — they need NaN-boxing, string table, handle store
+  const WORKER_BOOTSTRAP = `
+"use strict";
+const TAG_UNDEFINED = 0x7FFC0000_00000001n;
+const TAG_NULL      = 0x7FFC0000_00000002n;
+const TAG_FALSE     = 0x7FFC0000_00000003n;
+const TAG_TRUE      = 0x7FFC0000_00000004n;
+const STRING_TAG    = 0x7FFFn;
+const POINTER_TAG   = 0x7FFDn;
+const INT32_TAG     = 0x7FFEn;
+const _convBuf = new ArrayBuffer(8);
+const _f64 = new Float64Array(_convBuf);
+const _u64 = new BigUint64Array(_convBuf);
+function f64ToU64(f) { _f64[0] = f; return _u64[0]; }
+function u64ToF64(u) { _u64[0] = u; return _f64[0]; }
+
+const stringTable = [];
+const handleStore = new Map();
+let nextHandleId = 1;
+function allocHandle(obj) { const id = nextHandleId++; handleStore.set(id, obj); return id; }
+
+function __bitsToJsValue(bits) {
+  if (bits === TAG_UNDEFINED) return undefined;
+  if (bits === TAG_NULL) return null;
+  if (bits === TAG_TRUE) return true;
+  if (bits === TAG_FALSE) return false;
+  const tag = bits >> 48n;
+  if (tag === STRING_TAG) return stringTable[Number(bits & 0xFFFFFFFFn)];
+  if (tag === POINTER_TAG) return handleStore.get(Number(bits & 0xFFFFFFFFn));
+  _u64[0] = bits; return _f64[0];
+}
+function __jsValueToBits(v) {
+  if (v === undefined) return TAG_UNDEFINED;
+  if (v === null) return TAG_NULL;
+  if (v === true) return TAG_TRUE;
+  if (v === false) return TAG_FALSE;
+  if (typeof v === "number") { _f64[0] = v; return _u64[0]; }
+  if (typeof v === "string") {
+    const id = stringTable.length; stringTable.push(v);
+    return (STRING_TAG << 48n) | BigInt(id);
+  }
+  if (Array.isArray(v)) {
+    const id = allocHandle(v);
+    return (POINTER_TAG << 48n) | BigInt(id);
+  }
+  if (typeof v === "object") {
+    const id = allocHandle(v);
+    return (POINTER_TAG << 48n) | BigInt(id);
+  }
+  _f64[0] = Number(v); return _u64[0];
+}
+
+let wasmInst = null;
+let wasmMem = null;
+
+self.onmessage = async function(e) {
+  const msg = e.data;
+  try {
+    if (msg.type === "init") {
+      // Build minimal imports for the WASM module
+      const nan_temp = { value: 0x10000 };
+      const imports = { rt: {} };
+      // String init — workers need this for __init_strings
+      imports.rt.string_new = (offset, len) => {
+        const bytes = new Uint8Array(wasmMem.buffer, offset, len);
+        stringTable.push(new TextDecoder().decode(bytes));
+      };
+      // Stubs for other imports — workers only call user functions via indirect table
+      const noop = () => 0;
+      const noopVoid = () => {};
+      // Create a Proxy to provide stubs for any import the WASM module needs
+      imports.rt = new Proxy(imports.rt, {
+        get(target, prop) {
+          if (prop in target) return target[prop];
+          return noop;
+        }
+      });
+      const module = await WebAssembly.compile(msg.binary);
+      const instance = await WebAssembly.instantiate(module, imports);
+      wasmInst = instance;
+      wasmMem = instance.exports.memory;
+      // Initialize string table
+      if (instance.exports.__init_strings) instance.exports.__init_strings();
+      self.postMessage({ type: "ready" });
+      return;
+    }
+
+    if (!wasmInst) { self.postMessage({ type: "error", message: "Worker not initialized" }); return; }
+
+    const table = wasmInst.exports.__indirect_function_table;
+    const fn = table.get(msg.funcIdx | 0);
+    if (!fn) { self.postMessage({ type: "error", message: "Function not found at index " + msg.funcIdx }); return; }
+
+    const captures = (msg.captures || []).map(c => __jsValueToBits(c));
+
+    if (msg.type === "map") {
+      const results = [];
+      for (let i = 0; i < msg.chunk.length; i++) {
+        const argBits = __jsValueToBits(msg.chunk[i]);
+        const resultBits = fn(...captures, argBits);
+        results.push(__bitsToJsValue(resultBits));
+      }
+      self.postMessage({ type: "result", data: results });
+    } else if (msg.type === "filter") {
+      const filtered = [];
+      for (let i = 0; i < msg.chunk.length; i++) {
+        const argBits = __jsValueToBits(msg.chunk[i]);
+        const resultBits = fn(...captures, argBits);
+        const jsResult = __bitsToJsValue(resultBits);
+        // Truthy check matching Perry semantics
+        if (jsResult !== undefined && jsResult !== null && jsResult !== false && jsResult !== 0 && jsResult !== "") {
+          filtered.push(msg.chunk[i]);
+        }
+      }
+      self.postMessage({ type: "result", data: filtered });
+    } else if (msg.type === "exec") {
+      const resultBits = fn(...captures);
+      self.postMessage({ type: "result", data: __bitsToJsValue(resultBits) });
+    }
+  } catch (err) {
+    self.postMessage({ type: "error", message: String(err), stack: err && err.stack });
+  }
+};
+`;
+
+  function getConcurrency() {
+    return (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+  }
+
+  function getWasmBinary() {
+    if (wasmBinary) return wasmBinary;
+    // Decode the base64 WASM that's stored on window by the HTML wrapper
+    const b64 = (typeof window !== 'undefined' && window.__perryWasmB64) || null;
+    if (!b64) return null;
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    wasmBinary = bytes.buffer;
+    return wasmBinary;
+  }
+
+  function ensureWorkers(count) {
+    if (workers && workers.length >= count) return workers;
+    const binary = getWasmBinary();
+    if (!binary) return null;
+
+    const blob = new Blob([WORKER_BOOTSTRAP], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+
+    workers = workers || [];
+    const initPromises = [];
+    while (workers.length < count) {
+      const w = new Worker(url);
+      const ready = new Promise((resolve, reject) => {
+        const handler = (e) => {
+          w.removeEventListener('message', handler);
+          if (e.data.type === 'ready') resolve();
+          else reject(new Error(e.data.message || 'Worker init failed'));
+        };
+        w.addEventListener('message', handler);
+      });
+      w.postMessage({ type: 'init', binary });
+      workers.push({ worker: w, ready });
+      initPromises.push(ready);
+    }
+    return workers;
+  }
+
+  function dispatchToWorker(w, msg) {
+    return new Promise((resolve, reject) => {
+      const handler = (e) => {
+        w.worker.removeEventListener('message', handler);
+        if (e.data.type === 'error') reject(new Error(e.data.message));
+        else resolve(e.data.data);
+      };
+      w.worker.addEventListener('message', handler);
+      w.worker.postMessage(msg);
+    });
+  }
+
+  // Convert a closure object { funcIdx, captures } to plain JS captures for the worker
+  function serializeClosure(closure) {
+    if (!closure || typeof closure !== 'object') return { funcIdx: 0, captures: [] };
+    const captures = (closure.captures || []).map(c => {
+      // captures are BigInt (NaN-boxed i64) — convert to plain JS values
+      return __bitsToJsValue(typeof c === 'bigint' ? c : BigInt(c || 0));
+    });
+    return { funcIdx: closure.funcIdx | 0, captures };
+  }
+
+  // Sequential fallback — runs on main thread, no workers
+  function mapSequential(array, closure) {
+    const table = wasmInstance?.exports?.__indirect_function_table;
+    if (!table) return array;
+    const fn = table.get(closure.funcIdx | 0);
+    if (!fn) return array;
+    const captures = (closure.captures || []);
+    const results = [];
+    for (let i = 0; i < array.length; i++) {
+      const resultBits = fn(...captures, __jsValueToBits(array[i]));
+      results.push(__bitsToJsValue(resultBits));
+    }
+    return results;
+  }
+
+  function filterSequential(array, closure) {
+    const table = wasmInstance?.exports?.__indirect_function_table;
+    if (!table) return array;
+    const fn = table.get(closure.funcIdx | 0);
+    if (!fn) return array;
+    const captures = (closure.captures || []);
+    const results = [];
+    for (let i = 0; i < array.length; i++) {
+      const resultBits = fn(...captures, __jsValueToBits(array[i]));
+      const jsResult = __bitsToJsValue(resultBits);
+      if (jsResult !== undefined && jsResult !== null && jsResult !== false && jsResult !== 0 && jsResult !== "") {
+        results.push(array[i]);
+      }
+    }
+    return results;
+  }
+
+  function spawnSequential(closure) {
+    const table = wasmInstance?.exports?.__indirect_function_table;
+    if (!table) return undefined;
+    const fn = table.get(closure.funcIdx | 0);
+    if (!fn) return undefined;
+    const captures = (closure.captures || []);
+    return __bitsToJsValue(fn(...captures));
+  }
+
+  return {
+    map(array, closure) {
+      const concurrency = getConcurrency();
+      if (typeof Worker === 'undefined' || array.length < MIN_PARALLEL_SIZE || concurrency <= 1 || !getWasmBinary()) {
+        return mapSequential(array, closure);
+      }
+
+      const numChunks = Math.min(concurrency, array.length);
+      const ws = ensureWorkers(numChunks);
+      if (!ws) return mapSequential(array, closure);
+
+      const { funcIdx, captures } = serializeClosure(closure);
+      const chunkSize = Math.ceil(array.length / numChunks);
+      const promises = [];
+      for (let i = 0; i < numChunks; i++) {
+        const chunk = array.slice(i * chunkSize, (i + 1) * chunkSize);
+        if (chunk.length === 0) continue;
+        const p = ws[i].ready.then(() =>
+          dispatchToWorker(ws[i], { type: 'map', funcIdx, captures, chunk })
+        );
+        promises.push(p);
+      }
+
+      return Promise.all(promises).then(results => {
+        const out = [];
+        for (const r of results) for (const item of r) out.push(item);
+        return out;
+      });
+    },
+
+    filter(array, closure) {
+      const concurrency = getConcurrency();
+      if (typeof Worker === 'undefined' || array.length < MIN_PARALLEL_SIZE || concurrency <= 1 || !getWasmBinary()) {
+        return filterSequential(array, closure);
+      }
+
+      const numChunks = Math.min(concurrency, array.length);
+      const ws = ensureWorkers(numChunks);
+      if (!ws) return filterSequential(array, closure);
+
+      const { funcIdx, captures } = serializeClosure(closure);
+      const chunkSize = Math.ceil(array.length / numChunks);
+      const promises = [];
+      for (let i = 0; i < numChunks; i++) {
+        const chunk = array.slice(i * chunkSize, (i + 1) * chunkSize);
+        if (chunk.length === 0) continue;
+        const p = ws[i].ready.then(() =>
+          dispatchToWorker(ws[i], { type: 'filter', funcIdx, captures, chunk })
+        );
+        promises.push(p);
+      }
+
+      return Promise.all(promises).then(results => {
+        const out = [];
+        for (const r of results) for (const item of r) out.push(item);
+        return out;
+      });
+    },
+
+    spawn(closure) {
+      if (typeof Worker === 'undefined' || !getWasmBinary()) {
+        return Promise.resolve(spawnSequential(closure));
+      }
+
+      const ws = ensureWorkers(1);
+      if (!ws) return Promise.resolve(spawnSequential(closure));
+
+      const { funcIdx, captures } = serializeClosure(closure);
+      return ws[0].ready.then(() =>
+        dispatchToWorker(ws[0], { type: 'exec', funcIdx, captures })
+      );
+    },
+  };
+})();
 
 // Exception state for try/catch bridge
 let tryDepth = 0;
