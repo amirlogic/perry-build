@@ -127,6 +127,7 @@ struct PerryToml {
     watchos: Option<WatchosConfig>,
     android: Option<AndroidConfig>,
     linux: Option<LinuxConfig>,
+    windows: Option<WindowsConfig>,
     build: Option<BuildConfig>,
     publish: Option<PublishConfig>,
     audit: Option<AuditConfig>,
@@ -240,6 +241,17 @@ struct LinuxConfig {
     format: Option<String>,
     category: Option<String>,
     description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowsConfig {
+    /// Google Cloud KMS key path for code signing
+    /// e.g. "projects/skelpo/locations/europe-west3/keyRings/code-signing-eu/cryptoKeys/skelpo-codesign/cryptoKeyVersions/1"
+    gcloud_kms_key: Option<String>,
+    /// Path to the code signing certificate (.crt)
+    gcloud_kms_cert: Option<String>,
+    /// Path to GCP service account JSON key file
+    gcloud_service_account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +431,15 @@ struct CredentialsPayload {
     android_key_password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     google_play_service_account_json: Option<String>,
+    /// Google Cloud KMS key path for Windows code signing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gcloud_kms_key: Option<String>,
+    /// Base64-encoded code signing certificate for GCloud KMS
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gcloud_kms_cert_base64: Option<String>,
+    /// Base64-encoded GCP service account JSON key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gcloud_service_account_base64: Option<String>,
 }
 
 pub fn run(args: PublishArgs, format: OutputFormat, use_color: bool, _verbose: u8) -> Result<()> {
@@ -1667,6 +1688,41 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         } else { None },
     };
 
+    // Read GCloud KMS signing credentials for Windows
+    let (gcloud_kms_key, gcloud_kms_cert_b64, gcloud_sa_b64) = if is_windows {
+        let win = config.windows.as_ref();
+        let kms_key = win.and_then(|w| w.gcloud_kms_key.clone());
+        let cert_b64 = win.and_then(|w| w.gcloud_kms_cert.as_ref()).and_then(|path_str| {
+            let path = if path_str.starts_with("~/") {
+                dirs::home_dir().unwrap_or_default().join(&path_str[2..])
+            } else {
+                std::path::PathBuf::from(path_str)
+            };
+            if path.exists() {
+                use base64::Engine;
+                fs::read(&path).ok().map(|data| base64::engine::general_purpose::STANDARD.encode(&data))
+            } else {
+                None
+            }
+        });
+        let sa_b64 = win.and_then(|w| w.gcloud_service_account.as_ref()).and_then(|path_str| {
+            let path = if path_str.starts_with("~/") {
+                dirs::home_dir().unwrap_or_default().join(&path_str[2..])
+            } else {
+                std::path::PathBuf::from(path_str)
+            };
+            if path.exists() {
+                use base64::Engine;
+                fs::read(&path).ok().map(|data| base64::engine::general_purpose::STANDARD.encode(&data))
+            } else {
+                None
+            }
+        });
+        (kms_key, cert_b64, sa_b64)
+    } else {
+        (None, None, None)
+    };
+
     let credentials = CredentialsPayload {
         apple_team_id,
         apple_signing_identity: apple_identity,
@@ -1686,6 +1742,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         android_key_alias,
         android_key_password,
         google_play_service_account_json: google_play_json,
+        gcloud_kms_key,
+        gcloud_kms_cert_base64: gcloud_kms_cert_b64,
+        gcloud_service_account_base64: gcloud_sa_b64,
     };
 
     // Create project tarball
@@ -2862,6 +2921,9 @@ mod tests {
             android_key_alias: Some("key0".into()),
             android_key_password: None,
             google_play_service_account_json: Some("{\"client_email\":\"test@gcp\"}".into()),
+            gcloud_kms_key: None,
+            gcloud_kms_cert_base64: None,
+            gcloud_service_account_base64: None,
         };
         let json = serde_json::to_string(&creds).unwrap();
         assert!(json.contains("google_play_service_account_json"));
@@ -2889,6 +2951,9 @@ mod tests {
             android_key_alias: None,
             android_key_password: None,
             google_play_service_account_json: None,
+            gcloud_kms_key: None,
+            gcloud_kms_cert_base64: None,
+            gcloud_service_account_base64: None,
         };
         let json = serde_json::to_string(&creds).unwrap();
         // Fields with skip_serializing_if should be absent
