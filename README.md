@@ -1,44 +1,59 @@
 # Perry
 
-A native TypeScript compiler written in Rust. Compiles TypeScript source code directly to native executables for macOS, iOS, Android, Windows, GTK4 (Linux), and Web — no Node.js, no Electron, no browser engine.
+**One codebase. Every platform. Native performance.**
 
-**Current Version:** 0.2.173 | **Status:** Active Development
+Perry is a native TypeScript compiler written in Rust. It takes your TypeScript and compiles it straight to native executables — no Node.js, no Electron, no browser engine. Just fast, small binaries that run anywhere.
 
-## What it does
+**Current Version:** 0.4.8 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
 
 ```bash
 perry compile src/main.ts -o myapp
-./myapp
+./myapp    # that's it — a standalone native binary
 ```
 
-That's it. TypeScript in, native binary out. The binary runs standalone with no runtime dependencies. Perry uses [SWC](https://swc.rs/) for parsing and [Cranelift](https://cranelift.dev/) for native code generation.
+Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [Cranelift](https://cranelift.dev/) for native code generation. The output is a single binary with no runtime dependencies.
+
+---
+
+## Built with Perry
+
+People are building real apps with Perry today. Here are some highlights:
+
+| Project | What it is | Platforms |
+|---------|-----------|-----------|
+| [**Bloom Engine**](https://bloomengine.dev) | Native TypeScript game engine — Metal, DirectX 12, Vulkan, OpenGL. Write games in TS, ship native. | macOS, Windows, Linux, iOS, tvOS, Android |
+| [**Mango**](https://github.com/MangoQuery/app) | Native MongoDB GUI. ~7 MB binary, <100 MB RAM, sub-second cold start. | macOS, Windows, Linux, iOS, Android |
+| [**Hone**](https://hone.codes) | AI-powered native code editor with built-in terminal, Git, and LSP. | macOS, Windows, Linux, iOS, Android, Web |
+| [**Pry**](https://github.com/nicktrebes/perry-pry) | Fast, native JSON viewer with tree navigation and search. | macOS, iOS, Android |
+| [**dB Meter**](https://dbmeter.app) | Real-time sound level measurement with 60fps updates and per-device calibration. | iOS, macOS, Android |
+
+> Have something you've built with Perry? Open a PR to add it here!
+
+---
 
 ## Performance
 
-*Median of 5 runs on macOS ARM64 (Apple Silicon) vs Node.js v24*
+*Median of 5 runs on macOS ARM64 (Apple Silicon)*
 
-| Benchmark | Perry | Node.js | Speedup |
-|-----------|-------|---------|---------|
-| loop_overhead | 50ms | 59ms | **1.2x** |
-| array_write | 7ms | 9ms | **1.3x** |
-| array_read | 4ms | 12ms | **3.0x** |
-| fibonacci | 621ms | 1318ms | **2.1x** |
-| math_intensive | 22ms | 66ms | **3.0x** |
-| object_create | 2ms | 7ms | **3.5x** |
-| string_concat | 2ms | 5ms | **2.5x** |
-| method_calls | 5ms | 15ms | **3.0x** |
-| closure | 14ms | 63ms | **4.5x** |
-| binary_trees | 3ms | 8ms | **2.7x** |
+| Benchmark | Perry | Node.js v24 | Bun 1.3 | Perry vs Node | Perry vs Bun |
+|-----------|-------|-------------|---------|---------------|--------------|
+| fibonacci | 4,848ms | 10,077ms | 5,188ms | **2.1x** | **1.1x** |
+| string_ops | 31ms | 56ms | 38ms | **1.8x** | **1.2x** |
+| array_read | 4ms | 12ms | — | **3.0x** | — |
+| math_intensive | 22ms | 66ms | — | **3.0x** | — |
+| object_create | 2ms | 7ms | — | **3.5x** | — |
+| closure | 14ms | 63ms | — | **4.5x** | — |
+| binary_trees | 3ms | 8ms | — | **2.7x** | — |
 
-**Average speedup: 2.2x faster than Node.js**
+Perry compiles to native machine code via Cranelift — no JIT warmup, no interpreter overhead. Performance is competitive with Bun and significantly faster than Node.js on compute-heavy workloads.
 
-> Run benchmarks: `cd benchmarks/suite && ./run_benchmarks.sh`
+> **Note:** Perry is under active development, so benchmarks are subject to change — but they usually only get better. We're continuously optimizing the codegen pipeline, and each release tends to improve performance across the board.
+
+Run benchmarks yourself: `cd benchmarks && ./run_benchmarks.sh` (requires node, bun, cargo)
 
 ## Binary Size
 
-Perry produces small, self-contained binaries. The runtime is statically linked — no external dependencies at run time.
-
-*Measured on macOS ARM64 (Apple Silicon), binaries automatically stripped:*
+Perry produces small, self-contained binaries with no external dependencies at run time:
 
 | Program | Binary Size |
 |---------|-------------|
@@ -47,17 +62,9 @@ Perry produces small, self-contained binaries. The runtime is statically linked 
 | full stdlib app (fastify, mysql2, etc.) | ~48MB |
 | with `--enable-js-runtime` (V8 embedded) | +~15MB |
 
-Perry automatically detects which parts of the runtime your program uses. Programs that don't import stdlib modules link against the smaller runtime-only library instead of the full stdlib, which keeps simple scripts under 400KB.
+Perry automatically detects which parts of the runtime your program uses and only links what's needed.
 
-```bash
-# Hello world — 330KB standalone native binary
-echo 'console.log("Hello, world!");' > hello.ts
-perry compile hello.ts -o hello
-ls -lh hello   # → ~330KB
-./hello        # Hello, world!
-```
-
-> Run benchmarks: `cd benchmarks/suite && ./run_benchmarks.sh`
+---
 
 ## Installation
 
@@ -65,6 +72,12 @@ ls -lh hello   # → ~330KB
 
 ```bash
 brew install perryts/perry/perry
+```
+
+### Windows (winget)
+
+```bash
+winget install PerryTS.Perry
 ```
 
 ### Debian / Ubuntu (APT)
@@ -90,19 +103,6 @@ cargo build --release
 # Binary at: target/release/perry
 ```
 
-To also build the native UI crate for your platform:
-
-```bash
-# macOS
-cargo build --release -p perry-ui-macos
-
-# Linux (requires GTK4 dev libraries)
-cargo build --release -p perry-ui-gtk4
-
-# Windows
-cargo build --release -p perry-ui-windows
-```
-
 ### Requirements
 
 Perry requires a C linker to link compiled executables:
@@ -112,22 +112,122 @@ Perry requires a C linker to link compiled executables:
 
 Run `perry doctor` to verify your environment.
 
+---
+
 ## Quick Start
 
 ```bash
+# Initialize a new project
+perry init my-project
+cd my-project
+
 # Compile and run
 perry compile src/main.ts -o myapp
 ./myapp
 
-# Initialize a new project
-perry init my-project
-cd my-project
+# Or compile and run in one step
+perry run .
 
 # Check TypeScript compatibility
 perry check src/
 
 # Diagnose environment
 perry doctor
+```
+
+---
+
+## Real-World Example: API Server with ESM Modules
+
+Perry supports standard ES module imports and npm packages. Here's a real-world API server with multi-file project structure:
+
+**Project layout:**
+```
+my-api/
+├── package.json
+├── src/
+│   ├── main.ts
+│   ├── config.ts
+│   └── routes/
+│       └── users.ts
+└── node_modules/
+```
+
+**src/config.ts**
+```typescript
+export const config = {
+  port: 3000,
+  dbHost: process.env.DB_HOST || 'localhost',
+};
+```
+
+**src/routes/users.ts**
+```typescript
+export function getUsers(): object[] {
+  return [
+    { id: 1, name: 'Alice' },
+    { id: 2, name: 'Bob' },
+  ];
+}
+
+export function getUserById(id: number): object | undefined {
+  return getUsers().find((u: any) => u.id === id);
+}
+```
+
+**src/main.ts**
+```typescript
+import fastify from 'fastify';
+import { config } from './config';
+import { getUsers, getUserById } from './routes/users';
+
+const app = fastify();
+
+app.get('/api/users', async () => {
+  return getUsers();
+});
+
+app.get('/api/users/:id', async (request) => {
+  const { id } = request.params as { id: string };
+  return getUserById(parseInt(id));
+});
+
+app.listen({ port: config.port }, () => {
+  console.log(`Server running on port ${config.port}`);
+});
+```
+
+**Compile and run:**
+```bash
+perry compile src/main.ts -o my-api && ./my-api
+# or: perry run .
+```
+
+The output is a standalone binary — no `node_modules` needed at runtime.
+
+---
+
+## Example Projects
+
+The `example-code/` directory contains ready-to-run projects showing Perry in real-world scenarios:
+
+| Example | Stack | What it demonstrates |
+|---------|-------|---------------------|
+| **[express-postgres](example-code/express-postgres/)** | Express + PostgreSQL | Multi-file routes, middleware (CORS, Helmet), connection pooling, error handling |
+| **[fastify-redis-mysql](example-code/fastify-redis-mysql/)** | Fastify + Redis + MySQL | Rate limiting, caching layer, database queries, dotenv config |
+| **[hono-mongodb](example-code/hono-mongodb/)** | Hono + MongoDB | Lightweight HTTP framework with document database |
+| **[nestjs-typeorm](example-code/nestjs-typeorm/)** | NestJS + TypeORM | Decorator-based architecture, dependency injection |
+| **[nextjs-prisma](example-code/nextjs-prisma/)** | Next.js-style + Prisma | ORM integration, database migrations |
+| **[koa-redis](example-code/koa-redis/)** | Koa + Redis | Middleware composition, session storage |
+| **[http-server](example-code/http-server/)** | Raw HTTP | Low-level request handling, routing, JSON APIs |
+| **[blockchain-demo](example-code/blockchain-demo/)** | Custom | Blockchain implementation in pure TypeScript |
+
+Each example has its own `package.json` and can be compiled with:
+
+```bash
+cd example-code/fastify-redis-mysql
+npm install
+perry compile src/index.ts -o server && ./server
 ```
 
 ---
@@ -154,40 +254,117 @@ App(
 );
 ```
 
-**Supported platforms:**
+**9 platforms from one codebase:**
 
-| Platform | Backend | Status |
-|----------|---------|--------|
-| macOS | AppKit (NSView) | ✅ Full |
-| iOS | UIKit | ✅ Full |
-| Android | Android Views (JNI) | ✅ Full |
-| Windows | Win32 | ✅ Full |
-| Linux | GTK4 | ✅ Full |
-| Web | DOM (JS codegen) | ✅ Full |
+| Platform | Backend | Target Flag |
+|----------|---------|-------------|
+| macOS | AppKit (NSView) | *(default on macOS)* |
+| iOS / iPadOS | UIKit | `--target ios` / `--target ios-simulator` |
+| tvOS | UIKit | `--target tvos` / `--target tvos-simulator` |
+| watchOS | WatchKit | `--target watchos` / `--target watchos-simulator` |
+| Android | Android Views (JNI) | `--target android` |
+| Windows | Win32 | *(default on Windows)* |
+| Linux | GTK4 | *(default on Linux)* |
+| Web | DOM (JS codegen) | `--target web` |
+| WebAssembly | DOM (WASM) | `--target wasm` |
 
-**127 UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section), layouts (VStack, HStack), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL).
+**127+ UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section, CameraView), layouts (VStack, HStack), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL, audio capture).
 
 ---
 
-## Cross-Platform Publishing (upcoming, not available yet)
+## Multi-Threading
+
+The `perry/thread` module provides real OS threads with compile-time safety — no shared mutable state, no data races:
+
+```typescript
+import { parallelMap, parallelFilter, spawn } from 'perry/thread';
+
+// Data-parallel array processing across all CPU cores
+const results = parallelMap([1, 2, 3, 4, 5], n => fibonacci(n));
+
+// Parallel filtering
+const evens = parallelFilter(numbers, n => n % 2 === 0);
+
+// Background thread with Promise
+const result = await spawn(() => expensiveComputation());
+```
+
+Values cross threads via deep-copy. Each thread gets its own arena and GC. The compiler enforces that closures don't capture mutable state.
+
+---
+
+## Internationalization (i18n)
+
+Compile-time localization with zero runtime overhead:
+
+```typescript
+import { t, Currency, ShortDate } from 'perry/i18n';
+
+console.log(t('hello'));                    // "Hallo" (German locale)
+console.log(t('items', { count: 3 }));     // "3 Artikel" (CLDR plural rules)
+console.log(Currency(9.99, 'EUR'));         // "9,99 €"
+console.log(ShortDate(Date.now()));        // "24.03.2026"
+```
+
+Configure in `perry.toml`:
+
+```toml
+[i18n]
+default_locale = "en"
+locales = ["en", "de", "fr", "ja"]
+```
+
+All locale strings are baked into the binary at compile time. Native locale detection on all 6 platforms. CLDR plural rules for 30+ locales.
+
+---
+
+## Home Screen Widgets (WidgetKit)
+
+Build native home screen widgets from TypeScript — iOS, Android, watchOS, and Wear OS:
 
 ```bash
-# Build for a platform via the build server
-perry publish macos   # or: perry publish ios / android / linux
+perry compile src/widget.ts --target ios-widget -o MyWidget
+perry compile src/widget.ts --target android-widget -o MyWidget
+perry compile src/widget.ts --target watchos-widget -o MyWidget
+perry compile src/widget.ts --target wearos-tile -o MyWidget
+```
 
-# Build for web (outputs self-contained HTML)
-perry compile src/main.ts --target web -o dist/app.html
+---
+
+## Cross-Platform Targets
+
+```bash
+# Desktop (default for host platform)
+perry compile src/main.ts -o myapp
+
+# Mobile
+perry compile src/main.ts --target ios -o MyApp
+perry compile src/main.ts --target ios-simulator -o MyApp
+perry compile src/main.ts --target android -o MyApp
+
+# TV / Watch
+perry compile src/main.ts --target tvos -o MyApp
+perry compile src/main.ts --target watchos -o MyApp
+
+# Web
+perry compile src/main.ts --target web -o app.html       # JavaScript output
+perry compile src/main.ts --target wasm -o app.wasm      # WebAssembly output
+
+# Home screen widgets
+perry compile src/widget.ts --target ios-widget -o MyWidget
+perry compile src/widget.ts --target android-widget -o MyWidget
+perry compile src/widget.ts --target wearos-tile -o MyWidget
+```
+
+---
+
+## Publishing
+
+```bash
+perry publish macos   # or: ios / android / linux
 ```
 
 `perry publish` sends your TypeScript source to perry-hub (the cloud build server), which cross-compiles and signs for each target platform.
-
-**Targets:**
-
-```bash
-perry compile src/main.ts --target ios-simulator -o MyApp
-perry compile src/main.ts --target ios -o MyApp
-perry compile src/main.ts --target web -o app.html  # JS codegen, no Cranelift
-```
 
 ---
 
@@ -208,7 +385,7 @@ perry compile src/main.ts --target web -o app.html  # JS codegen, no Cranelift
 | Interfaces, type aliases, union types, type guards | ✅ |
 | Async/await, Promise | ✅ |
 | Generators (function*) | ✅ |
-| ES modules (import/export, re-exports) | ✅ |
+| ES modules (import/export, re-exports, `import * as`) | ✅ |
 | Destructuring (array, object, rest, defaults, rename) | ✅ |
 | Spread operator in calls and literals | ✅ |
 | RegExp (test, match, replace) | ✅ |
@@ -247,17 +424,11 @@ These packages are natively implemented in Rust — no Node.js required:
 | **Security** | bcrypt, argon2, jsonwebtoken |
 | **Utilities** | dotenv, uuid, nodemailer, zlib, node-cron |
 
-For SQLite and PostgreSQL with a Prisma-like API, see the [ecosystem packages](#ecosystem) below.
-
 ---
 
 ## Compiling npm Packages Natively
 
-Perry can compile pure TypeScript/JavaScript npm packages directly to native code instead of routing them through the V8 runtime. This is useful for pure math, crypto, and serialization packages that have no native addon or HTTP dependencies.
-
-### Configuration
-
-Add a `perry.compilePackages` array to your project's `package.json`:
+Perry can compile pure TypeScript/JavaScript npm packages directly to native code instead of routing them through the V8 runtime. Add a `perry.compilePackages` array to your `package.json`:
 
 ```json
 {
@@ -271,37 +442,10 @@ Add a `perry.compilePackages` array to your project's `package.json`:
 }
 ```
 
-Then compile with `--enable-js-runtime` as usual:
+Then compile with `--enable-js-runtime` as usual. Packages in the list are compiled natively; all others use the V8 runtime.
 
-```bash
-perry compile src/main.ts --enable-js-runtime
-```
-
-Packages in the list are compiled natively. All other npm packages continue to use the V8 runtime.
-
-### How it works
-
-1. **Source resolution** — Perry prefers TypeScript source (`src/index.ts`) over compiled JS output (`lib/index.js`) for listed packages. If no TS source exists, it compiles the JS directly.
-2. **Transitive dependency dedup** — When the same package appears in multiple nested `node_modules/` locations (e.g., `@noble/hashes` under both `@noble/curves/` and `@solana/web3.js/`), Perry compiles it only once using the first-found copy, avoiding duplicate linker symbols.
-3. **Relative imports** — Files within a compiled package that import sibling files (e.g., `import './utils.js'`) are also compiled natively, even if they're `.js` files.
-
-### Good candidates
-
-- Pure TypeScript math/crypto libraries (`@noble/curves`, `@noble/hashes`)
-- Serialization/encoding (`superstruct`, `borsh`, `bs58`)
-- Data structures with no I/O dependencies
-
-### Bad candidates (keep as V8-interpreted)
-
-- Packages using HTTP/WebSocket (`jayson`, `rpc-websockets`, `node-fetch`)
-- Packages with native addons (anything requiring `node-gyp`)
-- Packages using Node.js builtins not supported by Perry (`http`, `https`, `net`)
-
-### Limitations
-
-- Transitive dependencies must be listed explicitly — if package A depends on package B, both must be in the list for B to be compiled natively.
-- Some JavaScript patterns (CommonJS `module.exports`, complex `class` constructors) may produce compile warnings or runtime issues. Test incrementally.
-- Packages using `Uint8Array`, `DataView`, `TextEncoder`, or other Web APIs may need Perry runtime support for those types.
+**Good candidates:** Pure math/crypto libraries, serialization/encoding, data structures with no I/O.
+**Keep as V8-interpreted:** Packages using HTTP/WebSocket, native addons, or unsupported Node.js builtins.
 
 ---
 
@@ -309,12 +453,13 @@ Packages in the list are compiled natively. All other npm packages continue to u
 
 - **NaN-Boxing** — all values are 64-bit words (f64/u64); no boxing overhead for numbers
 - **Mark-Sweep GC** — conservative stack scan, arena block walking, 8-byte GcHeader per alloc
+- **Parallel Compilation** — rayon-based module codegen, transform passes, and symbol scanning across CPU cores
 - **FMA / CSE / Loop Unrolling** — fused multiply-add, common subexpression elimination, 8x loop unroll
 - **i32 Loop Counters** — integer registers for loop variables (no f64 round-trips)
 - **LICM** — loop-invariant code motion for nested loops
-- **Shape-Cached Objects** — 5–6x faster object allocation
-- **Automatic Binary Size Reduction** — links runtime-only when stdlib isn't needed (~330KB vs 48MB for hello world); dead code stripping and `strip` on final binary
-- **`__platform__` Constant** — compile-time platform tag (0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux); Cranelift constant-folds comparisons and eliminates dead platform branches
+- **Shape-Cached Objects** — 5-6x faster object allocation
+- **TimSort** — O(n log n) hybrid sort for `Array.sort()`
+- **`__platform__` Constant** — compile-time platform elimination (dead code removal per target)
 
 ---
 
@@ -325,8 +470,6 @@ Compile TypeScript as a native shared library plugin:
 ```bash
 perry compile my-plugin.ts --output-type dylib -o my-plugin.dylib
 ```
-
-Use `perry/plugin` in TypeScript:
 
 ```typescript
 import { PluginRegistry } from 'perry/plugin';
@@ -339,59 +482,33 @@ export function activate(api: any) {
 
 ---
 
-## System Module
+## Testing (Geisterhand)
 
-```typescript
-import { openURL, isDarkMode, preferencesSet, preferencesGet } from 'perry/system';
+Perry includes Geisterhand, an in-process UI testing framework with HTTP-driven interaction and screenshot capture:
 
-openURL('https://example.com');
-console.log(isDarkMode());           // true/false
-preferencesSet('theme', 'dark');
-const theme = preferencesGet('theme');
+```bash
+perry compile src/main.ts --enable-geisterhand -o myapp
+./myapp
+# UI test server runs on http://localhost:7676
 ```
 
----
-
-## Project Structure
-
-```
-perry/
-├── crates/
-│   ├── perry/              # CLI driver (compile, check, init, doctor, publish)
-│   ├── perry-parser/       # SWC TypeScript parser wrapper
-│   ├── perry-types/        # Type system definitions
-│   ├── perry-hir/          # HIR data structures (ir.rs) and AST→HIR lowering (lower.rs)
-│   ├── perry-transform/    # IR passes: closure conversion, async lowering, inlining
-│   ├── perry-codegen/      # Cranelift-based native code generation
-│   ├── perry-codegen-js/   # JavaScript codegen for --target web
-│   ├── perry-runtime/      # Runtime: value.rs, object.rs, gc.rs, array.rs, string.rs, ...
-│   ├── perry-stdlib/       # Node.js API support (fastify, mysql2, redis, fetch, ws, ...)
-│   ├── perry-ui-macos/     # AppKit widget implementations
-│   ├── perry-ui-ios/       # UIKit widget implementations
-│   ├── perry-jsruntime/    # Optional V8 JavaScript interop via QuickJS
-│   └── perry-diagnostics/  # Error reporting
-├── test-files/             # Test suite
-├── benchmarks/             # Benchmark suite
-├── example-code/           # Example applications
-└── CLAUDE.md               # Developer notes
-```
+Supports screenshot capture on all native platforms. See the [Geisterhand docs](https://perryts.github.io/perry/testing/geisterhand.html) for details.
 
 ---
 
 ## Ecosystem
 
-Perry's standard library covers the compiler and runtime. These separate packages extend the ecosystem:
-
 | Package | Description |
 |---------|-------------|
-| [perry-react](https://github.com/PerryTS/react) | React/JSX → native widgets. Write standard React components; compile to a native macOS/iOS/Android app. |
+| [**Bloom Engine**](https://bloomengine.dev) | Native TypeScript game engine — 2D/3D rendering, skeletal animation, spatial audio, physics. Metal/DirectX 12/Vulkan/OpenGL. |
+| [perry-react](https://github.com/PerryTS/react) | React/JSX that compiles to native widgets. Standard React components → native macOS/iOS/Android app. |
 | [perry-sqlite](https://github.com/PerryTS/sqlite) | SQLite with a Prisma-compatible API (`findMany`, `create`, `upsert`, `$transaction`, etc.) |
 | [perry-postgres](https://github.com/PerryTS/postgres) | PostgreSQL with the same Prisma-compatible API |
 | [perry-prisma](https://github.com/PerryTS/prisma) | MySQL with the same Prisma-compatible API |
 | [perry-apn](https://github.com/PerryTS/push) | Apple Push Notifications (APNs) native library |
-| [perry-pry](https://github.com/PerryTS/pry) | Example app: native JSON viewer (macOS/Linux/Windows) built with `perry/ui` |
-| [perry-starter](https://github.com/PerryTS/starter) | Minimal starter project with hello world and benchmarks |
-| [perry-demo](https://github.com/PerryTS/demo) | Benchmark dashboard comparing Perry vs Node.js |
+| [@perry/threads](https://github.com/PerryTS/perry/tree/main/packages/perry-threads) | Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) for browser/Node.js |
+| [perry-starter](https://github.com/PerryTS/starter) | Minimal starter project — get up and running in 30 seconds |
+| [perry-demo](https://demo.perryts.com) | Live benchmark dashboard comparing Perry vs Node.js vs Bun |
 | [perry-react-dom](https://github.com/PerryTS/react-dom) | Perry React DOM bridge |
 
 ### perry-react
@@ -415,18 +532,6 @@ function Counter() {
 createRoot(null, { title: 'Counter', width: 300, height: 200 }).render(<Counter />);
 ```
 
-```json
-{
-  "perry": {
-    "packageAliases": {
-      "react": "perry-react",
-      "react-dom": "perry-react",
-      "react/jsx-runtime": "perry-react"
-    }
-  }
-}
-```
-
 ### perry-sqlite / perry-postgres / perry-prisma
 
 Drop-in replacements for `@prisma/client` backed by Rust (sqlx):
@@ -446,93 +551,87 @@ const users = await prisma.user.findMany({
 await prisma.$disconnect();
 ```
 
-Supported operations: `findMany`, `findFirst`, `findUnique`, `create`, `createMany`, `update`, `updateMany`, `upsert`, `delete`, `deleteMany`, `count`, `$transaction`, `$executeRaw`, `$queryRaw`.
-
 ---
 
 ## Commands
 
-### `perry compile`
+| Command | What it does |
+|---------|-------------|
+| `perry compile <input.ts> -o <output>` | Compile TypeScript to a native binary |
+| `perry run <path> [platform]` | Compile and run in one step (supports `ios`, `android`, etc.) |
+| `perry init <name>` | Scaffold a new project |
+| `perry check <path>` | Validate TypeScript compatibility without compiling |
+| `perry publish <platform>` | Build, sign, and publish via the cloud build server |
+| `perry doctor` | Check your development environment |
+| `perry i18n extract` | Extract translatable strings from source |
 
-```bash
-perry compile <input.ts> [options]
+### Compiler flags
 
-  -o, --output <name>      Output file name
-  --target <target>        ios-simulator | ios | web (default: native host)
-  --output-type <type>     executable | dylib (default: executable)
-  --print-hir              Print HIR for debugging
-  --no-link                Produce object file only
-  --keep-intermediates     Keep .o files
-  --enable-js-runtime      Embed V8 for JS module compatibility (increases binary size ~15MB)
+```
+-o, --output <name>      Output file name
+--target <target>        ios | ios-simulator | tvos | tvos-simulator |
+                         watchos | watchos-simulator | android |
+                         web | wasm | ios-widget | android-widget |
+                         wearos-tile | watchos-widget
+--output-type <type>     executable | dylib
+--enable-js-runtime      Embed V8 for npm package compatibility (+~15MB)
+--enable-geisterhand     Enable UI testing server
+--print-hir              Print HIR for debugging
 ```
 
-### `perry check`
+---
 
-Validates TypeScript compatibility without compiling.
+## Project Structure
 
-```bash
-perry check <path> [--check-deps] [--fix] [--fix-dry-run]
 ```
-
-### `perry init`
-
-Scaffolds a new Perry project.
-
-```bash
-perry init <project-name>
-```
-
-### `perry publish`
-
-Builds, signs, and publishes your app for multiple platforms via the cloud build server.
-
-```bash
-perry publish macos [--license-key KEY]   # or: ios / android / linux
-```
-
-### `perry doctor`
-
-Checks the development environment (Rust toolchain, linker, platform SDKs).
-
-```bash
-perry doctor
+perry/
+├── crates/
+│   ├── perry/                  # CLI (compile, run, check, init, doctor, publish)
+│   ├── perry-parser/           # SWC TypeScript parser
+│   ├── perry-types/            # Type system
+│   ├── perry-hir/              # HIR data structures and AST→HIR lowering
+│   ├── perry-transform/        # IR passes (closure conversion, async, inlining)
+│   ├── perry-codegen/          # Cranelift native codegen
+│   ├── perry-codegen-js/       # JavaScript codegen (--target web)
+│   ├── perry-codegen-wasm/     # WebAssembly codegen (--target wasm)
+│   ├── perry-codegen-swiftui/  # SwiftUI codegen (iOS/watchOS widgets)
+│   ├── perry-codegen-glance/   # Android Glance widget codegen
+│   ├── perry-codegen-wear-tiles/ # Wear OS Tiles codegen
+│   ├── perry-runtime/          # Runtime (NaN-boxing, GC, arena, strings)
+│   ├── perry-stdlib/           # Node.js API support (fastify, mysql2, redis, etc.)
+│   ├── perry-ui-*/             # Native UI (macOS, iOS, tvOS, watchOS, Android, GTK4, Windows)
+│   ├── perry-ui-geisterhand/   # UI testing framework
+│   ├── perry-jsruntime/        # Optional V8 interop via QuickJS
+│   └── perry-diagnostics/      # Error reporting
+├── docs/                       # Documentation site (mdBook)
+├── example-code/               # 8 example applications
+├── benchmarks/                 # Benchmark suite (Perry vs Node.js vs Bun)
+├── packages/                   # npm packages (@perry/threads)
+└── test-files/                 # Test suite
 ```
 
 ---
 
 ## Runtime Characteristics
 
-- **Garbage Collection** — mark-sweep GC with conservative stack scanning. Triggers on new arena block allocation (~8MB) or explicit `gc()` call. 8-byte GcHeader per allocation.
-- **Single-Threaded User Code** — async I/O runs on Tokio worker threads; callbacks dispatch on the main thread.
-- **No Runtime Type Checking** — types are erased at compile time. Use `typeof` and `instanceof` for runtime inspection.
-- **Small Binaries** — ~330KB for hello world (runtime-only); ~48MB with full stdlib. Binaries are automatically stripped. See [Binary Size](#binary-size) for a full breakdown.
+- **Garbage Collection** — mark-sweep GC with conservative stack scanning, arena block walking, 8-byte GcHeader per allocation
+- **Single-Threaded by Default** — async I/O on Tokio workers, callbacks on main thread. Use `perry/thread` for explicit multi-threading.
+- **No Runtime Type Checking** — types erased at compile time. Use `typeof` and `instanceof` for runtime checks.
+- **Small Binaries** — ~330KB hello world, ~48MB with full stdlib. Automatically stripped.
 
 ---
 
 ## Development
 
 ```bash
-# Build all crates
-cargo build --release
-
-# Rebuild runtime + stdlib (required after runtime changes)
-cargo build --release -p perry-runtime -p perry-stdlib
-
-# Run tests (exclude iOS crate on macOS host)
-cargo test --workspace --exclude perry-ui-ios
-
-# Compile and run a TypeScript file
-cargo run --release -- compile file.ts -o output && ./output
-
-# Debug: print HIR
-cargo run --release -- compile file.ts --print-hir
-
-# Format / lint
-cargo fmt
-cargo clippy
+cargo build --release                                    # Build everything
+cargo build --release -p perry-runtime -p perry-stdlib   # Rebuild runtime (after changes)
+cargo test --workspace --exclude perry-ui-ios            # Run tests
+cargo run --release -- compile file.ts -o out && ./out   # Compile and run
+cargo run --release -- compile file.ts --print-hir       # Debug HIR
 ```
 
-### Adding a New Feature
+### Adding a new feature
 
 1. **HIR** — add node type to `crates/perry-hir/src/ir.rs`
 2. **Lowering** — handle AST→HIR in `crates/perry-hir/src/lower.rs`
