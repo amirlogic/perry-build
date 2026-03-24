@@ -27,6 +27,9 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: perry-linux-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: perry-windows-x86_64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -45,7 +48,8 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p perry-runtime
           cargo build --release --target ${{ matrix.target }} -p perry-stdlib
 
-      - name: Package release archive
+      - name: Package release archive (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/perry staging/
@@ -59,12 +63,36 @@ jobs:
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz *
 
-      - name: Upload release asset
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item "target/${{ matrix.target }}/release/perry.exe" staging/
+          # Include static libraries for linking
+          $libs = @("perry_runtime.lib", "perry_stdlib.lib")
+          foreach ($lib in $libs) {
+            $path = "target/${{ matrix.target }}/release/$lib"
+            if (Test-Path $path) {
+              Copy-Item $path staging/
+            }
+          }
+          Compress-Archive -Path staging/* -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload release asset (Unix)
+        if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz" --clobber
 
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip" --clobber
+
       - name: Upload build artifact (for deb job)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -352,6 +380,39 @@ jobs:
           git add -A
           git commit -m "perry ${{ steps.release.outputs.version }}"
           git push
+
+  # ---------------------------------------------------------------------------
+  # Publish to winget (Windows Package Manager)
+  # ---------------------------------------------------------------------------
+  winget:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Get release info
+        id: release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $version = $tag -replace '^v', ''
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Download wingetcreate
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+
+      - name: Update winget manifest
+        shell: pwsh
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/perry-windows-x86_64.zip"
+          ./wingetcreate.exe update PerryTS.Perry `
+            --urls $url `
+            --version "${{ steps.release.outputs.version }}" `
+            --token $env:WINGET_PAT `
+            --submit
 
   # ---------------------------------------------------------------------------
   # Notify build workers to update perry

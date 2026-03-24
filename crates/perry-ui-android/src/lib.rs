@@ -1,6 +1,7 @@
 pub mod app;
 pub mod audio;
 pub mod callback;
+pub mod camera;
 pub mod clipboard;
 pub mod dialog;
 pub mod fetch;
@@ -1313,6 +1314,22 @@ pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
 pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 { audio::get_waveform(count) }
 #[no_mangle]
 pub extern "C" fn perry_system_get_device_model() -> i64 { audio::get_device_model() }
+
+// Camera (Camera2 API via JNI)
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { camera::create() }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(handle: i64) { camera::start(handle) }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(handle: i64) { camera::stop(handle) }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(handle: i64) { camera::freeze(handle) }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(handle: i64) { camera::unfreeze(handle) }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(x: f64, y: f64) -> f64 { camera::sample_color(x, y) }
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(handle: i64, callback: f64) { camera::set_on_tap(handle, callback) }
 
 // Geisterhand screenshot stub (not implemented on Android)
 #[no_mangle]

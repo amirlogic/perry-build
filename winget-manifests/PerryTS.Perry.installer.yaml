@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: PerryTS.Perry
+PackageVersion: 0.4.8
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: perry.exe
+    PortableCommandAlias: perry
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/PerryTS/perry/releases/download/v0.4.8/perry-windows-x86_64.zip
+    InstallerSha256: <REPLACE_WITH_SHA256_AFTER_RELEASE>
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -7,19 +7,30 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
+import android.hardware.camera2.*
 import android.location.LocationManager
+import android.media.ImageReader
 import android.net.Uri
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Log
 import android.util.TypedValue
+import android.view.MotionEvent
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 
 /**
@@ -48,6 +59,17 @@ object PerryBridge {
     // Audio permission tracking
     private const val AUDIO_PERMISSION_REQUEST = 44
     private var audioPermissionGranted = false
+
+    // Camera state
+    private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
+    private var cameraThread: HandlerThread? = null
+    private var cameraHandler: Handler? = null
+    private var imageReader: ImageReader? = null
+    private var cameraTextureView: TextureView? = null
+    private var cameraFrozen = false
+    @Volatile private var latestBitmap: Bitmap? = null
+    private val TAG = "PerryCamera"
 
     fun init(activity: Activity, rootLayout: FrameLayout) {
         this.activity = activity
@@ -375,6 +397,228 @@ object PerryBridge {
 
     fun onAudioPermissionResult(granted: Boolean) {
         audioPermissionGranted = granted
+    }
+
+    // --- Camera ---
+
+    @JvmStatic
+    fun startCamera(textureView: TextureView) {
+        cameraTextureView = textureView
+        cameraFrozen = false
+
+        // Start camera background thread
+        cameraThread = HandlerThread("PerryCameraThread").also { it.start() }
+        cameraHandler = Handler(cameraThread!!.looper)
+
+        if (textureView.isAvailable) {
+            openCamera(textureView.surfaceTexture!!)
+        } else {
+            textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                    openCamera(surface)
+                }
+                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                    if (!cameraFrozen) {
+                        // Capture bitmap from TextureView for color sampling
+                        try {
+                            latestBitmap = textureView.bitmap
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
+    }
+
+    private fun openCamera(surfaceTexture: SurfaceTexture) {
+        val cameraManager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+        // Check permission
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "Camera permission not granted")
+            return
+        }
+
+        try {
+            // Find back-facing camera
+            var cameraId: String? = null
+            for (id in cameraManager.cameraIdList) {
+                val characteristics = cameraManager.getCameraCharacteristics(id)
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    cameraId = id
+                    break
+                }
+            }
+            if (cameraId == null) {
+                // Fallback to first camera
+                cameraId = cameraManager.cameraIdList.firstOrNull()
+            }
+            if (cameraId == null) {
+                Log.w(TAG, "No camera found")
+                return
+            }
+
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+                    createCaptureSession(camera, surfaceTexture)
+                }
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    cameraDevice = null
+                }
+                override fun onError(camera: CameraDevice, error: Int) {
+                    Log.e(TAG, "Camera error: $error")
+                    camera.close()
+                    cameraDevice = null
+                }
+            }, cameraHandler)
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Failed to open camera", e)
+        }
+    }
+
+    private fun createCaptureSession(camera: CameraDevice, surfaceTexture: SurfaceTexture) {
+        try {
+            // Configure preview surface from TextureView
+            val previewSurface = Surface(surfaceTexture)
+
+            val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            captureRequestBuilder.addTarget(previewSurface)
+
+            // Auto-focus
+            captureRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
+
+            camera.createCaptureSession(
+                listOf(previewSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        captureSession = session
+                        try {
+                            session.setRepeatingRequest(
+                                captureRequestBuilder.build(),
+                                null,
+                                cameraHandler
+                            )
+                            Log.d(TAG, "Camera preview started")
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "Failed to start preview", e)
+                        }
+                    }
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e(TAG, "Camera session configuration failed")
+                    }
+                },
+                cameraHandler
+            )
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Failed to create capture session", e)
+        }
+    }
+
+    @JvmStatic
+    fun stopCamera() {
+        captureSession?.close()
+        captureSession = null
+        cameraDevice?.close()
+        cameraDevice = null
+        imageReader?.close()
+        imageReader = null
+        cameraThread?.quitSafely()
+        cameraThread = null
+        cameraHandler = null
+        latestBitmap = null
+        cameraFrozen = false
+        Log.d(TAG, "Camera stopped")
+    }
+
+    @JvmStatic
+    fun freezeCamera() {
+        cameraFrozen = true
+        // Stop the repeating request to freeze the preview
+        try {
+            captureSession?.stopRepeating()
+        } catch (_: Exception) {}
+        Log.d(TAG, "Camera frozen")
+    }
+
+    @JvmStatic
+    fun unfreezeCamera() {
+        cameraFrozen = false
+        // Restart repeating request
+        val session = captureSession ?: return
+        val device = cameraDevice ?: return
+        val textureView = cameraTextureView ?: return
+        val surfaceTexture = textureView.surfaceTexture ?: return
+        try {
+            val previewSurface = Surface(surfaceTexture)
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builder.addTarget(previewSurface)
+            builder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
+            session.setRepeatingRequest(builder.build(), null, cameraHandler)
+            Log.d(TAG, "Camera unfrozen")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unfreeze camera", e)
+        }
+    }
+
+    /**
+     * Sample the color at normalized (0-1) coordinates from the latest camera frame.
+     * Returns packed RGB: r * 65536 + g * 256 + b, or -1.0 if unavailable.
+     */
+    @JvmStatic
+    fun cameraSampleColor(x: Double, y: Double): Double {
+        val bitmap = latestBitmap ?: return -1.0
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w == 0 || h == 0) return -1.0
+
+        val px = (x.coerceIn(0.0, 1.0) * (w - 1)).toInt().coerceIn(0, w - 1)
+        val py = (y.coerceIn(0.0, 1.0) * (h - 1)).toInt().coerceIn(0, h - 1)
+
+        // Average a 5x5 region for noise reduction
+        val half = 2
+        var rSum = 0L; var gSum = 0L; var bSum = 0L; var count = 0L
+        for (sy in (py - half).coerceAtLeast(0)..(py + half).coerceAtMost(h - 1)) {
+            for (sx in (px - half).coerceAtLeast(0)..(px + half).coerceAtMost(w - 1)) {
+                val pixel = bitmap.getPixel(sx, sy)
+                rSum += (pixel shr 16) and 0xFF
+                gSum += (pixel shr 8) and 0xFF
+                bSum += pixel and 0xFF
+                count++
+            }
+        }
+        if (count == 0L) return -1.0
+
+        val r = (rSum / count).toDouble()
+        val g = (gSum / count).toDouble()
+        val b = (bSum / count).toDouble()
+        return r * 65536.0 + g * 256.0 + b
+    }
+
+    /**
+     * Set a tap handler on a camera view that reports normalized (x, y) coordinates.
+     * Uses the callback2 mechanism to pass (normX, normY) back to Rust.
+     */
+    @JvmStatic
+    fun setCameraTapCallback(view: View, callbackKey: Long) {
+        view.setOnTouchListener { v, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                val normX = if (v.width > 0) (event.x / v.width).toDouble() else 0.5
+                val normY = if (v.height > 0) (event.y / v.height).toDouble() else 0.5
+                nativeInvokeCallback2(callbackKey, normX, normY)
+            }
+            true
+        }
     }
 
     // --- Timer ---
