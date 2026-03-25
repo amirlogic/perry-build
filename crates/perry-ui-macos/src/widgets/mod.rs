@@ -337,8 +337,9 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
 
         if is_stack {
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            // Use addView:inGravity: with top/leading gravity for consistent packing
             unsafe {
-                let _: () = objc2::msg_send![stack, insertArrangedSubview: &*child, atIndex: index as usize];
+                let _: () = objc2::msg_send![stack, addView: &*child, inGravity: 1i64];
             }
             // Track parent-child for re-attachment after hide/show
             PARENT_MAP.with(|m| {
@@ -367,7 +368,12 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
             // Safety: we verified the type with isKindOfClass
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
             let index = stack.arrangedSubviews().len();
-            stack.addArrangedSubview(&child);
+            // Use addView:inGravity: with Top/Leading gravity (1) so children
+            // pack tightly from the top (VStack) or leading edge (HStack)
+            // instead of defaulting to center gravity area.
+            unsafe {
+                let _: () = objc2::msg_send![stack, addView: &*child, inGravity: 1i64];
+            }
             // Track parent-child for re-attachment after hide/show
             PARENT_MAP.with(|m| {
                 m.borrow_mut().insert(child_handle, (parent_handle, index));

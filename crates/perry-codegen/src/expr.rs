@@ -17034,6 +17034,19 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "appSetSize" => {
+                        // appSetSize(width, height) — resize the main app window
+                        let width = ensure_f64(builder, arg_vals[0]);
+                        let height = ensure_f64(builder, arg_vals[1]);
+                        let app_handle = builder.ins().iconst(types::I64, 1); // main app = handle 1
+
+                        let func = extern_funcs.get("perry_ui_app_set_size")
+                            .ok_or_else(|| anyhow!("perry_ui_app_set_size not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[app_handle, width, height]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     "addKeyboardShortcut" | "registerGlobalHotkey" => {
                         // (key, modifiers, callback) — extract key string, pass modifiers and callback as f64
                         let get_str_func = extern_funcs.get("js_get_string_pointer_unified")

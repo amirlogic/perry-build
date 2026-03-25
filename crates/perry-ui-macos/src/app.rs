@@ -1306,47 +1306,51 @@ pub fn window_on_focus_lost(window_handle: i64, callback: f64) {
 /// Get the icon for a file/application at the given path, returned as an NSImageView widget handle.
 /// Uses NSWorkspace.iconForFile: to retrieve the system icon.
 ///
-/// Safe to call during UI callbacks — the autoreleased NSImage from iconForFile: is retained
-/// immediately to prevent use-after-free when AppKit drains the autorelease pool between dispatches.
+/// Safe to call during UI callbacks — wrapped in an autorelease pool and retains all
+/// intermediate objects to prevent use-after-free during AppKit event dispatch.
 pub fn get_app_icon(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
     if path.is_empty() { return 0; }
 
-    unsafe {
-        let ns_path = NSString::from_str(path);
+    // Wrap in autorelease pool — required when called during callbacks where
+    // AppKit may not have an active pool (e.g. TextField onChange).
+    objc2::rc::autoreleasepool(|_pool| {
+        unsafe {
+            let ns_path = NSString::from_str(path);
 
-        // NSWorkspace.sharedWorkspace is a singleton — always valid on the main thread.
-        let workspace: *const AnyObject = msg_send![
-            objc2::class!(NSWorkspace), sharedWorkspace
-        ];
-        if workspace.is_null() { return 0; }
+            // NSWorkspace.sharedWorkspace is a singleton — always valid on the main thread.
+            let workspace: *const AnyObject = msg_send![
+                objc2::class!(NSWorkspace), sharedWorkspace
+            ];
+            if workspace.is_null() { return 0; }
 
-        // iconForFile: returns an autoreleased NSImage.
-        // Retain it immediately so it survives autorelease pool drains during UI callbacks.
-        let icon_raw: *const AnyObject = msg_send![
-            workspace, iconForFile: &*ns_path
-        ];
-        if icon_raw.is_null() { return 0; }
-        let icon: Retained<AnyObject> = match Retained::retain(icon_raw as *mut AnyObject) {
-            Some(r) => r,
-            None => return 0,
-        };
+            // iconForFile: returns an autoreleased NSImage.
+            // Retain it immediately so it survives pool drain.
+            let icon_raw: *const AnyObject = msg_send![
+                workspace, iconForFile: &*ns_path
+            ];
+            if icon_raw.is_null() { return 0; }
+            let icon: Retained<AnyObject> = match Retained::retain(icon_raw as *mut AnyObject) {
+                Some(r) => r,
+                None => return 0,
+            };
 
-        // Set icon size to 32x32 (reasonable default)
-        let size = CGSize::new(32.0, 32.0);
-        let _: () = msg_send![&*icon, setSize: size];
+            // Set icon size to 32x32 (reasonable default)
+            let size = CGSize::new(32.0, 32.0);
+            let _: () = msg_send![&*icon, setSize: size];
 
-        // Create an NSImageView with the retained icon
-        let image_view: Retained<AnyObject> = msg_send![
-            objc2::class!(NSImageView), imageViewWithImage: &*icon
-        ];
+            // Create an NSImageView with the retained icon
+            let image_view: Retained<AnyObject> = msg_send![
+                objc2::class!(NSImageView), imageViewWithImage: &*icon
+            ];
 
-        // Set a default frame size
-        let frame_size = CGSize::new(32.0, 32.0);
-        let _: () = msg_send![&*image_view, setFrameSize: frame_size];
+            // Set a default frame size
+            let frame_size = CGSize::new(32.0, 32.0);
+            let _: () = msg_send![&*image_view, setFrameSize: frame_size];
 
-        // Cast to NSView and register as widget
-        let view: Retained<objc2_app_kit::NSView> = Retained::cast_unchecked(image_view);
-        widgets::register_widget(view)
-    }
+            // Cast to NSView and register as widget
+            let view: Retained<objc2_app_kit::NSView> = Retained::cast_unchecked(image_view);
+            widgets::register_widget(view)
+        }
+    })
 }
