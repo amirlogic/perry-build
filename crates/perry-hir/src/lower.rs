@@ -4103,7 +4103,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) |
+                                            Expr::PropertyGet { .. }
                                         ) {
                                             let value_expr = args.into_iter().next().unwrap();
                                             return Ok(Expr::ArrayIndexOf {
@@ -4118,7 +4119,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) |
+                                            Expr::PropertyGet { .. }
                                         ) {
                                             let value_expr = args.into_iter().next().unwrap();
                                             return Ok(Expr::ArrayIncludes {

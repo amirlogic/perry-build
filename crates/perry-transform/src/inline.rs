@@ -1359,6 +1359,44 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         Expr::MathMinSpread(inner) | Expr::MathMaxSpread(inner) => {
             substitute_this(inner, obj_id);
         }
+        // Array operations that may contain This references
+        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
+            substitute_this(array, obj_id);
+            substitute_this(value, obj_id);
+        }
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+            substitute_this(value, obj_id);
+        }
+        Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } |
+        Expr::ArrayForEach { array, callback } | Expr::ArrayFind { array, callback } |
+        Expr::ArrayFindIndex { array, callback } | Expr::ArraySort { array, comparator: callback } => {
+            substitute_this(array, obj_id);
+            substitute_this(callback, obj_id);
+        }
+        Expr::ArrayReduce { array, callback, initial } => {
+            substitute_this(array, obj_id);
+            substitute_this(callback, obj_id);
+            if let Some(init) = initial { substitute_this(init, obj_id); }
+        }
+        Expr::ArraySlice { array, start, end } => {
+            substitute_this(array, obj_id);
+            substitute_this(start, obj_id);
+            if let Some(e) = end { substitute_this(e, obj_id); }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            substitute_this(array, obj_id);
+            if let Some(sep) = separator { substitute_this(sep, obj_id); }
+        }
+        Expr::ArrayFlat { array } | Expr::ArrayFrom(array) => {
+            substitute_this(array, obj_id);
+        }
+        Expr::StringSplit(s, sep) => {
+            substitute_this(s, obj_id);
+            substitute_this(sep, obj_id);
+        }
+        Expr::Await(inner) => {
+            substitute_this(inner, obj_id);
+        }
         _ => {}
     }
 }
