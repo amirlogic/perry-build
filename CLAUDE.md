@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.19
+**Current Version:** 0.4.20
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.20
+- fix: module-level array `.push()` lost values when called from non-inlinable functions inside for/while/if/switch bodies — `stmt_contains_call` only checked conditions, not bodies, so module vars weren't reloaded from global slots after compound statements containing nested calls
 
 ### v0.4.19
 - fix: Spacer() inside VStack now properly expands — iOS: added zero-height constraint at low priority + low compression resistance; Android: VStack uses MATCH_PARENT height so weight=1 takes effect

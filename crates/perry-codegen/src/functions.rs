@@ -27,17 +27,35 @@ use crate::expr::compile_expr;
 
 /// Check if a statement contains any function calls (direct or nested).
 /// Used to skip module-var reload after simple assignments.
+/// Must check ALL parts of compound statements (bodies, branches) — not just
+/// conditions — because function calls in loop/if bodies can modify module-level
+/// variables via global slot write-back, making the caller's cached pointer stale.
 fn stmt_contains_call(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(expr) => expr_contains_call(expr),
         Stmt::Let { init, .. } => init.as_ref().map(|e| expr_contains_call(e)).unwrap_or(false),
         Stmt::Return(Some(expr)) => expr_contains_call(expr),
-        Stmt::If { condition, .. } => expr_contains_call(condition), // conservative: if has a call in condition
-        Stmt::While { condition, .. } => expr_contains_call(condition),
-        Stmt::For { condition, .. } => condition.as_ref().map(|e| expr_contains_call(e)).unwrap_or(false),
+        Stmt::If { condition, then_branch, else_branch } => {
+            expr_contains_call(condition)
+                || then_branch.iter().any(|s| stmt_contains_call(s))
+                || else_branch.as_ref().map_or(false, |eb| eb.iter().any(|s| stmt_contains_call(s)))
+        }
+        Stmt::While { condition, body } => {
+            expr_contains_call(condition)
+                || body.iter().any(|s| stmt_contains_call(s))
+        }
+        Stmt::For { init, condition, update, body } => {
+            init.as_ref().map_or(false, |s| stmt_contains_call(s))
+                || condition.as_ref().map_or(false, |e| expr_contains_call(e))
+                || update.as_ref().map_or(false, |e| expr_contains_call(e))
+                || body.iter().any(|s| stmt_contains_call(s))
+        }
         Stmt::Throw(expr) => expr_contains_call(expr),
         Stmt::Try { .. } => true, // try blocks likely contain calls
-        Stmt::Switch { discriminant, .. } => expr_contains_call(discriminant),
+        Stmt::Switch { discriminant, cases } => {
+            expr_contains_call(discriminant)
+                || cases.iter().any(|c| c.body.iter().any(|s| stmt_contains_call(s)))
+        }
         _ => false,
     }
 }
