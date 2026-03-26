@@ -3007,6 +3007,44 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::MathImul(Box::new(a), Box::new(b)));
                                             }
                                         }
+                                        "sin" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathSin(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "cos" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathCos(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "tan" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathTan(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "asin" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAsin(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "acos" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAcos(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "atan" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAtan(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "atan2" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let y = args_iter.next().unwrap();
+                                                let x = args_iter.next().unwrap();
+                                                return Ok(Expr::MathAtan2(Box::new(y), Box::new(x)));
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

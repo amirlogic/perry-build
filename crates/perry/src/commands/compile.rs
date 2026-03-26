@@ -3826,7 +3826,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         // Mach-O (native macOS build, no --target): nm adds `_` prefix
         // COFF (Windows targets): no prefix
         // ELF (Linux/Android targets): no prefix
-        let is_macho = !is_windows && !is_linux && !is_android && !is_ios && cfg!(target_os = "macos");
+        let is_macho = !is_windows && !is_linux && !is_android && cfg!(target_os = "macos");
         // Scan object files in parallel for symbol resolution
         let scan_results: Vec<(HashSet<String>, HashSet<String>)> = all_scan_paths.par_iter()
             .map(|scan_path| {

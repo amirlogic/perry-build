@@ -569,7 +569,7 @@ impl crate::codegen::Compiler {
             Expr::MathMinSpread(e) | Expr::MathMaxSpread(e) => {
                 self.collect_closures_from_expr(e, closures, enclosing_class);
             }
-            Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
+            Expr::MathPow(base, exp) | Expr::MathImul(base, exp) | Expr::MathAtan2(base, exp) => {
                 self.collect_closures_from_expr(base, closures, enclosing_class);
                 self.collect_closures_from_expr(exp, closures, enclosing_class);
             }
@@ -718,7 +718,9 @@ impl crate::codegen::Compiler {
             // Math operations
             Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
             Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
-            Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
+            Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) |
+            Expr::MathSin(expr) | Expr::MathCos(expr) | Expr::MathTan(expr) |
+            Expr::MathAsin(expr) | Expr::MathAcos(expr) | Expr::MathAtan(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
             }
             // Crypto operations

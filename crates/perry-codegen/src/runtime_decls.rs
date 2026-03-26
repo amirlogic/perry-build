@@ -7008,6 +7008,25 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_math_log10"), func_id);
         }
 
+        // Trig functions: js_math_sin/cos/tan/asin/acos/atan(x: f64) -> f64
+        for name in &["js_math_sin", "js_math_cos", "js_math_tan", "js_math_asin", "js_math_acos", "js_math_atan"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // js_math_atan2(y: f64, x: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_atan2", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_math_atan2"), func_id);
+        }
+
         // js_math_random() -> f64
         {
             let mut sig = self.module.make_signature();

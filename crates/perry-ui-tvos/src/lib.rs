@@ -1490,16 +1490,16 @@ pub extern "C" fn perry_system_get_locale() -> i64 {
         fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
     }
     unsafe {
-        let locale: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        let ns_locale: *mut objc2::runtime::AnyObject = objc2::msg_send![
             objc2::runtime::AnyClass::get(c"NSLocale").unwrap(),
-            preferredLanguages
+            currentLocale
         ];
-        let first: *mut objc2::runtime::AnyObject = objc2::msg_send![locale, firstObject];
-        if first.is_null() {
+        let lang_code: *mut objc2::runtime::AnyObject = objc2::msg_send![ns_locale, languageCode];
+        if lang_code.is_null() {
             let fallback = b"en";
             return js_string_from_bytes(fallback.as_ptr(), 2) as i64;
         }
-        let utf8: *const u8 = objc2::msg_send![first, UTF8String];
+        let utf8: *const u8 = objc2::msg_send![lang_code, UTF8String];
         let len = libc::strlen(utf8 as *const i8);
         let code_len = if len >= 2 { 2 } else { len };
         js_string_from_bytes(utf8, code_len as i64) as i64

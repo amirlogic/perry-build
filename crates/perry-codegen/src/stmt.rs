@@ -161,6 +161,15 @@ pub(crate) fn compile_async_stmt(
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_expr(left, locals) || is_string_expr(right, locals)
                     }
+                    // Logical OR/coalesce with string operand returns string
+                    // e.g., process.env.X || 'default', value ?? 'fallback'
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_string_expr(left, locals) || is_string_expr(right, locals)
+                    }
+                    // Conditional where both branches are strings
+                    Expr::Conditional { then_expr, else_expr, .. } => {
+                        is_string_expr(then_expr, locals) && is_string_expr(else_expr, locals)
+                    }
                     // Property access on strings (like str.substring()) returns string
                     Expr::PropertyGet { object, property } => {
                         if is_string_expr(object, locals) {
@@ -399,6 +408,15 @@ pub(crate) fn compile_stmt(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_expr(left, locals) || is_string_expr(right, locals)
+                    }
+                    // Logical OR/coalesce with string operand returns string
+                    // e.g., process.env.X || 'default', headers['key'] || '', value ?? 'fallback'
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_string_expr(left, locals) || is_string_expr(right, locals)
+                    }
+                    // Conditional where both branches are strings
+                    Expr::Conditional { then_expr, else_expr, .. } => {
+                        is_string_expr(then_expr, locals) && is_string_expr(else_expr, locals)
                     }
                     Expr::Call { callee, .. } => {
                         // Check if it's a string method call (slice/substring/trim/toLowerCase/toUpperCase returns string)
@@ -1414,6 +1432,12 @@ pub(crate) fn compile_stmt(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_return_expr(left, locals) || is_string_return_expr(right, locals)
+                    }
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_string_return_expr(left, locals) || is_string_return_expr(right, locals)
+                    }
+                    Expr::Conditional { then_expr, else_expr, .. } => {
+                        is_string_return_expr(then_expr, locals) && is_string_return_expr(else_expr, locals)
                     }
                     Expr::Call { callee, .. } => {
                         if let Expr::PropertyGet { object, property } = callee.as_ref() {

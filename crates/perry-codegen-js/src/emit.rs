@@ -1213,6 +1213,19 @@ impl JsEmitter {
             Expr::MathLog(x) => { self.emit_math_unary("Math.log", x); }
             Expr::MathLog2(x) => { self.emit_math_unary("Math.log2", x); }
             Expr::MathLog10(x) => { self.emit_math_unary("Math.log10", x); }
+            Expr::MathSin(x) => { self.emit_math_unary("Math.sin", x); }
+            Expr::MathCos(x) => { self.emit_math_unary("Math.cos", x); }
+            Expr::MathTan(x) => { self.emit_math_unary("Math.tan", x); }
+            Expr::MathAsin(x) => { self.emit_math_unary("Math.asin", x); }
+            Expr::MathAcos(x) => { self.emit_math_unary("Math.acos", x); }
+            Expr::MathAtan(x) => { self.emit_math_unary("Math.atan", x); }
+            Expr::MathAtan2(y, x) => {
+                self.output.push_str("Math.atan2(");
+                self.emit_expr(y);
+                self.output.push_str(", ");
+                self.emit_expr(x);
+                self.output.push(')');
+            }
             Expr::MathPow(base, exp) => {
                 self.output.push_str("Math.pow(");
                 self.emit_expr(base);

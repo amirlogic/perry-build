@@ -33,6 +33,34 @@ pub extern "C" fn js_math_log10(x: f64) -> f64 {
     x.log10()
 }
 
+/// Math.sin(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_sin(x: f64) -> f64 { x.sin() }
+
+/// Math.cos(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_cos(x: f64) -> f64 { x.cos() }
+
+/// Math.tan(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_tan(x: f64) -> f64 { x.tan() }
+
+/// Math.asin(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_asin(x: f64) -> f64 { x.asin() }
+
+/// Math.acos(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_acos(x: f64) -> f64 { x.acos() }
+
+/// Math.atan(x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_atan(x: f64) -> f64 { x.atan() }
+
+/// Math.atan2(y, x) -> number
+#[no_mangle]
+pub extern "C" fn js_math_atan2(y: f64, x: f64) -> f64 { y.atan2(x) }
+
 /// Math.random() -> number (0 <= x < 1)
 #[no_mangle]
 pub extern "C" fn js_math_random() -> f64 {

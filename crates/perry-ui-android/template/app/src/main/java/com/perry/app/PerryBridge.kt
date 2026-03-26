@@ -510,6 +510,31 @@ object PerryBridge {
                 return
             }
 
+            // Configure transform matrix for proper aspect ratio (center-crop)
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val previewSize = map?.getOutputSizes(SurfaceTexture::class.java)
+                ?.maxByOrNull { it.width * it.height } ?: android.util.Size(1920, 1080)
+            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+
+            val textureView = cameraTextureView
+            if (textureView != null && textureView.width > 0 && textureView.height > 0) {
+                val viewWidth = textureView.width.toFloat()
+                val viewHeight = textureView.height.toFloat()
+                val previewWidth = previewSize.height.toFloat()  // rotated 90°
+                val previewHeight = previewSize.width.toFloat()
+                val scaleX = viewWidth / previewWidth
+                val scaleY = viewHeight / previewHeight
+                val scale = Math.max(scaleX, scaleY)  // center-crop (fill)
+                val matrix = android.graphics.Matrix()
+                matrix.setScale(
+                    scale * previewWidth / viewWidth,
+                    scale * previewHeight / viewHeight,
+                    viewWidth / 2f, viewHeight / 2f
+                )
+                textureView.setTransform(matrix)
+            }
+
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera

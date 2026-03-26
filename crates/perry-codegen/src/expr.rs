@@ -1105,6 +1105,12 @@ pub(crate) fn compile_expr(
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_value_expr(left, locals) || is_string_value_expr(right, locals)
                     }
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_string_value_expr(left, locals) || is_string_value_expr(right, locals)
+                    }
+                    Expr::Conditional { then_expr, else_expr, .. } => {
+                        is_string_value_expr(then_expr, locals) && is_string_value_expr(else_expr, locals)
+                    }
                     _ => false,
                 }
             }
@@ -1246,6 +1252,71 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_math_log10 not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathSin(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_sin")
+                .ok_or_else(|| anyhow!("js_math_sin not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathCos(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_cos")
+                .ok_or_else(|| anyhow!("js_math_cos not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathTan(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_tan")
+                .ok_or_else(|| anyhow!("js_math_tan not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAsin(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_asin")
+                .ok_or_else(|| anyhow!("js_math_asin not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAcos(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_acos")
+                .ok_or_else(|| anyhow!("js_math_acos not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAtan(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_atan")
+                .ok_or_else(|| anyhow!("js_math_atan not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAtan2(y_expr, x_expr) => {
+            let y = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, y_expr, this_ctx)?;
+            let x = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, x_expr, this_ctx)?;
+            let y_f64 = ensure_f64(builder, y);
+            let x_f64 = ensure_f64(builder, x);
+            let func = extern_funcs.get("js_math_atan2")
+                .ok_or_else(|| anyhow!("js_math_atan2 not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[y_f64, x_f64]);
             Ok(builder.inst_results(call)[0])
         }
         Expr::MathPow(base_expr, exp_expr) => {
@@ -4943,6 +5014,10 @@ pub(crate) fn compile_expr(
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_operand(left, locals) || is_string_operand(right, locals)
                     }
+                    // Logical OR/coalesce with string operand (e.g., env.X || '', value ?? 'default')
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_string_operand(left, locals) || is_string_operand(right, locals)
+                    }
                     // Conditional expressions with string branches (from template literals)
                     Expr::Conditional { then_expr, else_expr, .. } => {
                         is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
@@ -5807,6 +5882,18 @@ pub(crate) fn compile_expr(
                     Expr::TypeOf(_) => true,
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    // String concatenation
+                    Expr::Binary { op: BinaryOp::Add, left, right } => {
+                        is_known_string_expr(left, locals) || is_known_string_expr(right, locals)
+                    }
+                    // Logical OR/coalesce with string operand (e.g., env.X || '', value ?? 'default')
+                    Expr::Logical { op: LogicalOp::Or | LogicalOp::Coalesce, left, right } => {
+                        is_known_string_expr(left, locals) || is_known_string_expr(right, locals)
+                    }
+                    // Conditional where both branches are strings
+                    Expr::Conditional { then_expr, else_expr, .. } => {
+                        is_known_string_expr(then_expr, locals) && is_known_string_expr(else_expr, locals)
+                    }
                     // Method calls that return strings (e.g., str.charAt(0), str.slice(1))
                     Expr::Call { callee, .. } => {
                         if let Expr::PropertyGet { property, .. } = callee.as_ref() {
@@ -5829,6 +5916,8 @@ pub(crate) fn compile_expr(
                     Expr::PropertyGet { .. } => true,
                     Expr::IndexGet { .. } => true,
                     Expr::Call { .. } => true, // Function/method calls may return strings
+                    Expr::Logical { .. } => true, // OR/coalesce may return strings
+                    Expr::Conditional { .. } => true, // Ternary may return strings
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union || i.is_string).unwrap_or(false),
                     _ => is_known_string_expr(expr, locals),
                 }
@@ -5855,7 +5944,7 @@ pub(crate) fn compile_expr(
             let left_maybe = may_be_string_expr(left, locals) || left_is_string_enum;
             let right_maybe = may_be_string_expr(right, locals) || right_is_string_enum;
             let is_dynamic_string_compare = !is_static_string_compare &&
-                (left_known && right_maybe) || (left_maybe && right_known);
+                ((left_known && right_maybe) || (left_maybe && right_known));
 
             let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
             let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
@@ -6160,13 +6249,34 @@ pub(crate) fn compile_expr(
                         }
                         let is_union_compare = is_union_typed_expr(left, locals) || is_union_typed_expr(right, locals);
 
+                        // Helper: check if an expr is a local with is_string = true
+                        // (stored as I64 raw pointer, needs NaN-boxing for js_jsvalue_equals)
+                        fn is_string_local(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            if let Expr::LocalGet(id) = expr {
+                                locals.get(id).map(|i| i.is_string).unwrap_or(false)
+                            } else {
+                                false
+                            }
+                        }
+
+                        // Convert to F64 for js_jsvalue_equals, NaN-boxing I64 string pointers
+                        // with STRING_TAG so the runtime recognizes them as strings
+                        let lhs_f64 = if lhs_type == types::I64 && is_string_local(left, locals) {
+                            inline_nanbox_string(builder, lhs)
+                        } else {
+                            ensure_f64(builder, lhs)
+                        };
+                        let rhs_f64 = if rhs_type == types::I64 && is_string_local(right, locals) {
+                            inline_nanbox_string(builder, rhs)
+                        } else {
+                            ensure_f64(builder, rhs)
+                        };
+
                         if is_union_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
                             // Generic JSValue equality: handles BigInt by value, String by content
                             let jsval_eq_func = extern_funcs.get("js_jsvalue_equals")
                                 .ok_or_else(|| anyhow!("js_jsvalue_equals not declared"))?;
                             let jsval_eq_ref = module.declare_func_in_func(*jsval_eq_func, builder.func);
-                            let lhs_f64 = ensure_f64(builder, lhs);
-                            let rhs_f64 = ensure_f64(builder, rhs);
                             let call = builder.ins().call(jsval_eq_ref, &[lhs_f64, rhs_f64]);
                             let result = builder.inst_results(call)[0]; // i32: 1=equal, 0=not equal
                             if *op == CompareOp::Eq {
@@ -6185,8 +6295,6 @@ pub(crate) fn compile_expr(
                             let jsval_eq_func = extern_funcs.get("js_jsvalue_equals")
                                 .ok_or_else(|| anyhow!("js_jsvalue_equals not declared"))?;
                             let jsval_eq_ref = module.declare_func_in_func(*jsval_eq_func, builder.func);
-                            let lhs_f64 = ensure_f64(builder, lhs);
-                            let rhs_f64 = ensure_f64(builder, rhs);
                             let call = builder.ins().call(jsval_eq_ref, &[lhs_f64, rhs_f64]);
                             let result = builder.inst_results(call)[0];
                             if *op == CompareOp::Eq {
@@ -14409,13 +14517,7 @@ pub(crate) fn compile_expr(
             let has_string_elements = has_string;
 
             if is_mixed || has_string_elements {
-                // Array with strings or mixed types: use js_array_from_jsvalue
-                // Elements need to be properly NaN-boxed
-                let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    (count * 8) as u32, // 8 bytes per u64
-                    0,
-                ));
+                // Array with strings or mixed types: elements need to be properly NaN-boxed
 
                 // Get the nanbox functions for pointer and string values
                 let nanbox_string_func = extern_funcs.get("js_nanbox_string")
@@ -14426,57 +14528,96 @@ pub(crate) fn compile_expr(
                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                 let nanbox_pointer_ref = module.declare_func_in_func(*nanbox_pointer_func, builder.func);
 
-                // Compile and store each element as NaN-boxed JSValue bits (u64)
-                for (i, elem) in elements.iter().enumerate() {
-                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
-
-                    // For string elements, NaN-box with STRING_TAG
-                    // For object elements, NaN-box with POINTER_TAG
-                    // For number elements, the f64 bits are used directly
-                    // IMPORTANT: Check if value is already NaN-boxed (F64) to avoid double NaN-boxing
-                    let val_type = builder.func.dfg.value_type(val);
-                    let jsvalue_bits = if is_string_element(elem, locals) {
-                        if val_type == types::F64 {
-                            // Already NaN-boxed F64 (e.g., from Expr::String), just bitcast to I64
-                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                // Helper closure for NaN-boxing an element value
+                macro_rules! nanbox_element {
+                    ($builder:expr, $elem:expr, $val:expr) => {{
+                        let val_type = $builder.func.dfg.value_type($val);
+                        if is_string_element($elem, locals) {
+                            if val_type == types::F64 {
+                                $builder.ins().bitcast(types::I64, MemFlags::new(), $val)
+                            } else {
+                                let call = $builder.ins().call(nanbox_string_ref, &[$val]);
+                                let boxed_f64 = $builder.inst_results(call)[0];
+                                $builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                            }
+                        } else if is_object_element($elem, locals) {
+                            if val_type == types::F64 {
+                                $builder.ins().bitcast(types::I64, MemFlags::new(), $val)
+                            } else {
+                                let call = $builder.ins().call(nanbox_pointer_ref, &[$val]);
+                                let boxed_f64 = $builder.inst_results(call)[0];
+                                $builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                            }
                         } else {
-                            // I64 raw pointer, needs NaN-boxing with STRING_TAG
-                            let call = builder.ins().call(nanbox_string_ref, &[val]);
-                            let boxed_f64 = builder.inst_results(call)[0];
-                            builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                            $builder.ins().bitcast(types::I64, MemFlags::new(), $val)
                         }
-                    } else if is_object_element(elem, locals) {
-                        if val_type == types::F64 {
-                            // Already NaN-boxed F64, just bitcast to I64
-                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                        } else {
-                            // I64 raw pointer, needs NaN-boxing with POINTER_TAG
-                            let call = builder.ins().call(nanbox_pointer_ref, &[val]);
-                            let boxed_f64 = builder.inst_results(call)[0];
-                            builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
-                        }
-                    } else {
-                        // Numbers: f64 bits stored as-is
-                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                    };
-                    builder.ins().stack_store(jsvalue_bits, slot, (i * 8) as i32);
+                    }};
                 }
 
-                // Get the stack slot address
-                let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                if count > 128 {
+                    // Large mixed array: allocate directly on heap to avoid large stack slots
+                    let alloc_func = extern_funcs.get("js_array_alloc_with_length")
+                        .ok_or_else(|| anyhow!("js_array_alloc_with_length not declared"))?;
+                    let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                    let count_val = builder.ins().iconst(types::I32, count as i64);
+                    let call = builder.ins().call(alloc_ref, &[count_val]);
+                    let arr_ptr = builder.inst_results(call)[0];
 
-                // Call js_array_from_jsvalue
-                let alloc_func = extern_funcs.get("js_array_from_jsvalue")
-                    .ok_or_else(|| anyhow!("js_array_from_jsvalue not declared"))?;
+                    // Write NaN-boxed elements directly to heap
+                    for (i, elem) in elements.iter().enumerate() {
+                        let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
+                        let jsvalue_bits = nanbox_element!(builder, elem, val);
+                        // Store as f64 (NaN-boxed bits): element data starts at offset 8
+                        let val_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits);
+                        builder.ins().store(MemFlags::new(), val_f64, arr_ptr, (8 + i * 8) as i32);
+                    }
+
+                    Ok(inline_nanbox_pointer(builder, arr_ptr))
+                } else {
+                    // Small mixed array: use stack slot + js_array_from_jsvalue
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        (count * 8) as u32,
+                        0,
+                    ));
+
+                    for (i, elem) in elements.iter().enumerate() {
+                        let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
+                        let jsvalue_bits = nanbox_element!(builder, elem, val);
+                        builder.ins().stack_store(jsvalue_bits, slot, (i * 8) as i32);
+                    }
+
+                    let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let alloc_func = extern_funcs.get("js_array_from_jsvalue")
+                        .ok_or_else(|| anyhow!("js_array_from_jsvalue not declared"))?;
+                    let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                    let count_val = builder.ins().iconst(types::I32, count as i64);
+                    let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
+                    let arr_ptr = builder.inst_results(call)[0];
+
+                    Ok(inline_nanbox_pointer(builder, arr_ptr))
+                }
+            } else if count > 128 {
+                // Large homogeneous array: allocate directly on heap to avoid large stack slots
+                // that can cause issues on platforms with limited stack (e.g., Android JNI context)
+                let alloc_func = extern_funcs.get("js_array_alloc_with_length")
+                    .ok_or_else(|| anyhow!("js_array_alloc_with_length not declared"))?;
                 let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
                 let count_val = builder.ins().iconst(types::I32, count as i64);
-                let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
-                let arr_ptr = builder.inst_results(call)[0];
+                let call = builder.ins().call(alloc_ref, &[count_val]);
+                let arr_ptr = builder.inst_results(call)[0]; // I64 pointer to ArrayHeader
+
+                // Write elements directly to heap: element data at arr_ptr + 8 (after ArrayHeader)
+                for (i, elem) in elements.iter().enumerate() {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
+                    let val_f64 = ensure_f64(builder, val);
+                    builder.ins().store(MemFlags::new(), val_f64, arr_ptr, (8 + i * 8) as i32);
+                }
 
                 // NaN-box with POINTER_TAG so typeof returns "object" instead of "number"
                 Ok(inline_nanbox_pointer(builder, arr_ptr))
             } else {
-                // Homogeneous array: use js_array_from_f64
+                // Small homogeneous array: use stack slot + js_array_from_f64
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     (count * 8) as u32, // 8 bytes per f64

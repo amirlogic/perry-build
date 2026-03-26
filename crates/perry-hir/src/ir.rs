@@ -1004,6 +1004,13 @@ pub enum Expr {
     MathMaxSpread(Box<Expr>),            // Math.max(...array) -> number (spread from single array)
     MathImul(Box<Expr>, Box<Expr>),      // Math.imul(a, b) -> number (32-bit integer multiply)
     MathRandom,                          // Math.random() -> number
+    MathSin(Box<Expr>),                  // Math.sin(x) -> number
+    MathCos(Box<Expr>),                  // Math.cos(x) -> number
+    MathTan(Box<Expr>),                  // Math.tan(x) -> number
+    MathAsin(Box<Expr>),                 // Math.asin(x) -> number
+    MathAcos(Box<Expr>),                 // Math.acos(x) -> number
+    MathAtan(Box<Expr>),                 // Math.atan(x) -> number
+    MathAtan2(Box<Expr>, Box<Expr>),     // Math.atan2(y, x) -> number
 
     // Crypto operations
     CryptoRandomBytes(Box<Expr>),        // crypto.randomBytes(size) -> string (hex)
