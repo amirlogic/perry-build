@@ -2441,7 +2441,17 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
         ast::Expr::Unary(unary) => {
             let operand = Box::new(lower_expr(ctx, &unary.arg)?);
             match unary.op {
-                ast::UnaryOp::Minus => Ok(Expr::Unary { op: UnaryOp::Neg, operand }),
+                ast::UnaryOp::Minus => {
+                    // Fold -Number into Number(-val) to simplify codegen
+                    // (e.g., array literals with negative numbers avoid Unary wrapper)
+                    if let Expr::Number(val) = *operand {
+                        Ok(Expr::Number(-val))
+                    } else if let Expr::Integer(val) = *operand {
+                        Ok(Expr::Integer(-val))
+                    } else {
+                        Ok(Expr::Unary { op: UnaryOp::Neg, operand })
+                    }
+                }
                 ast::UnaryOp::Plus => Ok(Expr::Unary { op: UnaryOp::Pos, operand }),
                 ast::UnaryOp::Bang => Ok(Expr::Unary { op: UnaryOp::Not, operand }),
                 ast::UnaryOp::Tilde => Ok(Expr::Unary { op: UnaryOp::BitNot, operand }),
