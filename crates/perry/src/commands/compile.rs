@@ -4239,12 +4239,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          // per module). Large codebases (100+ modules) can overflow the
          // default 1MB stack. Reserve 8MB.
          .arg("/STACK:67108864");
-        // When cross-compiling, llvm-ar may not be available to trim duplicate
-        // objects from native libs. Allow duplicate symbols as a safety net —
-        // the duplicates are identical (same crate source), so this is safe.
-        if is_cross_windows {
-            c.arg("/FORCE:MULTIPLE");
-        }
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
