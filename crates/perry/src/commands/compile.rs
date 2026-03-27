@@ -3691,8 +3691,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // Compile native modules in parallel using rayon
     use rayon::prelude::*;
 
+    // Snapshot i18n data from main thread so rayon workers can access it
+    let i18n_snapshot: Option<(Vec<String>, usize, usize, Vec<String>)> = i18n_table.as_ref().map(|table| {
+        (table.translations.clone(), table.keys.len(), table.locale_count, table.locale_codes.clone())
+    });
+
     let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
         .map(|(path, hir_module)| {
+            // Propagate i18n table to this rayon worker thread
+            if let Some((ref translations, key_count, locale_count, ref locale_codes)) = i18n_snapshot {
+                perry_codegen::set_i18n_table(translations.clone(), key_count, locale_count, locale_codes.clone());
+            }
+
             let mut compiler = perry_codegen::Compiler::new(target.as_deref())
                 .map_err(|e| format!("Failed to create compiler: {}", e))?;
 
@@ -4373,9 +4383,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
+        } else if is_cross_ios {
+            // ld64.lld called directly — no -Wl, prefix needed
+            cmd.arg("-dead_strip");
         } else if is_watchos {
             cmd.arg("-Xlinker").arg("-dead_strip");
         } else {
+            // Native macOS/iOS via clang driver
             cmd.arg("-Wl,-dead_strip");
         }
     }
