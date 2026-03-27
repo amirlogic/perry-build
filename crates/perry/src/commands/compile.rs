@@ -343,7 +343,6 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let mut excluded_by_pattern = 0usize;
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
-        if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
                 .and_then(|o| o.split('.').next())
@@ -4560,7 +4559,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Rust std. When perry-stdlib is also linked (which bundles the same), the
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
             // UI-specific objects from the .lib and link them individually.
-            let ui_lib = if is_windows {
+            let ui_lib = if is_windows && !is_cross_windows {
+                // Native Windows: strip duplicates (no /FORCE:MULTIPLE)
                 match strip_duplicate_objects_from_lib(&ui_lib) {
                     Ok(trimmed) => trimmed,
                     Err(e) => {
@@ -4569,6 +4569,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                 }
             } else {
+                // Cross-compile: /FORCE:MULTIPLE handles duplicates, skip stripping
                 ui_lib
             };
             cmd.arg(&ui_lib);
@@ -4763,10 +4764,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             && native_lib.module.contains("plugin");
                         if force_load {
                             cmd.arg(format!("-Wl,-force_load,{}", lib.display()));
-                        } else if is_windows && lib.extension().map_or(false, |e| e == "lib") {
-                            // On Windows, native libs may be staticlibs that bundle
-                            // std/alloc/core, causing duplicate CRT init. Dedup them
-                            // the same way we dedup the UI lib.
+                        } else if is_windows && !is_cross_windows && lib.extension().map_or(false, |e| e == "lib") {
+                            // Native Windows: strip duplicates from native staticlibs
                             let deduped = match strip_duplicate_objects_from_lib(&lib) {
                                 Ok(trimmed) => trimmed,
                                 Err(e) => {
