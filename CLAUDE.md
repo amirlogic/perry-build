@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.22
+**Current Version:** 0.4.23
 
 ## Workflow Requirements
 
@@ -139,6 +139,16 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.23
+- fix: i18n translations now propagate to rayon worker threads — parallel module codegen was missing the i18n string table, causing untranslated output; also walks parent dirs to find `perry.toml`
+- fix: iOS crashes — gate `ios_game_loop` behind feature flag, catch panics in UI callback trampolines (button, scrollview, tabbar), panic hook writes crash log to Documents
+- fix: iOS Spacer crash — removed NSLayoutConstraint from spacer creation that caused layout engine conflicts
+- fix: iOS/macOS duplicate symbol crash — `strip_duplicate_objects_from_lib` now works cross-platform (not just Windows), deduplicating perry_runtime from UI staticlib
+- feat: iOS cross-compilation from Linux using `ld64.lld` + Apple SDK sysroot (`PERRY_IOS_SYSROOT` env var)
+- fix: `ld64.lld` flags — use `-dead_strip` directly instead of `-Wl,-dead_strip` for cross-iOS linking
+- fix: `perry run` improvements — reads app metadata from perry.toml/package.json, applies `[publish].exclude` to tarballs, uses `create_project_tarball_with_excludes`
+- fix: threading resilience — `catch_unwind` in spawn, poisoned mutex recovery in `PENDING_THREAD_RESULTS`, tokio fallback to current-thread runtime on iOS
 
 ### v0.4.22
 - fix: module-level array `.push()` lost values when called from non-inlinable functions inside for/while/if/switch bodies — `stmt_contains_call` only checked conditions, not bodies, so module vars weren't reloaded from global slots after compound statements containing nested calls
