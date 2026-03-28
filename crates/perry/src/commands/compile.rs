@@ -5137,8 +5137,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         <integer>1</integer>
         <integer>2</integer>
     </array>
-    <key>UILaunchStoryboardName</key>
-    <string>LaunchScreen</string>
+    <key>UILaunchScreen</key>
+    <dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -5567,8 +5567,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <array>
         <integer>3</integer>
     </array>
-    <key>UILaunchStoryboardName</key>
-    <string>LaunchScreen</string>
+    <key>UILaunchScreen</key>
+    <dict/>
     <key>UIRequiresFullScreen</key>
     <true/>
 </dict>
