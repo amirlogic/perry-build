@@ -5024,7 +5024,29 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         result_bundle_id = Some(bundle_id.clone());
         result_app_dir = Some(app_dir.clone());
 
-        // Check perry.toml for iOS-specific settings (e.g. encryption_exempt)
+        // Read perry.toml for version, build_number, name
+        let (toml_version, toml_build_number, _toml_name) = (|| -> Option<(Option<String>, Option<String>, Option<String>)> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    let data = fs::read_to_string(&toml_path).ok()?;
+                    let doc: toml::Table = data.parse().ok()?;
+                    let project = doc.get("project")?.as_table()?;
+                    let version = project.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let build_number = project.get("build_number").and_then(|v| {
+                        v.as_integer().map(|n| n.to_string()).or_else(|| v.as_str().map(|s| s.to_string()))
+                    });
+                    let name = project.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    return Some((version, build_number, name));
+                }
+            }
+            None
+        })().unwrap_or((None, None, None));
+        let app_version = toml_version.as_deref().unwrap_or("1.0.0");
+        let app_build_number = toml_build_number.as_deref().unwrap_or("1");
+
         let encryption_exempt_plist = (|| -> Option<String> {
             let mut dir = args.input.canonicalize().ok()?;
             for _ in 0..5 {
@@ -5061,9 +5083,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <key>CFBundleName</key>
     <string>{exe_stem}</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>{app_build_number}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>{app_version}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
