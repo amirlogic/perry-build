@@ -584,8 +584,10 @@ pub unsafe extern "C" fn js_dynamic_shr(a: f64, b: f64) -> f64 {
         );
         return js_nanbox_bigint(result as i64);
     }
-    let ai = a as i32;
-    let bi = (b as i32) & 0x1f;
+    // JS ToInt32: f64 -> i64 -> i32 (wrapping), NOT f64 -> i32 (saturating).
+    // Rust `f64 as i32` saturates at i32::MAX for values >= 2^31, but JS wraps.
+    let ai = (a as i64) as i32;
+    let bi = ((b as i64) as i32) & 0x1f;
     (ai >> bi) as f64
 }
 
@@ -601,8 +603,9 @@ pub unsafe extern "C" fn js_dynamic_shl(a: f64, b: f64) -> f64 {
         );
         return js_nanbox_bigint(result as i64);
     }
-    let ai = a as i32;
-    let bi = (b as i32) & 0x1f;
+    // JS ToInt32: f64 -> i64 -> i32 (wrapping), NOT f64 -> i32 (saturating).
+    let ai = (a as i64) as i32;
+    let bi = ((b as i64) as i32) & 0x1f;
     (ai << bi) as f64
 }
 
@@ -619,7 +622,8 @@ pub unsafe extern "C" fn js_dynamic_bitand(a: f64, b: f64) -> f64 {
         );
         return js_nanbox_bigint(result as i64);
     }
-    ((a as i32) & (b as i32)) as f64
+    // JS ToInt32: f64 -> i64 -> i32 (wrapping), NOT f64 -> i32 (saturating).
+    (((a as i64) as i32) & ((b as i64) as i32)) as f64
 }
 
 /// Dynamic bitwise OR: BigInt | if either operand is BigInt, else i32 | for numbers.
@@ -634,7 +638,8 @@ pub unsafe extern "C" fn js_dynamic_bitor(a: f64, b: f64) -> f64 {
         );
         return js_nanbox_bigint(result as i64);
     }
-    ((a as i32) | (b as i32)) as f64
+    // JS ToInt32: f64 -> i64 -> i32 (wrapping), NOT f64 -> i32 (saturating).
+    (((a as i64) as i32) | ((b as i64) as i32)) as f64
 }
 
 /// Dynamic bitwise XOR: BigInt ^ if either operand is BigInt, else i32 ^ for numbers.
@@ -649,7 +654,8 @@ pub unsafe extern "C" fn js_dynamic_bitxor(a: f64, b: f64) -> f64 {
         );
         return js_nanbox_bigint(result as i64);
     }
-    ((a as i32) ^ (b as i32)) as f64
+    // JS ToInt32: f64 -> i64 -> i32 (wrapping), NOT f64 -> i32 (saturating).
+    (((a as i64) as i32) ^ ((b as i64) as i32)) as f64
 }
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a BigInt.

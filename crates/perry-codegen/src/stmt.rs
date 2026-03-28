@@ -1049,11 +1049,12 @@ pub(crate) fn compile_stmt(
             let is_envget_init = matches!(init, Some(Expr::EnvGet(_)) | Some(Expr::EnvGetDynamic(_)));
 
             // Check if initialized from IndexGet (array element access)
-            // Array elements from mixed/union arrays are NaN-boxed and need dynamic handling
+            // Array elements from mixed/union arrays are NaN-boxed and need dynamic handling.
+            // Plain number[] arrays store raw f64, so IndexGet on them does NOT need union handling.
+            // Only mixed-type arrays (is_mixed_array) or already-union arrays (is_union) need it.
             let is_indexget_init = if let Some(Expr::IndexGet { object, .. }) = init {
-                // If the array is marked as mixed or union, elements need union handling
                 if let Expr::LocalGet(arr_id) = object.as_ref() {
-                    locals.get(arr_id).map(|i| i.is_mixed_array || i.is_union || i.is_array).unwrap_or(true)
+                    locals.get(arr_id).map(|i| i.is_mixed_array || i.is_union).unwrap_or(true)
                 } else {
                     true // Conservative: unknown array sources need union handling
                 }
