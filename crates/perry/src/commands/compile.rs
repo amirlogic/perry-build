@@ -3938,14 +3938,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let is_android = matches!(target.as_deref(), Some("android"));
         let is_linux = matches!(target.as_deref(), Some("linux")) || (!cfg!(target_os = "macos") && !cfg!(target_os = "windows") && target.is_none());
         let is_windows = matches!(target.as_deref(), Some("windows")) || (cfg!(target_os = "windows") && target.is_none());
-        // Find the nm tool: for Windows targets use llvm-nm (reads COFF); otherwise system nm
-        let nm_cmd = if is_windows {
-            find_llvm_tool("llvm-nm")
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| "nm".to_string())
-        } else {
-            "nm".to_string()
-        };
         // Symbol prefix depends on object format:
         // Mach-O targets (macOS, iOS, watchOS, tvOS): nm shows `_` prefix
         // COFF (Windows targets): no prefix
@@ -3956,6 +3948,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             Some("macos") | Some("watchos") | Some("watchos-simulator") |
             Some("tvos") | Some("tvos-simulator")
         ) || (!is_windows && !is_linux && !is_android && cfg!(target_os = "macos"));
+        // Find the nm tool: use llvm-nm when cross-compiling (host nm can't read foreign object formats)
+        let needs_llvm_nm = is_windows || (is_macho && !cfg!(target_os = "macos"));
+        let nm_cmd = if needs_llvm_nm {
+            find_llvm_tool("llvm-nm")
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "nm".to_string())
+        } else {
+            "nm".to_string()
+        };
         // Scan object files in parallel for symbol resolution
         let scan_results: Vec<(HashSet<String>, HashSet<String>)> = all_scan_paths.par_iter()
             .map(|scan_path| {
