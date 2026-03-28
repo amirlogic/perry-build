@@ -4367,7 +4367,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          // Perry generates large init functions for TS modules (one function
          // per module). Large codebases (100+ modules) can overflow the
          // default 1MB stack. Reserve 8MB.
-         .arg("/STACK:67108864");
+         .arg("/STACK:67108864")
+         // Native libs (hone_editor_windows etc) bundle perry_runtime objects
+         // that can't be fully stripped. Identical symbols are safe to merge.
+         .arg("/FORCE:MULTIPLE");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
