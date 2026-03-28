@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.23
+**Current Version:** 0.4.24
 
 ## Workflow Requirements
 
@@ -140,9 +140,19 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
+### v0.4.24
+- feat: macOS cross-compilation from Linux — codegen triple, framework search paths, `-lobjc`, CoreGraphics/Metal/IOKit/DiskArbitration frameworks, `find_ui_library` for macOS
+- feat: iOS Info.plist now includes all Apple-required keys, CFBundleIcons with standard naming, version/build_number from perry.toml, UILaunchScreen dict
+- fix: bitwise NOT (`~x`) wrapping semantics — `f64→i64→i32` (ireduce) for JS ToInt32 instead of `fcvt_to_sint_sat` which saturated at i32::MAX
+- fix: IndexGet string detection — property access returning array (e.g., `log.topics[0]`) treated as potential string for proper comparison codegen
+- fix: `Array.filter/find/some/every/flatMap` callback dispatch + module init ordering
+- fix: null arithmetic coercion — `Math.max(null, 5)` etc. coerces null to 0 via `js_number_coerce`
+- fix: `new X(args)` resolves cross-module imported constructor functions and exported const functions via `__export_` data slot
+- fix: `new Date(stringVariable)` properly NaN-boxes with STRING_TAG for string detection
+- fix: `is_macho` uses target triple instead of host `cfg!` check; always generate `main` for entry module on iOS/macOS cross-compile
+- fix: ld64.lld `sdk_version` set to 26.0 (Apple requires iOS 18+); `/FORCE:MULTIPLE` for Windows cross-compile duplicate symbols
+
 ### v0.4.23
-- fix: bitwise NOT (~x) wrapping semantics — convert f64→i64→i32 (ireduce) for JS ToInt32 wrapping instead of fcvt_to_sint_sat(I32) which saturated at i32::MAX
-- fix: IndexGet string detection — property access returning array (e.g., `log.topics[0]`) now treated as potential string for proper comparison codegen
 - fix: i18n translations now propagate to rayon worker threads — parallel module codegen was missing the i18n string table, causing untranslated output; also walks parent dirs to find `perry.toml`
 - fix: iOS crashes — gate `ios_game_loop` behind feature flag, catch panics in UI callback trampolines (button, scrollview, tabbar), panic hook writes crash log to Documents
 - fix: iOS Spacer crash — removed NSLayoutConstraint from spacer creation that caused layout engine conflicts
