@@ -835,9 +835,42 @@ pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
 
 /// Set the application icon.
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {
-    // GTK4 app icon is set via .desktop file or gtk4::Window::set_default_icon_name.
-    // No-op for now; icon is typically handled by the desktop environment.
+pub extern "C" fn perry_ui_app_set_icon(path_ptr: i64) {
+    let path = crate::widgets::image::str_from_header(path_ptr as *const u8);
+    if path.is_empty() { return; }
+
+    // Resolve path: try relative to executable, then relative to cwd
+    let resolved = resolve_asset_path(path);
+    if !resolved.exists() { return; }
+
+    // In GTK4, window icons are set via the icon theme.
+    // Add the icon's parent directory to the theme search path.
+    if let Some(display) = gtk4::gdk::Display::default() {
+        let theme = gtk4::IconTheme::for_display(&display);
+        if let Some(parent) = resolved.parent() {
+            theme.add_search_path(parent);
+        }
+        if let Some(stem) = resolved.file_stem().and_then(|s| s.to_str()) {
+            gtk4::Window::set_default_icon_name(stem);
+        }
+    }
+}
+
+/// Resolve an asset path relative to the executable directory.
+fn resolve_asset_path(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() && p.exists() {
+        return p.to_path_buf();
+    }
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(path);
+            if candidate.exists() { return candidate; }
+        }
+    }
+    // Fallback to the path as-is (relative to cwd)
+    p.to_path_buf()
 }
 
 /// Create a VStack with custom insets.

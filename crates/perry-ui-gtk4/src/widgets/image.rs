@@ -12,7 +12,7 @@ enum ImageKind {
     Symbol(gtk4::Image),
 }
 
-fn str_from_header(ptr: *const u8) -> &'static str {
+pub(crate) fn str_from_header(ptr: *const u8) -> &'static str {
     if ptr.is_null() {
         return "";
     }
@@ -28,7 +28,9 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 pub fn create_file(path_ptr: *const u8) -> i64 {
     crate::app::ensure_gtk_init();
     let path = str_from_header(path_ptr);
-    let picture = gtk4::Picture::for_filename(path);
+    // Resolve path relative to executable directory (handles bundled assets)
+    let resolved = crate::resolve_asset_path(path);
+    let picture = gtk4::Picture::for_filename(&resolved);
     picture.set_can_shrink(true);
     let handle = super::register_widget(picture.clone().upcast());
     IMAGE_WIDGETS.with(|w| w.borrow_mut().insert(handle, ImageKind::File(picture)));

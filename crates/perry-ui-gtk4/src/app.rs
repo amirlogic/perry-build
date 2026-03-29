@@ -151,11 +151,13 @@ pub fn app_run(_app_handle: i64) {
              .perry-large button, button.perry-large { padding: 6px 12px; font-size: 15px; }\n\
              entry { min-height: 0; padding: 2px 6px; }\n"
         );
-        gtk4::style_context_add_provider_for_display(
-            &gdk::Display::default().expect("display"),
-            &global_css,
-            gtk4::STYLE_PROVIDER_PRIORITY_USER,
-        );
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &global_css,
+                gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        }
         // Install the menu bar model on the app BEFORE creating windows,
         // so that show_menubar(true) takes effect when the window is first presented.
         let has_menubar = crate::menu::PENDING_MENUBAR.with(|p| p.borrow().is_some());
