@@ -51,22 +51,38 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
 
-    // Resolve relative paths against the executable's directory (inside .app bundle)
+    // Resolve relative paths against the .app bundle.
+    // Try multiple locations: bundle resource dir (Contents/Resources/),
+    // executable dir (Contents/MacOS/ or flat bundle), and cwd.
     let resolved = if !path.starts_with('/') {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let candidate = exe_dir.join(path);
-                if candidate.exists() {
-                    candidate.to_string_lossy().to_string()
-                } else {
-                    path.to_string()
+        let mut found = None;
+        // 1. Try NSBundle.mainBundle.resourcePath (Contents/Resources/)
+        if found.is_none() {
+            let bundle_class = objc2::runtime::AnyClass::get(c"NSBundle").unwrap();
+            let bundle: *mut objc2::runtime::AnyObject = unsafe { msg_send![bundle_class, mainBundle] };
+            if !bundle.is_null() {
+                let res_path: Option<Retained<NSString>> = unsafe { msg_send![bundle, resourcePath] };
+                if let Some(rp) = res_path {
+                    let rp_str = rp.to_string();
+                    let candidate = std::path::PathBuf::from(&rp_str).join(path);
+                    if candidate.exists() {
+                        found = Some(candidate.to_string_lossy().to_string());
+                    }
                 }
-            } else {
-                path.to_string()
             }
-        } else {
-            path.to_string()
         }
+        // 2. Try executable's directory (flat .app bundles or dev mode)
+        if found.is_none() {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    let candidate = exe_dir.join(path);
+                    if candidate.exists() {
+                        found = Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| path.to_string())
     } else {
         path.to_string()
     };
