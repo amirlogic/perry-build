@@ -5668,6 +5668,43 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
     } else {
+        // For Windows/Linux (non-bundle targets), copy asset directories next to the exe
+        // so that resolve_asset_path can find them relative to the executable.
+        if let Some(output_dir) = exe_path.parent() {
+            let source_dir = args.input.canonicalize().ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            if let Some(src_dir) = source_dir {
+                let mut project_root = src_dir.clone();
+                for _ in 0..5 {
+                    if project_root.join("package.json").exists() { break; }
+                    if let Some(parent) = project_root.parent() {
+                        project_root = parent.to_path_buf();
+                    } else { break; }
+                }
+                fn copy_dir_recursive_standalone(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                    fs::create_dir_all(dst)?;
+                    for entry in fs::read_dir(src)? {
+                        let entry = entry?;
+                        let ty = entry.file_type()?;
+                        let dest_path = dst.join(entry.file_name());
+                        if ty.is_dir() {
+                            copy_dir_recursive_standalone(&entry.path(), &dest_path)?;
+                        } else {
+                            fs::copy(entry.path(), &dest_path)?;
+                        }
+                    }
+                    Ok(())
+                }
+                for dir_name in &["logo", "assets", "resources", "images"] {
+                    let resource_dir = project_root.join(dir_name);
+                    if resource_dir.is_dir() {
+                        let dest = output_dir.join(dir_name);
+                        let _ = copy_dir_recursive_standalone(&resource_dir, &dest);
+                    }
+                }
+            }
+        }
+
         match format {
             OutputFormat::Text => println!("Wrote executable: {}", exe_path.display()),
             OutputFormat::Json => {

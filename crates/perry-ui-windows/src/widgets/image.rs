@@ -168,6 +168,24 @@ fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32, bg
     }
 }
 
+/// Resolve a relative asset path against the executable's directory first,
+/// falling back to the path as-is (relative to cwd). Matches macOS/GTK behavior.
+#[cfg(target_os = "windows")]
+fn resolve_asset_path(path: &str) -> String {
+    if std::path::Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join(path);
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    path.to_string()
+}
+
 /// Create an Image from a file path. Returns widget handle.
 pub fn create_file(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
@@ -175,6 +193,9 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
+        // Resolve relative paths against the exe directory (parity with macOS/GTK)
+        let resolved = resolve_asset_path(path);
+
         let class_name = to_wide("STATIC");
         let window_text = to_wide("");
         unsafe {
@@ -195,7 +216,7 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             // Load the image from file — try GDI+ for PNG/JPEG support,
             // fall back to LoadImageW for BMP/ICO.
             // At creation time the widget has no parent yet, so use white fallback.
-            let wide_path = to_wide(path);
+            let wide_path = to_wide(&resolved);
             let hbitmap = load_image_gdiplus(&wide_path, 0x00FFFFFF);
 
             // Fall back to LoadImageW for BMP/ICO
@@ -219,7 +240,8 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             }
 
             let handle = register_widget(hwnd, WidgetKind::Image, control_id);
-            IMAGE_PATHS.with(|p| p.borrow_mut().insert(handle, path.to_string()));
+            // Store the resolved path so reload_bitmap_scaled can find the file
+            IMAGE_PATHS.with(|p| p.borrow_mut().insert(handle, resolved));
             handle
         }
     }
