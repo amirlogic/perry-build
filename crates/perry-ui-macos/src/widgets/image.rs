@@ -90,31 +90,20 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     unsafe {
         // Read file bytes with Rust, then create NSImage from NSData
         let image_obj: *mut objc2::runtime::AnyObject = match std::fs::read(&resolved) {
-            Ok(bytes) => {
-                let len = bytes.len();
-                eprintln!("[perry-ui-macos] ImageFile: read {} bytes from '{}'", len, resolved);
-                if len == 0 {
-                    eprintln!("[perry-ui-macos] ImageFile: FILE IS EMPTY!");
+            Ok(bytes) if bytes.len() > 0 => {
+                let ns_data_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
+                let ns_data: *mut objc2::runtime::AnyObject = msg_send![
+                    ns_data_cls, dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: bytes.len()
+                ];
+                if ns_data.is_null() {
                     std::ptr::null_mut()
                 } else {
-                    let ns_data_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
-                    let ns_data: *mut objc2::runtime::AnyObject = msg_send![
-                        ns_data_cls, dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: len
-                    ];
-                    eprintln!("[perry-ui-macos] ImageFile: NSData created, null={}", ns_data.is_null());
-                    if ns_data.is_null() {
-                        std::ptr::null_mut()
-                    } else {
-                        let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
-                        let img: *mut objc2::runtime::AnyObject = msg_send![image_cls, alloc];
-                        let img: *mut objc2::runtime::AnyObject = msg_send![img, initWithData: ns_data];
-                        eprintln!("[perry-ui-macos] ImageFile: NSImage from data, null={}", img.is_null());
-                        img
-                    }
+                    let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
+                    let img: *mut objc2::runtime::AnyObject = msg_send![image_cls, alloc];
+                    msg_send![img, initWithData: ns_data]
                 }
             }
-            Err(e) => {
-                eprintln!("[perry-ui-macos] ImageFile: FAILED to read file '{}': {}", resolved, e);
+            _ => {
                 std::ptr::null_mut()
             }
         };

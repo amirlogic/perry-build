@@ -232,13 +232,24 @@ pub fn set_string_value(handle: i64, text_ptr: *const u8) {
 }
 
 /// Get the current string value from a textfield, returns a NaN-boxed string pointer.
+/// The returned string is pinned (GC_FLAG_PINNED) so it survives garbage collection
+/// until the caller has consumed it. Without pinning, the GC can collect the string
+/// between the return and the caller's use, causing undefined values.
 pub fn get_string_value(handle: i64) -> *const u8 {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
             let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
             let value = tf.stringValue();
             let bytes = value.to_string();
-            return js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+            let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+            // Pin the GC allocation so it won't be collected before the caller uses it.
+            // GcHeader layout: obj_type(u8) + gc_flags(u8) + reserved(u16) + size(u32) = 8 bytes
+            // GcHeader sits BEFORE the user pointer (ptr - 8). gc_flags is at offset 1.
+            // GC_FLAG_PINNED = 0x04
+            // Pin the GC allocation so it survives until the caller consumes it
+            let gc_flags_ptr = (ptr as *mut u8).sub(8).add(1);
+            *gc_flags_ptr |= 0x04; // GC_FLAG_PINNED
+            return ptr;
         }
     }
     unsafe { js_string_from_bytes(std::ptr::null(), 0) }
