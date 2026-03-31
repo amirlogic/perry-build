@@ -13754,6 +13754,31 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // Handle object literal field set via compile-time known field indices.
+            // When a variable was assigned from an object literal, we know the field ordering
+            // and can use direct offset stores instead of the slow string-based runtime lookup.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(info) = locals.get(id) {
+                    if info.class_name.is_none() {
+                        if let Some(ref field_indices) = info.object_field_indices {
+                            if let Some(&field_idx) = field_indices.get(property) {
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+                                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                                let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                                    inline_nanbox_pointer(builder, val)
+                                } else {
+                                    ensure_f64(builder, val)
+                                };
+                                let field_offset = 24 + (field_idx as i32) * 8;
+                                builder.ins().store(MemFlags::new(), val_f64, obj_ptr, field_offset);
+                                return Ok(val);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle this.field = value (in constructor/method context)
             if let Some(ctx) = this_ctx {
                 if matches!(object.as_ref(), Expr::This) {
@@ -14439,6 +14464,28 @@ pub(crate) fn compile_expr(
                                 return Ok(value);
                             }
                             // Field not in field_indices — fall through to name-based
+                        }
+                    }
+                }
+            }
+
+            // Handle object literal field access via compile-time known field indices.
+            // When a variable was assigned from an object literal (e.g., const source = { x: 0, y: 0 }),
+            // we know the field ordering at compile time and can use direct offset loads
+            // instead of the slow string-based runtime lookup.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(info) = locals.get(id) {
+                    if info.class_name.is_none() {
+                        if let Some(ref field_indices) = info.object_field_indices {
+                            if let Some(&field_idx) = field_indices.get(property) {
+                                // Get the object pointer
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+                                // ObjectHeader is 24 bytes, fields at 24 + idx*8
+                                let field_offset = 24 + (field_idx as i32) * 8;
+                                let value = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                                return Ok(value);
+                            }
                         }
                     }
                 }
