@@ -154,7 +154,29 @@ fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32, bg
         if !graphics.is_null() {
             // Set high quality interpolation for scaling
             GdipSetInterpolationMode(graphics, InterpolationMode(7)); // HighQualityBicubic
-            GdipDrawImageRectI(graphics, gp_image, 0, 0, target_w, target_h);
+
+            // Get original image dimensions to preserve aspect ratio
+            let mut img_w: u32 = 0;
+            let mut img_h: u32 = 0;
+            GdipGetImageWidth(gp_image, &mut img_w);
+            GdipGetImageHeight(gp_image, &mut img_h);
+
+            let (draw_x, draw_y, draw_w, draw_h) = if img_w > 0 && img_h > 0 {
+                let src_ratio = img_w as f64 / img_h as f64;
+                let dst_ratio = target_w as f64 / target_h as f64;
+                if src_ratio > dst_ratio {
+                    // Image is wider — fit to width, center vertically
+                    let h = (target_w as f64 / src_ratio) as i32;
+                    (0, (target_h - h) / 2, target_w, h)
+                } else {
+                    // Image is taller — fit to height, center horizontally
+                    let w = (target_h as f64 * src_ratio) as i32;
+                    ((target_w - w) / 2, 0, w, target_h)
+                }
+            } else {
+                (0, 0, target_w, target_h)
+            };
+            GdipDrawImageRectI(graphics, gp_image, draw_x, draw_y, draw_w, draw_h);
             GdipDeleteGraphics(graphics);
         }
 
