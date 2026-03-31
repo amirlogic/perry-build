@@ -4607,8 +4607,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-framework").arg("QuartzCore")
            .arg("-framework").arg("AVFoundation")
            .arg("-framework").arg("GameController")
+           .arg("-framework").arg("Metal")
            .arg("-liconv")
            .arg("-lresolv")
+           .arg("-lobjc")
            .arg("-lSystem");
     } else if is_android {
         // Android system libraries
@@ -4895,12 +4897,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Build the Rust crate
             let cargo_toml = target_config.crate_path.join("Cargo.toml");
             if cargo_toml.exists() {
+                // Tier 3 targets (tvOS, watchOS) need nightly + build-std
+                let is_tier3 = matches!(target.as_deref(),
+                    Some("tvos") | Some("tvos-simulator") |
+                    Some("watchos") | Some("watchos-simulator"));
+
                 let mut cargo_cmd = Command::new("cargo");
+                if is_tier3 {
+                    cargo_cmd.arg("+nightly");
+                }
                 cargo_cmd.arg("build").arg("--release")
                     .arg("--manifest-path").arg(&cargo_toml);
 
                 if let Some(triple) = rust_target_triple(target.as_deref()) {
                     cargo_cmd.arg("--target").arg(triple);
+                }
+
+                if is_tier3 {
+                    cargo_cmd.arg("-Zbuild-std");
                 }
 
                 // For Android, ensure 16 KB page size alignment (required by Google Play)
@@ -5643,6 +5657,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <dict/>
     <key>UIRequiresFullScreen</key>
     <true/>
+    <key>NSPrincipalClass</key>
+    <string>BloomApplication</string>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>Default Configuration</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>PerrySceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
 </dict>
 </plist>"#
         );

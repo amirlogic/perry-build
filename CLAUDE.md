@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.35
+**Current Version:** 0.4.36
 
 ## Workflow Requirements
 
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.36
+- perf: object field lookup inline cache — FNV-1a hash + 512-entry thread-local direct-mapped cache in `js_object_get_field_by_name`, skips linear key scan on cache hit
+- feat: iOS/tvOS game loop reads `NSPrincipalClass` from Info.plist for custom UIApplication subclass; tvOS Info.plist includes scene manifest + `BloomApplication`
+- feat: tvOS/watchOS (tier 3) compilation uses `cargo +nightly -Zbuild-std`; iOS/tvOS linker adds `-framework Metal -lobjc`
+- fix: GTK4 `ImageFile` path resolution type mismatch (`PathBuf` → `String`); codegen `LocalInfo` missing `object_field_indices` field in closures/stmt
 
 ### v0.4.35
 - fix: Windows Image widget rewritten with GDI+ alpha-blended WM_PAINT — PNG transparency now composites correctly over parent backgrounds (gradients, solid colors). Replaced SS_BITMAP (opaque BitBlt) with custom PerryImage window class that paints ancestor backgrounds into the DC first, then draws via `GdipDrawImageRectI` with full alpha support.

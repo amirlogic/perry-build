@@ -34,7 +34,7 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     let picture = gtk4::Picture::for_filename(&resolved);
     picture.set_can_shrink(true);
     let handle = super::register_widget(picture.clone().upcast());
-    IMAGE_WIDGETS.with(|w| w.borrow_mut().insert(handle, ImageKind::File(picture, Some(resolved))));
+    IMAGE_WIDGETS.with(|w| w.borrow_mut().insert(handle, ImageKind::File(picture, Some(resolved.to_string_lossy().to_string()))));
     handle
 }
 

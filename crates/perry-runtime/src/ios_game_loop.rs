@@ -198,7 +198,43 @@ pub extern "C" fn main() -> i32 {
             K_CF_STRING_ENCODING_UTF8,
         );
 
-        UIApplicationMain(0, std::ptr::null(), std::ptr::null(), delegate_name);
+        // Read NSPrincipalClass from Info.plist for custom UIApplication subclass
+        // (e.g., BloomApplication on tvOS which overrides sendEvent: for input)
+        extern "C" {
+            fn objc_getClass(name: *const u8) -> *const c_void;
+            fn objc_msgSend();
+            fn sel_registerName(name: *const u8) -> *const c_void;
+        }
+        let mut principal_class: *const c_void = std::ptr::null();
+        let bundle_cls = objc_getClass(b"NSBundle\0".as_ptr());
+        if !bundle_cls.is_null() {
+            let main_bundle: unsafe extern "C" fn(*const c_void, *const c_void) -> *const c_void =
+                std::mem::transmute(objc_msgSend as *const c_void);
+            let sel_main = sel_registerName(b"mainBundle\0".as_ptr());
+            let bundle = main_bundle(bundle_cls, sel_main);
+            if !bundle.is_null() {
+                let info_dict: unsafe extern "C" fn(*const c_void, *const c_void) -> *const c_void =
+                    std::mem::transmute(objc_msgSend as *const c_void);
+                let sel_info = sel_registerName(b"infoDictionary\0".as_ptr());
+                let dict = info_dict(bundle, sel_info);
+                if !dict.is_null() {
+                    let key = CFStringCreateWithCString(
+                        std::ptr::null(),
+                        b"NSPrincipalClass\0".as_ptr(),
+                        K_CF_STRING_ENCODING_UTF8,
+                    );
+                    let obj_for_key: unsafe extern "C" fn(*const c_void, *const c_void, *const c_void) -> *const c_void =
+                        std::mem::transmute(objc_msgSend as *const c_void);
+                    let sel_obj = sel_registerName(b"objectForKey:\0".as_ptr());
+                    let val = obj_for_key(dict, sel_obj, key);
+                    if !val.is_null() {
+                        principal_class = val; // NSString of the class name
+                    }
+                }
+            }
+        }
+
+        UIApplicationMain(0, std::ptr::null(), principal_class, delegate_name);
     }
 
     0

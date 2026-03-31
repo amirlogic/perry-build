@@ -367,7 +367,7 @@ impl crate::codegen::Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None, object_field_indices: None,
                 });
             }
 
@@ -487,7 +487,7 @@ impl crate::codegen::Compiler {
                         is_mixed_array: false, is_integer: false, is_integer_array: false, is_i32: false, is_boolean: false,
                         i32_shadow: None, bounded_by_array: None, bounded_by_constant: None,
                         scalar_fields: None, squared_cache: None, product_cache: None,
-                        cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None,
+                        cached_array_ptr: None, const_value: None, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None, object_field_indices: None,
                     })
                 };
                 // Use next_temp_var_id() for guaranteed unique variable IDs
@@ -1060,7 +1060,7 @@ impl crate::codegen::Compiler {
                             squared_cache: None, product_cache: None,
                             cached_array_ptr: None, const_value: None,
                             hoisted_element_loads: None, hoisted_i32_products: None,
-                            module_var_data_id: None, class_ref_name: None,
+                            module_var_data_id: None, class_ref_name: None, object_field_indices: None,
                         })
                     };
                     let var = Variable::new(next_var);
@@ -1135,7 +1135,7 @@ impl crate::codegen::Compiler {
                         // These variables are loaded once at chunk entry and don't
                         // need reloading — they're only read, not written.
                         module_var_data_id: None, // function-local cross-chunk var, not a module var
-                        class_ref_name: None,
+                        class_ref_name: None, object_field_indices: None,
                     });
                 }
 

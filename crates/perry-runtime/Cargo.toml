@@ -15,6 +15,8 @@ full = ["dep:hostname", "dep:dirs", "dep:whoami", "dep:postgres", "dep:redis"]
 stdlib = []
 # Enable geisterhand in-process fuzzer (callback registry + dispatch queue)
 geisterhand = []
+# iOS/tvOS game loop: provides main() that spawns user code on game thread + UIApplicationMain
+ios-game-loop = []
 
 [dependencies]
 thiserror.workspace = true

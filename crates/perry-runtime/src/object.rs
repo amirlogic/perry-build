@@ -1060,18 +1060,43 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
         }
 
-        // Search through the keys array for a match
+        // Fast path: check field index cache (keys_array_ptr + key_hash → field_index)
+        // Objects with the same shape share the same keys_array, so we cache per-shape lookups.
+        let key_bytes = std::slice::from_raw_parts(
+            (key as *const u8).add(std::mem::size_of::<crate::StringHeader>()),
+            (*key).length as usize,
+        );
+        let key_hash = {
+            let mut h: u32 = 0x811c9dc5;
+            for &b in key_bytes {
+                h ^= b as u32;
+                h = h.wrapping_mul(0x01000193);
+            }
+            h
+        };
+        let cache_key = ((keys as usize as u64) ^ (key_hash as u64)) as usize;
+
+        // Thread-local inline cache: fixed-size direct-mapped cache (no allocation, no HashMap)
+        const FIELD_CACHE_SIZE: usize = 512;
+        thread_local! {
+            static FIELD_CACHE: std::cell::UnsafeCell<[(usize, u32); FIELD_CACHE_SIZE]> =
+                std::cell::UnsafeCell::new([(0usize, 0u32); FIELD_CACHE_SIZE]);
+        }
+        let cache_idx = cache_key % FIELD_CACHE_SIZE;
+        let cached = FIELD_CACHE.with(|c| {
+            let cache = &*c.get();
+            let entry = cache[cache_idx];
+            if entry.0 == cache_key { Some(entry.1) } else { None }
+        });
+        if let Some(field_idx) = cached {
+            return js_object_get_field(obj, field_idx);
+        }
+
+        // Slow path: linear scan through keys array
         let key_count = crate::array::js_array_length(keys) as usize;
         let field_count = (*obj).field_count as usize;
 
-        // Sanity check: an object should never have millions of keys.
-        // If key_count is unreasonably large, the keys_array pointer is corrupted.
         if key_count > 65536 {
-            eprintln!(
-                "[PERRY DEBUG] js_object_get_field_by_name: corrupted key_count={} obj={:p} class_id={} field_count={} keys_ptr={:p}  keys[0..8]={:?}",
-                key_count, obj, (*obj).class_id, field_count, keys,
-                std::slice::from_raw_parts(keys as *const u8, 8)
-            );
             return JSValue::undefined();
         }
 
@@ -1079,14 +1104,17 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
 
         for i in 0..key_count {
             let key_val = crate::array::js_array_get(keys, i as u32);
-            // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
                 let stored_key = key_val.as_string_ptr();
                 if crate::string::js_string_equals(key, stored_key) {
+                    // Cache this lookup for next time
+                    FIELD_CACHE.with(|c| {
+                        let cache = &mut *c.get();
+                        cache[cache_idx] = (cache_key, i as u32);
+                    });
                     if i < alloc_limit {
                         return js_object_get_field(obj, i as u32);
                     } else {
-                        // This field was stored in the overflow map (beyond inline slots)
                         return OVERFLOW_FIELDS.with(|m| {
                             m.borrow()
                                 .get(&(obj as usize))

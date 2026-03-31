@@ -84,6 +84,9 @@ pub(crate) struct LocalInfo {
     /// If this variable was assigned a class reference (e.g., `const cls = MyClass`),
     /// store the class name so `new cls()` can be resolved to `new MyClass()`.
     pub class_ref_name: Option<String>,
+    /// Known object field ordering (from object literal assignment).
+    /// Maps field name to index for direct offset access instead of hash lookup.
+    pub object_field_indices: Option<HashMap<String, u32>>,
 }
 
 /// Metadata about a compiled class
