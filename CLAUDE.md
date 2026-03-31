@@ -141,7 +141,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 ### v0.4.35
-- fix: Windows Image widget rewritten with GDI+ alpha-blended WM_PAINT — PNG transparency now composites correctly over parent backgrounds (gradients, solid colors). Replaced SS_BITMAP (opaque BitBlt) with custom PerryImage window class that draws via `GdipDrawImageRectI` during paint.
+- fix: Windows Image widget rewritten with GDI+ alpha-blended WM_PAINT — PNG transparency now composites correctly over parent backgrounds (gradients, solid colors). Replaced SS_BITMAP (opaque BitBlt) with custom PerryImage window class that paints ancestor backgrounds into the DC first, then draws via `GdipDrawImageRectI` with full alpha support.
 
 ### v0.4.34
 - fix: Windows VStack/HStack removed `WS_CLIPCHILDREN` — parent gradient/solid backgrounds now paint through child areas so transparent text/images show correctly over gradients

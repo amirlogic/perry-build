@@ -71,6 +71,44 @@ unsafe extern "system" fn image_wnd_proc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
 
+            // Paint ancestor backgrounds into our DC so alpha blending composites
+            // against the correct background (gradient/solid), not stale pixels.
+            // Walk up the parent chain, accumulating the offset, and paint each
+            // ancestor's background (gradient or solid) at the correct position.
+            {
+                let mut total_x: i32 = 0;
+                let mut total_y: i32 = 0;
+                let mut walk = hwnd;
+                for _ in 0..10 {
+                    let parent = if let Some(p) = GetParent(walk).ok() {
+                        if p.0.is_null() { break; } else { p }
+                    } else { break };
+                    // Get child's position within parent
+                    let mut rect = RECT::default();
+                    let _ = GetWindowRect(walk, &mut rect);
+                    let mut pt = POINT { x: rect.left, y: rect.top };
+                    let _ = ScreenToClient(parent, &mut pt);
+                    total_x += pt.x;
+                    total_y += pt.y;
+                    // Offset DC to parent's coordinate space and paint its background
+                    SetWindowOrgEx(hdc, total_x, total_y, None);
+                    let mut parent_rect = RECT::default();
+                    let _ = GetClientRect(parent, &mut parent_rect);
+                    // Try gradient first, then solid color
+                    if !crate::widgets::paint_gradient(parent, hdc, &parent_rect) {
+                        let parent_handle = crate::widgets::find_handle_by_hwnd(parent);
+                        if parent_handle > 0 {
+                            if let Some(brush) = crate::widgets::get_bg_brush(parent_handle) {
+                                FillRect(hdc, &parent_rect, brush);
+                            }
+                        }
+                    }
+                    walk = parent;
+                }
+                // Restore DC origin
+                SetWindowOrgEx(hdc, 0, 0, None);
+            }
+
             if let Some(path) = path {
                 let wide_path = to_wide(&path);
                 let mut token: usize = 0;
@@ -122,8 +160,7 @@ unsafe extern "system" fn image_wnd_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => {
-            // Don't erase — parent's background (gradient) already painted, and
-            // GDI+ alpha blending in WM_PAINT composites on top of it.
+            // Skip — WM_PAINT paints ancestor backgrounds + image with alpha.
             LRESULT(1)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
