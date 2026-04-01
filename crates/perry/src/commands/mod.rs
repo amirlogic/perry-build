@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod appstore;
 pub mod audit;
 pub mod check;
 pub mod compile;

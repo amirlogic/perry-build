@@ -95,6 +95,9 @@ enum Commands {
 
     /// Log in to your Perry account (GitHub OAuth)
     Login(commands::login::LoginArgs),
+
+    /// App Store management (release notes, metadata)
+    Appstore(commands::appstore::AppStoreArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -111,7 +114,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "appstore" | "help"
         ) {
             return false;
         }
@@ -242,6 +245,9 @@ fn main_inner() -> Result<()> {
         }
         Commands::Login(args) => {
             commands::login::run(args, cli.format, use_color)
+        }
+        Commands::Appstore(args) => {
+            commands::appstore::run(args)
         }
     };
 

@@ -133,6 +133,7 @@ struct PerryToml {
     publish: Option<PublishConfig>,
     audit: Option<AuditConfig>,
     verify: Option<VerifyConfig>,
+    release_notes: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,6 +415,8 @@ struct BuildManifest {
     linux_category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     linux_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_notes: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1744,6 +1747,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             config.linux.as_ref().and_then(|l| l.description.clone())
                 .or_else(|| config.app.as_ref().and_then(|a| a.description.clone()))
         } else { None },
+        release_notes: config.release_notes.clone(),
     };
 
     // Read GCloud KMS signing credentials for Windows
