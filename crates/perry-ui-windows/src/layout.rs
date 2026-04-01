@@ -93,12 +93,15 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
     // Distribution=0 (Fill): if no child is a spacer/fills_remaining, make the
     // last visible non-Spacer child fill remaining space (matches macOS behavior
     // where the lowest-hugging-priority view stretches).
+    // Use a local tracking vec instead of permanently mutating widgets, so that
+    // repeated layout passes with changing visibility don't accumulate stale flags.
+    let mut auto_fill_idx: Option<usize> = None;
     if distribution == 0 && spacer_count == 0 && !visible_children.is_empty() {
         // Find last non-Spacer child
         for i in (0..visible_children.len()).rev() {
             if let Some(ci) = widgets::get_widget_info(visible_children[i]) {
                 if !matches!(ci.kind, WidgetKind::Spacer) {
-                    widgets::set_fills_remaining(visible_children[i], true);
+                    auto_fill_idx = Some(i);
                     spacer_count = 1;
                     break;
                 }
@@ -121,12 +124,12 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
     let mut fixed_total = 0i32;
     let mut child_sizes: Vec<i32> = Vec::new();
 
-    for &child in &visible_children {
+    for (idx, &child) in visible_children.iter().enumerate() {
         let ci = match widgets::get_widget_info(child) {
             Some(ci) => ci,
             None => { child_sizes.push(0); continue; }
         };
-        if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
+        if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining || auto_fill_idx == Some(idx) {
             child_sizes.push(0); // placeholder, will be computed below
         } else if !vertical && ci.fixed_width.is_some() {
             // In HStack, use fixed_width as the main-axis size
@@ -154,7 +157,9 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
     };
 
     for (i, &child) in visible_children.iter().enumerate() {
-        if let Some(ci) = widgets::get_widget_info(child) {
+        if auto_fill_idx == Some(i) {
+            child_sizes[i] = spacer_size;
+        } else if let Some(ci) = widgets::get_widget_info(child) {
             if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
                 child_sizes[i] = spacer_size;
             }
