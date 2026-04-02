@@ -5269,6 +5269,82 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 </plist>"#,
         );
 
+        // Apply orientations from perry.toml [ios].orientations
+        let info_plist = (|| -> Option<String> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    let data = fs::read_to_string(&toml_path).ok()?;
+                    let doc: toml::Table = data.parse().ok()?;
+                    let ios = doc.get("ios")?.as_table()?;
+                    let orientations = ios.get("orientations")?.as_array()?;
+                    let mut entries = Vec::new();
+                    for o in orientations {
+                        let s = o.as_str()?;
+                        match s {
+                            "landscape" => {
+                                entries.push("UIInterfaceOrientationLandscapeLeft");
+                                entries.push("UIInterfaceOrientationLandscapeRight");
+                            }
+                            "portrait" => {
+                                entries.push("UIInterfaceOrientationPortrait");
+                                entries.push("UIInterfaceOrientationPortraitUpsideDown");
+                            }
+                            other => {
+                                // Allow raw UIInterfaceOrientation* values
+                                if other.starts_with("UIInterfaceOrientation") {
+                                    entries.push(other);
+                                }
+                            }
+                        }
+                    }
+                    if !entries.is_empty() {
+                        let xml: String = entries.iter()
+                            .map(|e| format!("        <string>{}</string>", e))
+                            .collect::<Vec<_>>().join("\n");
+                        let all_orientations = format!(
+                            "    <key>UISupportedInterfaceOrientations</key>\n    <array>\n{}\n    </array>",
+                            xml
+                        );
+                        // Replace both iPhone and iPad orientation blocks
+                        let mut plist = info_plist.clone();
+                        // Replace iPhone orientations
+                        if let (Some(start), Some(_)) = (
+                            plist.find("<key>UISupportedInterfaceOrientations</key>"),
+                            plist.find("<key>UISupportedInterfaceOrientations~ipad</key>"),
+                        ) {
+                            let ipad_start = plist.find("<key>UISupportedInterfaceOrientations~ipad</key>").unwrap();
+                            // Find end of iPhone array
+                            let iphone_section = &plist[start..ipad_start];
+                            plist = format!(
+                                "{}{}\n    {}",
+                                &plist[..start],
+                                all_orientations,
+                                &plist[ipad_start..]
+                            );
+                            // Also replace iPad orientations
+                            let ipad_key = "<key>UISupportedInterfaceOrientations~ipad</key>";
+                            if let Some(ipad_pos) = plist.find(ipad_key) {
+                                let after_ipad = &plist[ipad_pos..];
+                                if let Some(end_array) = after_ipad.find("</array>") {
+                                    let end_pos = ipad_pos + end_array + "</array>".len();
+                                    let ipad_block = format!(
+                                        "    <key>UISupportedInterfaceOrientations~ipad</key>\n    <array>\n{}\n    </array>",
+                                        xml
+                                    );
+                                    plist = format!("{}{}{}", &plist[..ipad_pos], ipad_block, &plist[end_pos..]);
+                                }
+                            }
+                        }
+                        return Some(plist);
+                    }
+                }
+            }
+            None
+        })().unwrap_or(info_plist);
+
         // Append usage descriptions for camera and microphone
         let usage_descriptions = concat!(
             "    <key>NSCameraUsageDescription</key>\n",
