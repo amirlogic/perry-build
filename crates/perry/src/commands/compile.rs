@@ -5324,19 +5324,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 all_orientations,
                                 &plist[ipad_start..]
                             );
-                            // Also replace iPad orientations
-                            let ipad_key = "<key>UISupportedInterfaceOrientations~ipad</key>";
-                            if let Some(ipad_pos) = plist.find(ipad_key) {
-                                let after_ipad = &plist[ipad_pos..];
-                                if let Some(end_array) = after_ipad.find("</array>") {
-                                    let end_pos = ipad_pos + end_array + "</array>".len();
-                                    let ipad_block = format!(
-                                        "    <key>UISupportedInterfaceOrientations~ipad</key>\n    <array>\n{}\n    </array>",
-                                        xml
-                                    );
-                                    plist = format!("{}{}{}", &plist[..ipad_pos], ipad_block, &plist[end_pos..]);
-                                }
-                            }
+                            // iPad must always have all 4 orientations for App Store validation
+                            // (the app can still lock to landscape at runtime)
                         }
                         return Some(plist);
                     }
