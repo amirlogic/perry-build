@@ -4609,7 +4609,7 @@ pub(crate) fn compile_expr(
                                     }
                                     Expr::Call { callee, .. } => {
                                         if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                                            if property == "slice" || property == "substring" || property == "trim"
+                                            if property == "slice" || property == "substring" || property == "trim" || property == "trimStart" || property == "trimEnd"
                                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
                                                || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" || property == "toString" {
                                                 if let Expr::LocalGet(id) = object.as_ref() {
@@ -5114,7 +5114,7 @@ pub(crate) fn compile_expr(
                     Expr::Call { callee, .. } => {
                         if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                             // These methods only exist on strings and always return strings
-                            if property == "slice" || property == "substring" || property == "trim"
+                            if property == "slice" || property == "substring" || property == "trim" || property == "trimStart" || property == "trimEnd"
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
                                || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" || property == "toString" {
                                 return true;
@@ -7304,7 +7304,7 @@ pub(crate) fn compile_expr(
                                         // String method calls on string variables
                                         Expr::Call { callee, .. } => {
                                             if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                                                if property == "slice" || property == "substring" || property == "trim"
+                                                if property == "slice" || property == "substring" || property == "trim" || property == "trimStart" || property == "trimEnd"
                                                     || property == "toLowerCase" || property == "toUpperCase"
                                                     || property == "charAt" || property == "padStart" || property == "padEnd"
                                                     || property == "repeat" || property == "replace" {
@@ -7502,7 +7502,7 @@ pub(crate) fn compile_expr(
                                 Expr::Call { callee, .. } => {
                                     if let Expr::PropertyGet { object, property: method_name } = callee.as_ref() {
                                         // Check for string methods first - these always return strings
-                                        if method_name == "slice" || method_name == "substring" || method_name == "trim"
+                                        if method_name == "slice" || method_name == "substring" || method_name == "trim" || method_name == "trimStart" || method_name == "trimEnd"
                                             || method_name == "toLowerCase" || method_name == "toUpperCase" || method_name == "replace"
                                             || method_name == "padStart" || method_name == "padEnd" || method_name == "repeat" || method_name == "charAt" {
                                             // String methods always return strings, regardless of what the object is
@@ -7755,7 +7755,7 @@ pub(crate) fn compile_expr(
                                         }
                                         Expr::Call { callee, .. } => {
                                             if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                                                if property == "slice" || property == "substring" || property == "trim"
+                                                if property == "slice" || property == "substring" || property == "trim" || property == "trimStart" || property == "trimEnd"
                                                     || property == "toLowerCase" || property == "toUpperCase"
                                                     || property == "charAt" || property == "padStart" || property == "padEnd"
                                                     || property == "repeat" || property == "replace" {
@@ -7920,7 +7920,7 @@ pub(crate) fn compile_expr(
                                 }
                                 Expr::Call { callee, .. } => {
                                     if let Expr::PropertyGet { object, property: method_name } = callee.as_ref() {
-                                        if method_name == "slice" || method_name == "substring" || method_name == "trim"
+                                        if method_name == "slice" || method_name == "substring" || method_name == "trim" || method_name == "trimStart" || method_name == "trimEnd"
                                             || method_name == "toLowerCase" || method_name == "toUpperCase" || method_name == "replace" {
                                             if let Expr::LocalGet(id) = object.as_ref() {
                                                 locals.get(id).map(|i| i.is_string).unwrap_or(false)
@@ -8102,7 +8102,7 @@ pub(crate) fn compile_expr(
                                 }
                                 Expr::Call { callee, .. } => {
                                     if let Expr::PropertyGet { object, property: method_name } = callee.as_ref() {
-                                        if method_name == "slice" || method_name == "substring" || method_name == "trim"
+                                        if method_name == "slice" || method_name == "substring" || method_name == "trim" || method_name == "trimStart" || method_name == "trimEnd"
                                             || method_name == "toLowerCase" || method_name == "toUpperCase" || method_name == "replace" {
                                             if let Expr::LocalGet(id) = object.as_ref() {
                                                 locals.get(id).map(|i| i.is_string).unwrap_or(false)
@@ -8460,10 +8460,15 @@ pub(crate) fn compile_expr(
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
-                                    "trim" => {
-                                        // str.trim() - remove whitespace from both ends
-                                        let trim_func = extern_funcs.get("js_string_trim")
-                                            .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
+                                    "trim" | "trimStart" | "trimEnd" => {
+                                        // str.trim() / str.trimStart() / str.trimEnd()
+                                        let func_name = match property.as_str() {
+                                            "trimStart" => "js_string_trim_start",
+                                            "trimEnd" => "js_string_trim_end",
+                                            _ => "js_string_trim",
+                                        };
+                                        let trim_func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                         let func_ref = module.declare_func_in_func(*trim_func, builder.func);
 
                                         let call = builder.ins().call(func_ref, &[str_ptr]);
@@ -10140,7 +10145,7 @@ pub(crate) fn compile_expr(
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
-                        "substring" | "slice" | "trim" | "toLowerCase" | "toUpperCase" | "indexOf" | "includes" | "split" | "replace" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "includes" | "split" | "replace" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                             // Compile the object expression to get a string value
                             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -10187,9 +10192,14 @@ pub(crate) fn compile_expr(
                                     let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                     return Ok(builder.inst_results(nanbox_call)[0]);
                                 }
-                                "trim" => {
-                                    let trim_func = extern_funcs.get("js_string_trim")
-                                        .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
+                                "trim" | "trimStart" | "trimEnd" => {
+                                    let func_name = match property.as_str() {
+                                        "trimStart" => "js_string_trim_start",
+                                        "trimEnd" => "js_string_trim_end",
+                                        _ => "js_string_trim",
+                                    };
+                                    let trim_func = extern_funcs.get(func_name)
+                                        .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                     let func_ref = module.declare_func_in_func(*trim_func, builder.func);
                                     let call = builder.ins().call(func_ref, &[str_ptr]);
                                     let result_ptr = builder.inst_results(call)[0];
@@ -11632,7 +11642,7 @@ pub(crate) fn compile_expr(
                     // Check if the else_expr is a PropertyGet for a string method
                     if let Expr::PropertyGet { object, property } = else_expr.as_ref() {
                         match property.as_str() {
-                            "substring" | "slice" | "trim" | "toLowerCase" | "toUpperCase" |
+                            "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
                             "indexOf" | "includes" | "split" | "replace" | "startsWith" |
                             "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                                 // Compile the object to get the string value
@@ -11677,9 +11687,14 @@ pub(crate) fn compile_expr(
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
-                                    "trim" => {
-                                        let trim_func = extern_funcs.get("js_string_trim")
-                                            .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
+                                    "trim" | "trimStart" | "trimEnd" => {
+                                        let func_name = match property.as_str() {
+                                            "trimStart" => "js_string_trim_start",
+                                            "trimEnd" => "js_string_trim_end",
+                                            _ => "js_string_trim",
+                                        };
+                                        let trim_func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                         let func_ref = module.declare_func_in_func(*trim_func, builder.func);
                                         let call = builder.ins().call(func_ref, &[str_ptr]);
                                         let result_ptr = builder.inst_results(call)[0];
@@ -15755,7 +15770,7 @@ pub(crate) fn compile_expr(
                             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                                 // String methods that return strings
                                 matches!(property.as_str(),
-                                    "substring" | "slice" | "trim" | "toLowerCase" | "toUpperCase" |
+                                    "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
                                     "padStart" | "padEnd" | "repeat" | "charAt" | "replace")
                             } else {
                                 false
