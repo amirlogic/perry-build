@@ -833,7 +833,7 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(params, closures, enclosing_class);
             }
             // String operations
-            Expr::StringMatch { string, regex } => {
+            Expr::StringMatch { string, regex } | Expr::StringMatchAll { string, regex } => {
                 self.collect_closures_from_expr(string, closures, enclosing_class);
                 self.collect_closures_from_expr(regex, closures, enclosing_class);
             }
@@ -1142,13 +1142,13 @@ impl crate::codegen::Compiler {
 
     /// Collect FuncRef expressions that are used as values (not as call callees)
     /// These need wrapper functions for closure-compatible calling convention
-    pub(crate) fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut HashSet<u32>) {
+    pub(crate) fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut std::collections::BTreeSet<u32>) {
         for stmt in stmts {
             self.collect_func_refs_from_stmt(stmt, func_refs);
         }
     }
 
-    pub(crate) fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut HashSet<u32>) {
+    pub(crate) fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut std::collections::BTreeSet<u32>) {
         match stmt {
             Stmt::Let { init: Some(expr), .. } => {
                 self.collect_func_refs_from_expr(expr, func_refs);
@@ -1186,7 +1186,7 @@ impl crate::codegen::Compiler {
         }
     }
 
-    pub(crate) fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut HashSet<u32>) {
+    pub(crate) fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut std::collections::BTreeSet<u32>) {
         match expr {
             Expr::Call { callee, args, .. } => {
                 // Callee FuncRef is NOT a wrapper candidate (it's being called directly)

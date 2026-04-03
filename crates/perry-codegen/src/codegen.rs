@@ -926,6 +926,12 @@ impl Compiler {
                             Expr::Uint8ArrayNew(_) | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
                             Expr::BufferFrom { .. } | Expr::BufferSlice { .. } | Expr::BufferConcat(_)
                         )
+                    ))
+                    // Detect buffer.slice() / buffer.subarray() returning a buffer
+                    || matches!(init, Some(Expr::Call { callee, .. }) if matches!(callee.as_ref(),
+                        Expr::PropertyGet { object, property }
+                        if matches!(property.as_str(), "slice" | "subarray")
+                        && matches!(object.as_ref(), Expr::LocalGet(obj_id) if self.module_level_locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false))
                     ));
 
                 // Track compile-time constant values for const module-level variables.
@@ -1302,7 +1308,7 @@ impl Compiler {
 
         // Collect FuncRef expressions that need closure-compatible wrappers
         // NOTE: This must be done BEFORE compiling closures, as closures may use FuncRefs
-        let mut func_refs_needing_wrappers: HashSet<u32> = HashSet::new();
+        let mut func_refs_needing_wrappers: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for func in &hir.functions {
             self.collect_func_refs_needing_wrappers_from_stmts(&func.body, &mut func_refs_needing_wrappers);
         }

@@ -913,6 +913,12 @@ fn lower_module_decl(
         ast::ModuleDecl::ExportDecl(export) => {
             match &export.decl {
                 ast::Decl::Fn(fn_decl) => {
+                    // Skip overload signatures (no body) — they share the same func_id
+                    // as the implementation. Pushing them to module.functions would cause
+                    // codegen to compile the empty-body overload and skip the real implementation.
+                    if fn_decl.function.body.is_none() {
+                        return Ok(());
+                    }
                     let mut func = lower_fn_decl(ctx, fn_decl)?;
                     func.is_exported = true;
                     let func_name = func.name.clone();
@@ -4372,7 +4378,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     if let ast::Callee::Expr(callee_expr) = &call.callee {
                         if let ast::Expr::Member(member) = callee_expr.as_ref() {
                             if let ast::MemberProp::Ident(method_ident) = &member.prop {
-                                if method_ident.sym.as_ref() == "match" && args.len() == 1 {
+                                if (method_ident.sym.as_ref() == "match" || method_ident.sym.as_ref() == "matchAll") && args.len() == 1 {
+                                    let is_match_all = method_ident.sym.as_ref() == "matchAll";
                                     // Check if the argument is a regex literal or a local holding a regex
                                     let arg_is_regex = match call.args.first().map(|a| a.expr.as_ref()) {
                                         Some(ast::Expr::Lit(ast::Lit::Regex(_))) => true,
@@ -4387,9 +4394,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         let string_expr = lower_expr(ctx, &member.obj)?;
                                         let regex_expr = args.remove(0);
                                         if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
-                                            return Ok(Expr::StringMatch {
-                                                string: Box::new(string_expr),
-                                                regex: Box::new(regex_expr),
+                                            return Ok(if is_match_all {
+                                                Expr::StringMatchAll {
+                                                    string: Box::new(string_expr),
+                                                    regex: Box::new(regex_expr),
+                                                }
+                                            } else {
+                                                Expr::StringMatch {
+                                                    string: Box::new(string_expr),
+                                                    regex: Box::new(regex_expr),
+                                                }
                                             });
                                         }
                                     }
@@ -6251,6 +6265,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             _ => { let ce = lower_expr(ctx, callee)?; (ce.clone(), ce) }
                         }
                     };
+
+                    // If check_expr is already a Conditional from an inner optional chain,
+                    // nest the outer call inside its else branch instead of creating another Conditional.
+                    // This avoids duplicating side-effecting expressions (like ArrayShift/ArrayPop).
+                    if let Expr::Conditional { condition: inner_cond, then_expr: inner_then, else_expr: inner_else } = check_expr {
+                        // Build the callee with inner_else as the object (not the full Conditional)
+                        let fixed_callee = match callee_expr {
+                            Expr::PropertyGet { property, .. } => Expr::PropertyGet { object: inner_else, property },
+                            Expr::IndexGet { index, .. } => Expr::IndexGet { object: inner_else, index },
+                            other => other,
+                        };
+                        let outer_call = Expr::Call {
+                            callee: Box::new(fixed_callee),
+                            args,
+                            type_args: Vec::new(),
+                        };
+                        return Ok(Expr::Conditional {
+                            condition: inner_cond,
+                            then_expr: inner_then,
+                            else_expr: Box::new(outer_call),
+                        });
+                    }
 
                     // Build the call expression
                     let call_expr = if has_spread {
