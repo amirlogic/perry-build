@@ -15883,6 +15883,42 @@ pub(crate) fn compile_expr(
                     let result = builder.block_params(merge_block)[0];
                     Ok(result)
                 } else {
+                    // Check if the object is a non-array object (Record, object literal, etc.)
+                    // In JS, all object keys are strings — obj[0] is equivalent to obj["0"].
+                    // Only treat as array indexing if we KNOW the object is an array.
+                    let is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array).unwrap_or(false)
+                    } else {
+                        // For non-local expressions (PropertyGet, Call, etc.), assume array
+                        // since most indexed accesses on non-locals are array element reads
+                        !matches!(object.as_ref(), Expr::Object(_) | Expr::ObjectSpread { .. })
+                    };
+
+                    if !is_known_array {
+                        // Object with numeric key — convert index to string, use property lookup
+                        // This handles Record<number, T>, object literals with numeric keys, etc.
+                        let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                        let idx_f64 = ensure_f64(builder, idx_val);
+
+                        // Convert number to string via js_jsvalue_to_string
+                        let to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                            .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                        let to_str_ref = module.declare_func_in_func(*to_str_func, builder.func);
+                        let str_call = builder.ins().call(to_str_ref, &[idx_f64]);
+                        let key_ptr = builder.inst_results(str_call)[0];
+
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[obj_f64]);
+                        let obj_ptr = builder.inst_results(ptr_call)[0];
+
+                        let get_func = extern_funcs.get("js_object_get_field_by_name_f64")
+                            .ok_or_else(|| anyhow!("js_object_get_field_by_name_f64 not declared"))?;
+                        let func_ref = module.declare_func_in_func(*get_func, builder.func);
+                        let call = builder.ins().call(func_ref, &[obj_ptr, key_ptr]);
+                        Ok(builder.inst_results(call)[0])
+                    } else {
                     let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
                         builder.ins().iconst(types::I32, *n)
                     } else {
@@ -15897,6 +15933,7 @@ pub(crate) fn compile_expr(
                     let func_ref = module.declare_func_in_func(*get_func, builder.func);
                     let call = builder.ins().call(func_ref, &[obj_f64, idx_i32]);
                     Ok(builder.inst_results(call)[0])
+                    }
                 }
             }
         }

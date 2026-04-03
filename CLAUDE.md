@@ -141,6 +141,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 ### v0.4.44
+- fix: `obj[numericKey]` on `Record<number, T>` returned garbage — `IndexGet` with numeric index on non-array objects used `js_dynamic_array_get` (raw memory read) instead of converting the key to a string for property lookup; now detects non-array objects and uses `js_object_get_field_by_name_f64` with `js_jsvalue_to_string` key conversion
 - fix: `!('key' in obj)` always returned false — `in` operator returns NaN-boxed TAG_TRUE/TAG_FALSE but `!` used float comparison (NaN != 0.0 is true); added `Expr::In` to `needs_truthy_check`. Root cause of ethkit `Contract()` SIGSEGV: provider detection ternary evaluated wrong branch, setting `provider` to `undefined`.
 - fix: `trimStart()`/`trimEnd()` dispatched to correct runtime functions in all codegen paths — previously fell through to generic dispatch returning null bytes; broke ethkit ABI `parseSignature()` output type parsing
 - fix: cross-module default array parameter `param: T[] = []` caused SIGSEGV — `Expr::Array([])` default not handled inline, function received null pointer; added `js_array_alloc(0)` fallback
