@@ -1657,8 +1657,7 @@ impl crate::codegen::Compiler {
 
                 // Get the type info from module_level_locals (populated during compile_init)
                 let (var_type, local_info_template) = if let Some(info) = self.module_level_locals.get(local_id) {
-                    // Variable is stored as i64 only if is_pointer && !is_union
-                    let vt = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                    let vt = info.cranelift_var_type();
                     (vt, info.clone())
                 } else {
                     // Fallback to f64 if type info not available

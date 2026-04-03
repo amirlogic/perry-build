@@ -89,6 +89,162 @@ pub(crate) struct LocalInfo {
     pub object_field_indices: Option<HashMap<String, u32>>,
 }
 
+impl LocalInfo {
+    /// Determines the Cranelift type for this variable when used as a module-level global slot.
+    /// Must match the type used in the module init (stmt.rs) to ensure consistency.
+    /// Pointer types without union use I64 (raw pointer). Everything else uses F64 (NaN-boxed).
+    pub fn cranelift_var_type(&self) -> cranelift::prelude::types::Type {
+        if self.is_pointer && !self.is_union {
+            cranelift::prelude::types::I64
+        } else {
+            cranelift::prelude::types::F64
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift::prelude::types;
+    use std::collections::HashMap;
+
+    /// Create a default LocalInfo with all flags false (number variable).
+    fn default_local() -> LocalInfo {
+        LocalInfo {
+            var: Variable::new(0),
+            name: None,
+            class_name: None,
+            type_args: Vec::new(),
+            is_pointer: false,
+            is_array: false,
+            is_string: false,
+            is_bigint: false,
+            is_closure: false,
+            closure_func_id: None,
+            is_boxed: false,
+            is_map: false,
+            is_set: false,
+            is_buffer: false,
+            is_event_emitter: false,
+            is_union: false,
+            is_mixed_array: false,
+            is_integer: false,
+            is_integer_array: false,
+            is_i32: false,
+            is_boolean: false,
+            i32_shadow: None,
+            bounded_by_array: None,
+            bounded_by_constant: None,
+            scalar_fields: None,
+            squared_cache: None,
+            product_cache: None,
+            cached_array_ptr: None,
+            const_value: None,
+            hoisted_element_loads: None,
+            hoisted_i32_products: None,
+            module_var_data_id: None,
+            class_ref_name: None,
+            object_field_indices: None,
+        }
+    }
+
+    #[test]
+    fn number_var_uses_f64() {
+        let info = default_local();
+        assert_eq!(info.cranelift_var_type(), types::F64);
+    }
+
+    #[test]
+    fn pointer_var_uses_i64() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        assert_eq!(info.cranelift_var_type(), types::I64);
+    }
+
+    #[test]
+    fn array_pointer_uses_i64() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_array = true;
+        assert_eq!(info.cranelift_var_type(), types::I64);
+    }
+
+    #[test]
+    fn union_pointer_uses_f64() {
+        // Union types are NaN-boxed and must use F64
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_union = true;
+        assert_eq!(info.cranelift_var_type(), types::F64);
+    }
+
+    /// Regression test for the Android FP flush-to-zero bug (v0.4.28).
+    /// An untyped array (`const CX = []`, ty=Unknown) must NOT have is_union=true
+    /// when is_array=true. If is_union were set, cranelift_var_type() returns F64,
+    /// but the module init stores the value as I64. Loading an I64 pointer as F64
+    /// corrupts it on platforms with FP flush-to-zero (Android ARM).
+    #[test]
+    fn untyped_array_not_union_android_regression() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_array = true;
+        // This is the key: even if the HIR type is Unknown/Any, is_union must NOT
+        // be set when we know the concrete type is array. analyze_module_var_types
+        // in codegen.rs must match this expectation.
+        info.is_union = false;
+        assert_eq!(info.cranelift_var_type(), types::I64,
+            "Untyped arrays (ty=Unknown) with is_array=true must use I64, not F64. \
+             F64 corrupts pointers on Android ARM (FP flush-to-zero).");
+    }
+
+    /// Verify that if is_union is incorrectly set on an array, we get F64 (the bug).
+    /// This documents the failure mode so we can ensure analyze_module_var_types
+    /// never produces this combination.
+    #[test]
+    fn union_array_would_use_f64_documents_bug() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_array = true;
+        info.is_union = true; // BUG: this should never happen for arrays
+        // This test documents the broken behavior: is_union overrides is_pointer
+        assert_eq!(info.cranelift_var_type(), types::F64,
+            "Documents the bug: if is_union is incorrectly set on an array, F64 is used");
+    }
+
+    #[test]
+    fn closure_pointer_uses_i64() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_closure = true;
+        assert_eq!(info.cranelift_var_type(), types::I64);
+    }
+
+    #[test]
+    fn map_pointer_uses_i64() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_map = true;
+        assert_eq!(info.cranelift_var_type(), types::I64);
+    }
+
+    #[test]
+    fn set_pointer_uses_i64() {
+        let mut info = default_local();
+        info.is_pointer = true;
+        info.is_set = true;
+        assert_eq!(info.cranelift_var_type(), types::I64);
+    }
+
+    #[test]
+    fn string_not_pointer_uses_f64() {
+        // Strings are NaN-boxed (STRING_TAG), stored as F64
+        let mut info = default_local();
+        info.is_string = true;
+        // is_pointer is false for strings in module vars
+        assert_eq!(info.cranelift_var_type(), types::F64);
+    }
+}
+
 /// Metadata about a compiled class
 #[derive(Debug, Clone)]
 pub(crate) struct ClassMeta {

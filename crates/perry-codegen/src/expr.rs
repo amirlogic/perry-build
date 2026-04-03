@@ -15406,10 +15406,6 @@ pub(crate) fn compile_expr(
                 };
 
                 let val_type = builder.func.dfg.value_type(val);
-                // Diagnostic: log which fields are I64 type (closures/pointers)
-                if val_type == types::I64 {
-                    eprintln!("[OBJSPREAD_I64_FIELD] key='{}' idx={} expr={}", _key, i, expr_type_name(value_expr));
-                }
                 let final_val = if is_string {
                     let str_ptr = ensure_i64(builder, val);
                     inline_nanbox_string(builder, str_ptr)
@@ -16626,10 +16622,10 @@ pub(crate) fn compile_expr(
             // These may have been mutated by other async work during the wait
             for (_local_id, info) in locals.iter() {
                 if let Some(data_id) = info.module_var_data_id {
-                    let var_type = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                    let vt = info.cranelift_var_type();
                     let global_val = module.declare_data_in_func(data_id, builder.func);
                     let ptr = builder.ins().global_value(types::I64, global_val);
-                    let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                    let val = builder.ins().load(vt, MemFlags::new(), ptr, 0);
                     builder.def_var(info.var, val);
                 }
             }

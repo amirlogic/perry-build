@@ -997,7 +997,20 @@ impl Compiler {
                     is_set: matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) || is_set_from_type,
                     is_buffer,
                     is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
-                    is_union: matches!(ty, HirType::Union(_) | HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown),
+                    // Mark as union only when the concrete type is unknown.
+                    // Matches stmt.rs logic: Named/Object/Any/Unknown set is_union UNLESS
+                    // expression inference determined a concrete pointer type (array, string,
+                    // closure, map, set, buffer, bigint). Without this exclusion, untyped
+                    // arrays (ty=Unknown) would get is_union=true, causing cranelift_var_type()
+                    // to select F64 while stmt.rs stores them as I64 — a mismatch that
+                    // corrupts pointers on ARM FP flush-to-zero platforms (Android).
+                    is_union: matches!(ty, HirType::Union(_)) ||
+                        (matches!(ty, HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown)
+                         && !is_array && !is_string && !is_closure
+                         && !matches!(init, Some(Expr::MapNew)) && !is_map_from_type
+                         && !matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) && !is_set_from_type
+                         && !is_buffer
+                         && !matches!(ty, HirType::BigInt) && !matches!(init, Some(Expr::BigInt(_))) && !matches!(init, Some(Expr::BigIntCoerce(_)))),
                     is_mixed_array: if let HirType::Array(elem_ty) = ty {
                         // String/union/any arrays need mixed-array access (NaN-boxed elements)
                         matches!(elem_ty.as_ref(), HirType::Union(_) | HirType::Any | HirType::String)
