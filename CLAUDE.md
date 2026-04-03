@@ -148,6 +148,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - fix: `IndexSet` union-index string-key path NaN-boxes I64 closures/objects with POINTER_TAG — `ensure_f64` raw bitcast stripped the tag, making closures stored via `obj[dynamicKey]` uncallable through `js_native_call_method`
 - fix: `.filter(Boolean)` desugaring applied to all 4 HIR lowering paths (was only in local variable path); extracted `maybe_wrap_builtin_callback` as `LoweringContext` method
 - fix: null pointer guards in closure capture getters and `Promise.all` fulfill/reject handlers
+- fix: cross-module `await` on `Promise<[T, T]>` (tuple) returned undefined on indexing — `Tuple` type not recognized in the Await expression-inference handler alongside `Array`; also added `Tuple` to `is_typed_pointer`, `is_typed_array`, and split-function local type analysis
 
 ### v0.4.43
 - feat(wasm): FFI support — `declare function` statements generate WASM imports under `"ffi"` namespace; enables Bloom Engine and other native libraries to provide GPU rendering, audio, etc. to WASM code

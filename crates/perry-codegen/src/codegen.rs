@@ -840,7 +840,7 @@ impl Compiler {
                 Stmt::Let { id, name, ty, init, mutable, .. } => {
                 // Determine if this variable is a pointer type
                 // Note: String is NOT included because strings are now NaN-boxed (f64 values)
-                let is_pointer = matches!(ty, HirType::Array(_) |
+                let is_pointer = matches!(ty, HirType::Array(_) | HirType::Tuple(_) |
                     HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                     HirType::Function(_));
 
@@ -910,7 +910,7 @@ impl Compiler {
                         property == "slice" && matches!(object.as_ref(), Expr::ProcessArgv)
                     } else { false }
                 } else { false };
-                let is_array = matches!(ty, HirType::Array(_)) || is_array_from_call || matches!(init, Some(Expr::Array(_))) || matches!(init, Some(Expr::ArraySpread(_))) || matches!(init, Some(Expr::ProcessArgv));
+                let is_array = matches!(ty, HirType::Array(_) | HirType::Tuple(_)) || is_array_from_call || matches!(init, Some(Expr::Array(_))) || matches!(init, Some(Expr::ArraySpread(_))) || matches!(init, Some(Expr::ProcessArgv));
                 let is_closure = matches!(ty, HirType::Function(_)) || matches!(init, Some(Expr::Closure { .. }));
                 // Check for buffer expressions
                 let is_buffer = matches!(init, Some(Expr::BufferFrom { .. }) | Some(Expr::BufferAlloc { .. }) |

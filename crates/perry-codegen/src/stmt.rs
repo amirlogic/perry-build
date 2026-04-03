@@ -371,7 +371,7 @@ pub(crate) fn compile_stmt(
             // Use the declared type to determine the ABI type
             // Note: Type::Any and Type::Unknown use expression inference, not pointer type
             use perry_types::Type as HirType;
-            let is_typed_pointer = matches!(ty, HirType::String | HirType::Array(_) |
+            let is_typed_pointer = matches!(ty, HirType::String | HirType::Array(_) | HirType::Tuple(_) |
                 HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                 HirType::Function(_));
             // Check if parameter is a string type (including string enums like ChainName)
@@ -591,7 +591,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Determine variable type - prefer declared type, fall back to init expression inference
-            let is_typed_array = matches!(ty, HirType::Array(_));
+            let is_typed_array = matches!(ty, HirType::Array(_) | HirType::Tuple(_));
             let is_typed_bigint = matches!(ty, HirType::BigInt);
             let is_typed_closure = matches!(ty, HirType::Function(_));
             let is_typed_map = matches!(ty, HirType::Generic { base, .. } if base == "Map");
@@ -807,7 +807,7 @@ pub(crate) fn compile_stmt(
                                     perry_types::Type::Generic { base, .. } if base == "Set" => {
                                         resolved = (None, true, false, false, false, false, false, true, false, false);
                                     }
-                                    perry_types::Type::Array(_) => {
+                                    perry_types::Type::Array(_) | perry_types::Type::Tuple(_) => {
                                         resolved = (None, true, true, false, false, false, false, false, false, false);
                                     }
                                     perry_types::Type::Named(name) => {
@@ -1013,6 +1013,42 @@ pub(crate) fn compile_stmt(
                                 // Can't determine map's value type - conservatively treat as pointer
                                 (None, true, false, false, false, false, false, false, false, false)
                             }
+                        }
+                    }
+                    // Await on cross-module async function: resolve return type from
+                    // imported_func_return_types, unwrapping Promise<T> → T to get concrete
+                    // type info (is_array, is_string, etc.) for the awaited result variable.
+                    Some(Expr::Await(inner)) => {
+                        eprintln!("[AWAIT_EXPR_MATCH] inner_disc={:?}", std::mem::discriminant(inner.as_ref()));
+                        let func_name = match inner.as_ref() {
+                            Expr::Call { callee, .. } => match callee.as_ref() {
+                                Expr::ExternFuncRef { name, .. } => Some(name.as_str()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        eprintln!("[AWAIT_HIT] func_name={:?}", func_name);
+                        if let Some(name) = func_name {
+                            let ret_type = IMPORTED_FUNC_RETURN_TYPES.with(|p| p.borrow().get(name).cloned());
+                            eprintln!("[AWAIT_RET] func={} ret={:?}", name, ret_type);
+                            if let Some(ret) = ret_type {
+                                let inner_type = match &ret {
+                                    perry_types::Type::Generic { base, type_args } if base == "Promise" && !type_args.is_empty() => {
+                                        &type_args[0]
+                                    }
+                                    _ => &ret,
+                                };
+                                let is_arr = matches!(inner_type, perry_types::Type::Array(_) | perry_types::Type::Tuple(_));
+                                let is_str = matches!(inner_type, perry_types::Type::String);
+                                let is_ptr = is_arr || is_str || matches!(inner_type,
+                                    perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Generic { .. });
+                                let is_bi = matches!(inner_type, perry_types::Type::BigInt);
+                                (None, is_ptr, is_arr, is_str, is_bi, false, false, false, false, false)
+                            } else {
+                                (None, false, false, false, false, false, false, false, false, false)
+                            }
+                        } else {
+                            (None, false, false, false, false, false, false, false, false, false)
                         }
                     }
                     _ => (None, false, false, false, false, false, false, false, false, false),

@@ -321,7 +321,7 @@ impl crate::codegen::Compiler {
                         false
                     }
                 };
-                let is_array = matches!(&param.ty, perry_types::Type::Array(_));
+                let is_array = matches!(&param.ty, perry_types::Type::Array(_) | perry_types::Type::Tuple(_));
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
                 let is_numeric_enum = if let perry_types::Type::Named(name) = &param.ty {
@@ -941,14 +941,14 @@ impl crate::codegen::Compiler {
         for param in &func.params {
             let (abi_type, is_pointer, is_string, is_union) = {
                 let is_s = matches!(param.ty, HirType::String);
-                let is_p = matches!(&param.ty, HirType::String | HirType::Array(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
+                let is_p = matches!(&param.ty, HirType::String | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
                 let is_u = matches!(&param.ty, HirType::Union(_) | HirType::Any | HirType::Unknown);
                 let abi = if is_p && !is_u { types::I64 } else { types::F64 };
                 (abi, is_p, is_s, is_u)
             };
             local_type_info.insert(param.id, SplitLocalInfo {
                 abi_type, is_pointer, is_string, is_union,
-                is_array: matches!(&param.ty, HirType::Array(_)),
+                is_array: matches!(&param.ty, HirType::Array(_) | HirType::Tuple(_)),
                 is_bigint: matches!(param.ty, HirType::BigInt),
                 is_closure: matches!(param.ty, HirType::Function(_)),
                 is_map: matches!(&param.ty, HirType::Generic { base, .. } if base == "Map"),
@@ -957,21 +957,41 @@ impl crate::codegen::Compiler {
             });
         }
         for stmt in &func.body {
-            if let Stmt::Let { id, ty, name, .. } = stmt {
+            if let Stmt::Let { id, ty, name, init, .. } = stmt {
+                // For await on cross-module calls with Any/Unknown type,
+                // check the imported function's return type to get concrete type info
+                let effective_ty = if matches!(ty, HirType::Any | HirType::Unknown) {
+                    if let Some(Expr::Await(inner)) = init {
+                        if let Expr::Call { callee, .. } = inner.as_ref() {
+                            if let Expr::ExternFuncRef { name: func_name, .. } = callee.as_ref() {
+                                self.imported_func_return_types.get(func_name)
+                                    .and_then(|ret| match ret {
+                                        // Unwrap Promise<T> → T for async functions
+                                        HirType::Generic { base, type_args } if base == "Promise" && !type_args.is_empty() => {
+                                            Some(&type_args[0])
+                                        }
+                                        _ => Some(ret),
+                                    })
+                                    .unwrap_or(ty)
+                            } else { ty }
+                        } else { ty }
+                    } else { ty }
+                } else { ty };
+
                 let (abi_type, is_pointer, is_string, is_union) = {
-                    let is_s = matches!(ty, HirType::String);
-                    let is_p = matches!(ty, HirType::String | HirType::Array(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
-                    let is_u = matches!(ty, HirType::Union(_) | HirType::Any | HirType::Unknown);
+                    let is_s = matches!(effective_ty, HirType::String);
+                    let is_p = matches!(effective_ty, HirType::String | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } | HirType::Function(_));
+                    let is_u = matches!(effective_ty, HirType::Union(_) | HirType::Any | HirType::Unknown);
                     let abi = if is_p && !is_u { types::I64 } else { types::F64 };
                     (abi, is_p, is_s, is_u)
                 };
                 local_type_info.insert(*id, SplitLocalInfo {
                     abi_type, is_pointer, is_string, is_union,
-                    is_array: matches!(ty, HirType::Array(_)),
-                    is_bigint: matches!(ty, HirType::BigInt),
-                    is_closure: matches!(ty, HirType::Function(_)),
-                    is_map: matches!(ty, HirType::Generic { base, .. } if base == "Map"),
-                    is_set: matches!(ty, HirType::Generic { base, .. } if base == "Set"),
+                    is_array: matches!(effective_ty, HirType::Array(_) | HirType::Tuple(_)),
+                    is_bigint: matches!(effective_ty, HirType::BigInt),
+                    is_closure: matches!(effective_ty, HirType::Function(_)),
+                    is_map: matches!(effective_ty, HirType::Generic { base, .. } if base == "Map"),
+                    is_set: matches!(effective_ty, HirType::Generic { base, .. } if base == "Set"),
                     name: Some(name.clone()),
                 });
             }
