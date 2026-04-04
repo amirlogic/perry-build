@@ -816,9 +816,9 @@ pub extern "C" fn js_array_forEach(arr: *const ArrayHeader, callback: *const Clo
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            // Call callback(element) - we pass just the element for simplicity
-            // Full JS forEach also passes index and array, but we start simple
-            js_closure_call1(callback, element);
+            // Pass both element and index to match JS forEach(element, index, array) semantics.
+            // Using call2 prevents x86_64 SIGSEGV from garbage in the uninitialized index register.
+            js_closure_call2(callback, element, i as f64);
         }
     }
 }
@@ -839,7 +839,10 @@ pub extern "C" fn js_array_map(arr: *const ArrayHeader, callback: *const Closure
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let mapped = js_closure_call1(callback, element);
+            // Pass both element and index — JS .map() callback receives (element, index, array).
+            // Using call2 ensures the index parameter is defined instead of garbage from registers,
+            // which caused SIGSEGV on x86_64 when callbacks used the index (e.g., (_, i) => obj[i]).
+            let mapped = js_closure_call2(callback, element, i as f64);
             ptr::write(result_elements.add(i), mapped);
         }
         (*result).length = length;
@@ -983,7 +986,7 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let keep = js_closure_call1(callback, element);
+            let keep = js_closure_call2(callback, element, i as f64);
             // Proper truthy check: handles NaN-boxed booleans (TAG_FALSE != 0.0 but is falsy)
             if crate::value::js_is_truthy(keep) != 0 {
                 result = js_array_push_f64(result, element);
@@ -1007,7 +1010,7 @@ pub extern "C" fn js_array_find(arr: *const ArrayHeader, callback: *const Closur
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let result = js_closure_call1(callback, element);
+            let result = js_closure_call2(callback, element, i as f64);
             // Proper truthy check: handles NaN-boxed booleans
             if crate::value::js_is_truthy(result) != 0 {
                 return element;
@@ -1031,7 +1034,7 @@ pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const C
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let result = js_closure_call1(callback, element);
+            let result = js_closure_call2(callback, element, i as f64);
             // Proper truthy check: handles NaN-boxed booleans
             if crate::value::js_is_truthy(result) != 0 {
                 return i as i32;
@@ -1057,7 +1060,7 @@ pub extern "C" fn js_array_some(arr: *const ArrayHeader, callback: *const Closur
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let result = js_closure_call1(callback, element);
+            let result = js_closure_call2(callback, element, i as f64);
             if crate::value::js_is_truthy(result) != 0 {
                 return f64::from_bits(TAG_TRUE);
             }
@@ -1081,7 +1084,7 @@ pub extern "C" fn js_array_every(arr: *const ArrayHeader, callback: *const Closu
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let result = js_closure_call1(callback, element);
+            let result = js_closure_call2(callback, element, i as f64);
             if crate::value::js_is_truthy(result) == 0 {
                 return f64::from_bits(TAG_FALSE);
             }
@@ -1105,7 +1108,7 @@ pub extern "C" fn js_array_flatMap(arr: *const ArrayHeader, callback: *const Clo
 
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
-            let mapped = js_closure_call1(callback, element);
+            let mapped = js_closure_call2(callback, element, i as f64);
             // Check if the mapped value is an array (pointer-tagged)
             let bits = mapped.to_bits();
             let top16 = bits >> 48;
