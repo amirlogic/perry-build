@@ -144,10 +144,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - feat: `String.replaceAll(pattern, replacement)` — string-pattern replaceAll via new `js_string_replace_all_string` runtime function; dispatched in both local-variable and generic-expression codegen paths
 - feat: `String.matchAll(regex)` — new `StringMatchAll` HIR expression + `js_string_match_all` runtime returning array of match arrays with capture groups; supports `for...of`, spread, and `.map()` iteration
 - fix: `arr.shift()?.trim()` / `arr.pop()?.trim()` returned wrong element — optional chaining re-evaluated the side-effecting shift/pop in the else branch; codegen now caches the shift/pop result via `OPT_CHAIN_CACHE` thread-local; HIR lowering nests chained methods (`.trim().toLowerCase()`) inside the inner conditional's else branch instead of creating redundant outer conditionals
-- feat: `Buffer.subarray(start, end?)` — dispatched to `js_buffer_slice` alongside `Buffer.slice`; module-level buffer detection extended to recognize `buf.slice()`/`buf.subarray()` results as buffers
+- fix: `Buffer.subarray()`/`Buffer.slice()` on derived buffers — `is_buffer_expr` in stmt.rs now detects `buf.slice()`/`buf.subarray()` via local buffer check; `is_string_expr` excludes buffer locals; inline buffer method dispatch added for non-LocalGet buffer objects (e.g. `Buffer.from(...).subarray(3)`)
 - fix: SQLite `stmt.run(params)` / `stmt.get(params)` / `stmt.all(params)` — parameters were ignored; codegen now builds a JS array from all arguments; runtime `params_from_array` reads NaN-boxed values (strings, numbers, null, booleans) directly instead of JSON deserialization
 - fix: SQLite `stmt.run()` result object — `{ changes, lastInsertRowid }` now allocated with named keys via `js_object_alloc_with_shape` so property access works
 - feat: `db.pragma('journal_mode')` — added codegen dispatch + runtime declaration for `js_sqlite_pragma`; result NaN-boxed as string
+- feat: `db.transaction(fn)` — returns a wrapper closure that calls BEGIN/fn/COMMIT; runtime `sqlite_tx_wrapper` function captures db_handle + original closure
+- fix: `.length` on `Call` results (e.g. `stmt.all().length`) — `Expr::Call` added to dynamic array length detection in PropertyGet handler
 - fix: cross-module function call dispatched to wrong export in large modules on x86_64 — exported overload signatures (no body) were pushed to `module.functions` alongside the implementation, and codegen compiled the first entry (empty-body overload) then skipped the real implementation; also changed `func_refs_needing_wrappers` from `HashSet` to `BTreeSet` for deterministic wrapper generation order across platforms
 
 ### v0.4.45

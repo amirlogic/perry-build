@@ -392,8 +392,47 @@ pub unsafe extern "C" fn js_sqlite_pragma(
     std::ptr::null_mut()
 }
 
-/// db.transaction(fn) -> Transaction
+/// The transaction wrapper function — called when the returned closure is invoked.
+/// Captures: [0] = db_handle (as f64), [1] = original closure ptr (as i64)
+unsafe extern "C" fn sqlite_tx_wrapper(
+    wrapper_closure: *const perry_runtime::ClosureHeader,
+    arg0: f64,
+) -> f64 {
+    use perry_runtime::closure::{js_closure_get_capture_f64, js_closure_get_capture_ptr, js_closure_call1};
+
+    let db_handle_f64 = js_closure_get_capture_f64(wrapper_closure, 0);
+    let db_handle = db_handle_f64 as i64;
+    let original_closure = js_closure_get_capture_ptr(wrapper_closure, 1) as *const perry_runtime::ClosureHeader;
+
+    // BEGIN
+    js_sqlite_begin_transaction(db_handle);
+
+    // Call original closure with argument
+    let result = js_closure_call1(original_closure, arg0);
+
+    // COMMIT
+    js_sqlite_commit(db_handle);
+
+    result
+}
+
+/// db.transaction(fn) -> wrapping closure
 ///
+/// Returns a closure that wraps fn in BEGIN/COMMIT.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_transaction(
+    db_handle: Handle,
+    closure_ptr: i64,
+) -> *mut perry_runtime::ClosureHeader {
+    use perry_runtime::closure::{js_closure_alloc, js_closure_set_capture_f64, js_closure_set_capture_ptr};
+
+    let wrapper = js_closure_alloc(sqlite_tx_wrapper as *const u8, 2);
+    js_closure_set_capture_f64(wrapper, 0, db_handle as f64);
+    js_closure_set_capture_ptr(wrapper, 1, closure_ptr);
+
+    wrapper
+}
+
 /// Begin a transaction.
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> bool {

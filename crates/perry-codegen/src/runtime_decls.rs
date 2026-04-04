@@ -6142,11 +6142,12 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_sqlite_pragma"), func_id);
         }
 
-        // js_sqlite_transaction(db: i64) -> i64 (transaction handle)
+        // js_sqlite_transaction(db: i64, closure: i64) -> i64 (wrapper closure ptr)
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // db handle
-            sig.returns.push(AbiParam::new(types::I64)); // transaction handle
+            sig.params.push(AbiParam::new(types::I64)); // closure pointer
+            sig.returns.push(AbiParam::new(types::I64)); // wrapper closure pointer
             let func_id = self.module.declare_function("js_sqlite_transaction", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_sqlite_transaction"), func_id);
         }

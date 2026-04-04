@@ -425,9 +425,8 @@ pub(crate) fn compile_stmt(
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
                                || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
                                 if let Expr::LocalGet(id) = object.as_ref() {
-                                    // If we can find the local, check if it's a string
-                                    // Otherwise, assume it is (since we know it's a string method)
-                                    return locals.get(id).map(|i| i.is_string).unwrap_or(true);
+                                    // If we can find the local, check if it's a string (not buffer)
+                                    return locals.get(id).map(|i| i.is_string && !i.is_buffer).unwrap_or(true);
                                 }
                                 // ProcessArgv is an array, not a string — .slice() returns array
                                 if matches!(object.as_ref(), Expr::ProcessArgv) {
@@ -556,6 +555,9 @@ pub(crate) fn compile_stmt(
                             _ => false,
                         }
                     }
+                    // db.transaction(fn) returns a closure
+                    Expr::NativeMethodCall { module, method, .. }
+                        if module == "better-sqlite3" && method == "transaction" => true,
                     _ => false,
                 }
             }
@@ -671,7 +673,7 @@ pub(crate) fn compile_stmt(
             };
 
             // Helper to detect if an expression produces a buffer
-            fn is_buffer_expr(expr: &Expr) -> bool {
+            fn is_buffer_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
                     Expr::BufferConcat(_) | Expr::BufferSlice { .. } | Expr::BufferFill { .. } |
@@ -679,10 +681,19 @@ pub(crate) fn compile_stmt(
                     Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_) => true,
                     Expr::NativeMethodCall { module, method, .. }
                         if module == "crypto" && method == "randomBytes" => true,
-                    // Detect chained buffer methods: new Uint8Array(n).fill(v)
+                    // Detect chained buffer methods: new Uint8Array(n).fill(v), buf.slice(), buf.subarray()
                     Expr::Call { callee, .. } => {
                         if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                            property == "fill" && is_buffer_expr(object.as_ref())
+                            if property == "fill" {
+                                return is_buffer_expr(object.as_ref(), locals);
+                            }
+                            if matches!(property.as_str(), "slice" | "subarray") {
+                                if let Expr::LocalGet(obj_id) = object.as_ref() {
+                                    return locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false);
+                                }
+                                return is_buffer_expr(object.as_ref(), locals);
+                            }
+                            false
                         } else {
                             false
                         }
@@ -712,7 +723,7 @@ pub(crate) fn compile_stmt(
                     }
                 });
                 let is_typed_buffer = matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer")
-                    || init.as_ref().map(|e| is_buffer_expr(e)).unwrap_or(false);
+                    || init.as_ref().map(|e| is_buffer_expr(e, locals)).unwrap_or(false);
                 (class_name, true, is_typed_array, false, is_typed_bigint, is_typed_closure, is_typed_map, is_typed_set, is_typed_buffer, false)
             } else {
                 // Fall back to expression inference for untyped cases
@@ -763,7 +774,7 @@ pub(crate) fn compile_stmt(
                     // SetNew/SetNewFromArray returns a Set pointer
                     Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_)) => (None, true, false, false, false, false, false, true, false, false),
                     // Buffer expressions return buffer pointers
-                    Some(expr) if is_buffer_expr(expr) => (None, true, false, false, false, false, false, false, true, false),
+                    Some(expr) if is_buffer_expr(expr, locals) => (None, true, false, false, false, false, false, false, true, false),
                     Some(Expr::Closure { .. }) => (None, true, false, false, false, true, false, false, false, false),
                     // BigInt literals - stored as NaN-boxed F64 (is_pointer = false)
                     Some(Expr::BigInt(_)) => (None, false, false, false, true, false, false, false, false, false),

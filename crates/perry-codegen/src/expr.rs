@@ -10216,6 +10216,65 @@ pub(crate) fn compile_expr(
                         // Fall through to string slice if not an array
                     }
 
+                    // Handle buffer methods on non-LocalGet buffer expressions (e.g., Buffer.from(...).subarray(3))
+                    if matches!(property.as_str(), "slice" | "subarray" | "toString") {
+                        let is_buffer_object = matches!(object.as_ref(),
+                            Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
+                            Expr::BufferConcat(_) | Expr::BufferSlice { .. } | Expr::BufferFill { .. } |
+                            Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_)
+                        ) || matches!(object.as_ref(), Expr::Call { callee, .. }
+                            if matches!(callee.as_ref(), Expr::PropertyGet { property: p, .. }
+                                if matches!(p.as_str(), "slice" | "subarray")));
+                        if is_buffer_object {
+                            let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let buf_ptr = ensure_i64(builder, buf_val);
+                            match property.as_str() {
+                                "slice" | "subarray" => {
+                                    let start = if arg_vals.len() > 0 {
+                                        let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                        builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                    } else {
+                                        builder.ins().iconst(types::I32, 0)
+                                    };
+                                    let end = if arg_vals.len() > 1 {
+                                        let arg_f64 = ensure_f64(builder, arg_vals[1]);
+                                        builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                    } else {
+                                        builder.ins().iconst(types::I32, i32::MAX as i64)
+                                    };
+                                    let func = extern_funcs.get("js_buffer_slice")
+                                        .ok_or_else(|| anyhow!("js_buffer_slice not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[buf_ptr, start, end]);
+                                    let result_ptr = builder.inst_results(call)[0];
+                                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                }
+                                "toString" => {
+                                    let encoding = if !args.is_empty() {
+                                        let enc_val = match &args[0] {
+                                            Expr::String(s) => match s.as_str() {
+                                                "hex" => 1i64,
+                                                "base64" => 2i64,
+                                                _ => 0i64,
+                                            },
+                                            _ => 0i64,
+                                        };
+                                        builder.ins().iconst(types::I32, enc_val)
+                                    } else {
+                                        builder.ins().iconst(types::I32, 0)
+                                    };
+                                    let func = extern_funcs.get("js_buffer_to_string")
+                                        .ok_or_else(|| anyhow!("js_buffer_to_string not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[buf_ptr, encoding]);
+                                    let result_ptr = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_string(builder, result_ptr));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
@@ -14739,6 +14798,10 @@ pub(crate) fn compile_expr(
                 } else if let Expr::PropertyGet { .. } = object.as_ref() {
                     // Chained property access (e.g., obj.items.length) - the intermediate
                     // result could be an array, so use dynamic length handling
+                    true
+                } else if let Expr::Call { .. } = object.as_ref() {
+                    // Call result (e.g., stmt.all().length, str.split().length) - the result
+                    // could be an array, so use dynamic length handling
                     true
                 } else {
                     false
@@ -20826,7 +20889,16 @@ pub(crate) fn compile_expr(
                             // value_ptr (null for query-only pragmas)
                             call_args.push(builder.ins().iconst(types::I64, 0));
                         }
-                        "close" | "transaction" | "commit" | "rollback" => {
+                        "transaction" => {
+                            // transaction(fn) — pass the closure as i64 pointer
+                            if !arg_vals.is_empty() {
+                                let closure_i64 = ensure_i64(builder, arg_vals[0]);
+                                call_args.push(closure_i64);
+                            } else {
+                                call_args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                        }
+                        "close" | "commit" | "rollback" => {
                             // No additional args
                         }
                         _ => {}
@@ -22148,8 +22220,12 @@ pub(crate) fn compile_expr(
                 } else if native_module == "better-sqlite3" {
                     // better-sqlite3 result handling
                     match method.as_str() {
-                        // prepare/transaction return handles (i64) - NaN-box with POINTER_TAG
-                        "prepare" | "open" | "transaction" => {
+                        // transaction returns a closure pointer (i64) - bitcast directly
+                        "transaction" => {
+                            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+                        }
+                        // prepare/open return handles (i64) - NaN-box with POINTER_TAG
+                        "prepare" | "open" => {
                             let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                                 .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
