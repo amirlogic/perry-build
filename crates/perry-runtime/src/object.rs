@@ -1060,6 +1060,19 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
         }
 
+        // Cross-platform safety: validate keys_array has a valid GcHeader.
+        // If the keys_array pointer is corrupt (e.g., due to a stale reference after GC,
+        // or a func_addr relocation issue on x86_64), the GcHeader check catches it
+        // before we dereference the array contents.
+        {
+            let keys_gc = (keys as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            let keys_gc_type = (*keys_gc).obj_type;
+            // keys_array must be GC_TYPE_ARRAY (arena-allocated array)
+            if keys_gc_type != crate::gc::GC_TYPE_ARRAY {
+                return JSValue::undefined();
+            }
+        }
+
         // Fast path: check field index cache (keys_array_ptr + key_hash → field_index)
         // Objects with the same shape share the same keys_array, so we cache per-shape lookups.
         let key_bytes = std::slice::from_raw_parts(

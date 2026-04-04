@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.47
+**Current Version:** 0.4.48
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.48
+- fix: x86_64 SIGSEGV in `Contract()` with 20-module ethkit — wrapper functions for FuncRef callbacks (e.g., `.map(resolveType)`) now use `Linkage::Export` instead of `Linkage::Local`; module-scoped names prevent collisions while Export linkage ensures correct `func_addr` resolution on x86_64 ELF; also added cross-platform GcHeader validation for `keys_array` in `js_object_get_field_by_name` to catch corrupted object pointers (Linux lacked the macOS-only ASCII heuristic guard)
 
 ### v0.4.47
 - fix: module-local function wrappers use `Linkage::Local` — prevents cross-module symbol collisions when two modules share filename + function names (e.g., two `contract.ts` files both with `resolveType`); fixes x86_64 wrong dispatch in large module graphs
