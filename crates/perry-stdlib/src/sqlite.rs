@@ -125,18 +125,18 @@ pub unsafe extern "C" fn js_sqlite_open(filename_ptr: *const StringHeader) -> Ha
 ///
 /// Execute one or more SQL statements.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const StringHeader) -> bool {
+pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const StringHeader) -> i32 {
     let sql = match string_from_header(sql_ptr) {
         Some(s) => s,
-        None => return false,
+        None => return 0,
     };
 
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return conn.execute_batch(&sql).is_ok();
+            return if conn.execute_batch(&sql).is_ok() { 1 } else { 0 };
         }
     }
-    false
+    0
 }
 
 /// db.prepare(sql) -> Statement
@@ -435,57 +435,57 @@ pub unsafe extern "C" fn js_sqlite_transaction(
 
 /// Begin a transaction.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return conn.execute("BEGIN TRANSACTION", []).is_ok();
+            return if conn.execute("BEGIN TRANSACTION", []).is_ok() { 1 } else { 0 };
         }
     }
-    false
+    0
 }
 
 /// Commit a transaction.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_commit(db_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_sqlite_commit(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return conn.execute("COMMIT", []).is_ok();
+            return if conn.execute("COMMIT", []).is_ok() { 1 } else { 0 };
         }
     }
-    false
+    0
 }
 
 /// Rollback a transaction.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_rollback(db_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_sqlite_rollback(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            return conn.execute("ROLLBACK", []).is_ok();
+            return if conn.execute("ROLLBACK", []).is_ok() { 1 } else { 0 };
         }
     }
-    false
+    0
 }
 
 /// db.close() -> void
 ///
 /// Close the database connection.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_close(db_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_sqlite_close(db_handle: Handle) -> i32 {
     // The connection will be closed when the handle is dropped
     // For now, we just verify the handle is valid
-    get_handle::<SqliteDbHandle>(db_handle).is_some()
+    if get_handle::<SqliteDbHandle>(db_handle).is_some() { 1 } else { 0 }
 }
 
 /// db.inTransaction -> boolean
 ///
 /// Check if currently in a transaction.
 #[no_mangle]
-pub unsafe extern "C" fn js_sqlite_in_transaction(db_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_sqlite_in_transaction(db_handle: Handle) -> i32 {
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
             // SQLite's autocommit mode is off when in a transaction
-            return !conn.is_autocommit();
+            return if !conn.is_autocommit() { 1 } else { 0 };
         }
     }
-    false
+    0
 }

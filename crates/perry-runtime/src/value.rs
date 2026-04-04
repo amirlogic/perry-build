@@ -660,9 +660,9 @@ pub unsafe extern "C" fn js_dynamic_bitxor(a: f64, b: f64) -> f64 {
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a BigInt.
 #[no_mangle]
-pub extern "C" fn js_nanbox_is_bigint(value: f64) -> bool {
+pub extern "C" fn js_nanbox_is_bigint(value: f64) -> i32 {
     let jsval = JSValue::from_bits(value.to_bits());
-    jsval.is_bigint()
+    if jsval.is_bigint() { 1 } else { 0 }
 }
 
 /// Extract a BigInt pointer from a NaN-boxed f64 value.
@@ -682,9 +682,9 @@ pub extern "C" fn js_nanbox_get_bigint(value: f64) -> i64 {
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a pointer.
 #[no_mangle]
-pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
+pub extern "C" fn js_nanbox_is_pointer(value: f64) -> i32 {
     let jsval = JSValue::from_bits(value.to_bits());
-    jsval.is_pointer()
+    if jsval.is_pointer() { 1 } else { 0 }
 }
 
 /// Extract a pointer from a NaN-boxed f64 value.
@@ -780,9 +780,9 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
 
 /// Check if a NaN-boxed f64 value represents a string.
 #[no_mangle]
-pub extern "C" fn js_nanbox_is_string(value: f64) -> bool {
+pub extern "C" fn js_nanbox_is_string(value: f64) -> i32 {
     let jsval = JSValue::from_bits(value.to_bits());
-    jsval.is_string()
+    if jsval.is_string() { 1 } else { 0 }
 }
 
 /// Convert a NaN-boxed f64 value to a string pointer.

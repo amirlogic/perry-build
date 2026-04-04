@@ -430,7 +430,10 @@ pub unsafe extern "C" fn js_moment_diff(
 
 /// moment.isBefore(other) -> boolean
 #[no_mangle]
-pub unsafe extern "C" fn js_moment_is_before(handle: f64, other_handle: f64) -> bool {
+pub unsafe extern "C" fn js_moment_is_before(handle: f64, other_handle: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let handle = f64_to_handle(handle);
     let other_handle = f64_to_handle(other_handle);
 
@@ -438,15 +441,20 @@ pub unsafe extern "C" fn js_moment_is_before(handle: f64, other_handle: f64) -> 
         get_handle::<MomentHandle>(handle),
         get_handle::<MomentHandle>(other_handle),
     ) {
-        return moment.datetime < other.datetime;
+        if moment.datetime < other.datetime {
+            return f64::from_bits(TAG_TRUE);
+        }
     }
 
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// moment.isAfter(other) -> boolean
 #[no_mangle]
-pub unsafe extern "C" fn js_moment_is_after(handle: f64, other_handle: f64) -> bool {
+pub unsafe extern "C" fn js_moment_is_after(handle: f64, other_handle: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let handle = f64_to_handle(handle);
     let other_handle = f64_to_handle(other_handle);
 
@@ -454,10 +462,12 @@ pub unsafe extern "C" fn js_moment_is_after(handle: f64, other_handle: f64) -> b
         get_handle::<MomentHandle>(handle),
         get_handle::<MomentHandle>(other_handle),
     ) {
-        return moment.datetime > other.datetime;
+        if moment.datetime > other.datetime {
+            return f64::from_bits(TAG_TRUE);
+        }
     }
 
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// moment.isSame(other, unit?) -> boolean
@@ -466,7 +476,10 @@ pub unsafe extern "C" fn js_moment_is_same(
     handle: f64,
     other_handle: f64,
     unit_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let handle = f64_to_handle(handle);
     let other_handle = f64_to_handle(other_handle);
     let unit = string_from_header(unit_ptr);
@@ -475,8 +488,8 @@ pub unsafe extern "C" fn js_moment_is_same(
         get_handle::<MomentHandle>(handle),
         get_handle::<MomentHandle>(other_handle),
     ) {
-        if let Some(unit) = unit {
-            return match unit.as_str() {
+        let result = if let Some(unit) = unit {
+            match unit.as_str() {
                 "year" | "years" | "y" => moment.datetime.year() == other.datetime.year(),
                 "month" | "months" | "M" => {
                     moment.datetime.year() == other.datetime.year()
@@ -498,12 +511,14 @@ pub unsafe extern "C" fn js_moment_is_same(
                         && moment.datetime.minute() == other.datetime.minute()
                 }
                 _ => moment.datetime == other.datetime,
-            };
-        }
-        return moment.datetime == other.datetime;
+            }
+        } else {
+            moment.datetime == other.datetime
+        };
+        return if result { f64::from_bits(TAG_TRUE) } else { f64::from_bits(TAG_FALSE) };
     }
 
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// moment.isBetween(start, end) -> boolean
@@ -512,7 +527,10 @@ pub unsafe extern "C" fn js_moment_is_between(
     handle: f64,
     start_handle: f64,
     end_handle: f64,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let handle = f64_to_handle(handle);
     let start_handle = f64_to_handle(start_handle);
     let end_handle = f64_to_handle(end_handle);
@@ -522,20 +540,27 @@ pub unsafe extern "C" fn js_moment_is_between(
         get_handle::<MomentHandle>(start_handle),
         get_handle::<MomentHandle>(end_handle),
     ) {
-        return moment.datetime > start.datetime && moment.datetime < end.datetime;
+        if moment.datetime > start.datetime && moment.datetime < end.datetime {
+            return f64::from_bits(TAG_TRUE);
+        }
     }
 
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// moment.isValid() -> boolean
 #[no_mangle]
-pub unsafe extern "C" fn js_moment_is_valid(handle: f64) -> bool {
+pub unsafe extern "C" fn js_moment_is_valid(handle: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let handle = f64_to_handle(handle);
     if let Some(moment) = get_handle::<MomentHandle>(handle) {
-        return moment.is_valid;
+        if moment.is_valid {
+            return f64::from_bits(TAG_TRUE);
+        }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// moment.clone() -> Moment

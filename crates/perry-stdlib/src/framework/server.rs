@@ -313,7 +313,10 @@ pub unsafe extern "C" fn js_http_respond(
     status: f64,
     body_ptr: *const StringHeader,
     content_type_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let body = string_from_header(body_ptr).unwrap_or_default();
     let content_type = string_from_header(content_type_ptr).unwrap_or_else(|| "text/plain".to_string());
 
@@ -341,10 +344,10 @@ pub unsafe extern "C" fn js_http_respond(
         // and look up by request ID
         if let Some(tx) = PENDING_RESPONSES.remove(&req.id) {
             let _ = tx.1.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 // Global map of pending responses
@@ -392,11 +395,14 @@ pub unsafe extern "C" fn js_http_server_accept_v2(server_handle: Handle) -> Hand
 
 /// Shutdown the server
 #[no_mangle]
-pub unsafe extern "C" fn js_http_server_close(server_handle: Handle) -> bool {
-    if let Some(server) = get_handle::<HttpServerHandle>(server_handle) {
+pub unsafe extern "C" fn js_http_server_close(server_handle: Handle) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
+    if let Some(_server) = get_handle::<HttpServerHandle>(server_handle) {
         // Note: Can't take ownership from handle, but we can drop it
         // The shutdown channel will be dropped when server handle is freed
-        return true;
+        return f64::from_bits(TAG_TRUE);
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }

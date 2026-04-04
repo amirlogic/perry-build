@@ -698,14 +698,20 @@ pub unsafe extern "C" fn js_json_stringify_null() -> *mut StringHeader {
 
 /// Check if a string is valid JSON
 #[no_mangle]
-pub unsafe extern "C" fn js_json_is_valid(text_ptr: *const StringHeader) -> bool {
+pub unsafe extern "C" fn js_json_is_valid(text_ptr: *const StringHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
     if text_ptr.is_null() {
-        return false;
+        return f64::from_bits(TAG_FALSE);
     }
     let len = (*text_ptr).length as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
-    serde_json::from_slice::<serde_json::Value>(bytes).is_ok()
+    if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
+        f64::from_bits(TAG_TRUE)
+    } else {
+        f64::from_bits(TAG_FALSE)
+    }
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────

@@ -751,9 +751,16 @@ pub extern "C" fn js_lodash_clamp(number: f64, lower: f64, upper: f64) -> f64 {
 
 /// _.inRange(number, start, end) -> boolean
 #[no_mangle]
-pub extern "C" fn js_lodash_in_range(number: f64, start: f64, end: f64) -> bool {
+pub extern "C" fn js_lodash_in_range(number: f64, start: f64, end: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let (start, end) = if start > end { (end, start) } else { (start, end) };
-    number >= start && number < end
+    if number >= start && number < end {
+        f64::from_bits(TAG_TRUE)
+    } else {
+        f64::from_bits(TAG_FALSE)
+    }
 }
 
 /// _.random(lower, upper, floating?) -> number
@@ -810,9 +817,9 @@ pub unsafe extern "C" fn js_lodash_range(start: f64, end: f64, step: f64) -> *mu
 
 /// _.isEmpty(value) -> boolean
 #[no_mangle]
-pub unsafe extern "C" fn js_lodash_is_empty(value: JSValue) -> bool {
+pub unsafe extern "C" fn js_lodash_is_empty(value: JSValue) -> i32 {
     if value.is_null() || value.is_undefined() {
-        return true;
+        return 1;
     }
 
     if value.is_pointer() {
@@ -820,17 +827,17 @@ pub unsafe extern "C" fn js_lodash_is_empty(value: JSValue) -> bool {
         if !ptr.is_null() {
             // Check if it's an array
             let len = js_array_length(ptr);
-            return len == 0;
+            return if len == 0 { 1 } else { 0 };
         }
     }
 
-    false
+    0
 }
 
 /// _.isNil(value) -> boolean
 #[no_mangle]
-pub extern "C" fn js_lodash_is_nil(value: JSValue) -> bool {
-    value.is_null() || value.is_undefined()
+pub extern "C" fn js_lodash_is_nil(value: JSValue) -> i32 {
+    if value.is_null() || value.is_undefined() { 1 } else { 0 }
 }
 
 /// _.size(collection) -> number

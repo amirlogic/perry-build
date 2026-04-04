@@ -281,19 +281,24 @@ pub unsafe extern "C" fn js_commander_get_option_number(handle: Handle, name_ptr
 
 /// Get a specific option value as boolean
 #[no_mangle]
-pub unsafe extern "C" fn js_commander_get_option_bool(handle: Handle, name_ptr: *const StringHeader) -> bool {
+pub unsafe extern "C" fn js_commander_get_option_bool(handle: Handle, name_ptr: *const StringHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let name = match string_from_header(name_ptr) {
         Some(n) => n,
-        None => return false,
+        None => return f64::from_bits(TAG_FALSE),
     };
 
     if let Some(cmd) = get_handle_mut::<CommanderHandle>(handle) {
         if let Some(value) = cmd.parsed_values.get(&name) {
-            return value == "true" || value == "1";
+            if value == "true" || value == "1" {
+                return f64::from_bits(TAG_TRUE);
+            }
         }
     }
 
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Get positional arguments count

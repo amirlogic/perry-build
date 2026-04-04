@@ -129,34 +129,34 @@ pub unsafe extern "C" fn js_argon2_verify(
 pub unsafe extern "C" fn js_argon2_verify_sync(
     hash_ptr: *const StringHeader,
     password_ptr: *const StringHeader,
-) -> bool {
+) -> i32 {
     let hash_str = match string_from_header(hash_ptr) {
         Some(h) => h,
-        None => return false,
+        None => return 0,
     };
 
     let password = match string_from_header(password_ptr) {
         Some(p) => p,
-        None => return false,
+        None => return 0,
     };
 
     let parsed_hash = match PasswordHash::new(&hash_str) {
         Ok(h) => h,
-        Err(_) => return false,
+        Err(_) => return 0,
     };
 
     let argon2 = Argon2::default();
-    argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok()
+    if argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok() { 1 } else { 0 }
 }
 
 /// argon2.needsRehash(hash) -> boolean
 ///
 /// Check if a hash needs to be rehashed (e.g., due to outdated parameters).
 #[no_mangle]
-pub unsafe extern "C" fn js_argon2_needs_rehash(hash_ptr: *const StringHeader) -> bool {
+pub unsafe extern "C" fn js_argon2_needs_rehash(hash_ptr: *const StringHeader) -> i32 {
     let hash_str = match string_from_header(hash_ptr) {
         Some(h) => h,
-        None => return true,
+        None => return 1,
     };
 
     // Parse the hash to check its parameters
@@ -164,12 +164,12 @@ pub unsafe extern "C" fn js_argon2_needs_rehash(hash_ptr: *const StringHeader) -
         Ok(parsed) => {
             // Check if algorithm is argon2id
             if parsed.algorithm.as_str() != "argon2id" {
-                return true;
+                return 1;
             }
             // In a real implementation, we'd check memory cost, time cost, etc.
             // For now, we assume current defaults are acceptable
-            false
+            0
         }
-        Err(_) => true, // Invalid hash needs rehashing
+        Err(_) => 1, // Invalid hash needs rehashing
     }
 }

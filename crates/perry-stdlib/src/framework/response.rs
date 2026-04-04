@@ -25,7 +25,10 @@ pub unsafe extern "C" fn js_http_respond_text(
     req_handle: Handle,
     status: f64,
     body_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let body = string_from_header(body_ptr).unwrap_or_default();
 
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
@@ -40,10 +43,10 @@ pub unsafe extern "C" fn js_http_respond_text(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send a JSON response
@@ -52,7 +55,10 @@ pub unsafe extern "C" fn js_http_respond_json(
     req_handle: Handle,
     status: f64,
     body_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let body = string_from_header(body_ptr).unwrap_or_else(|| "{}".to_string());
 
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
@@ -67,10 +73,10 @@ pub unsafe extern "C" fn js_http_respond_json(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send an HTML response
@@ -79,7 +85,10 @@ pub unsafe extern "C" fn js_http_respond_html(
     req_handle: Handle,
     status: f64,
     body_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let body = string_from_header(body_ptr).unwrap_or_default();
 
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
@@ -94,10 +103,10 @@ pub unsafe extern "C" fn js_http_respond_html(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send a response with custom headers (headers as JSON)
@@ -107,7 +116,10 @@ pub unsafe extern "C" fn js_http_respond_with_headers(
     status: f64,
     body_ptr: *const StringHeader,
     headers_json_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let body = string_from_header(body_ptr).unwrap_or_default();
     let headers_json = string_from_header(headers_json_ptr).unwrap_or_else(|| "{}".to_string());
 
@@ -124,10 +136,10 @@ pub unsafe extern "C" fn js_http_respond_with_headers(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send a redirect response
@@ -135,18 +147,23 @@ pub unsafe extern "C" fn js_http_respond_with_headers(
 pub unsafe extern "C" fn js_http_respond_redirect(
     req_handle: Handle,
     url_ptr: *const StringHeader,
-    permanent: bool,
-) -> bool {
+    permanent: f64,
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let url = match string_from_header(url_ptr) {
         Some(u) => u,
-        None => return false,
+        None => return f64::from_bits(TAG_FALSE),
     };
 
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
         let mut headers = HashMap::new();
         headers.insert("location".to_string(), url);
 
-        let status = if permanent { 301 } else { 302 };
+        // Interpret NaN-boxed boolean: TAG_TRUE means permanent
+        let is_permanent = permanent.to_bits() == TAG_TRUE;
+        let status = if is_permanent { 301 } else { 302 };
 
         let response = HttpResponse {
             status,
@@ -156,15 +173,18 @@ pub unsafe extern "C" fn js_http_respond_redirect(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send a "not found" response
 #[no_mangle]
-pub unsafe extern "C" fn js_http_respond_not_found(req_handle: Handle) -> bool {
+pub unsafe extern "C" fn js_http_respond_not_found(req_handle: Handle) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "text/plain; charset=utf-8".to_string());
@@ -177,10 +197,10 @@ pub unsafe extern "C" fn js_http_respond_not_found(req_handle: Handle) -> bool {
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Send an error response
@@ -189,7 +209,10 @@ pub unsafe extern "C" fn js_http_respond_error(
     req_handle: Handle,
     status: f64,
     message_ptr: *const StringHeader,
-) -> bool {
+) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let message = string_from_header(message_ptr).unwrap_or_else(|| "Internal Server Error".to_string());
 
     if let Some(req) = get_handle::<RequestHandle>(req_handle) {
@@ -204,10 +227,10 @@ pub unsafe extern "C" fn js_http_respond_error(
 
         if let Some((_, tx)) = PENDING_RESPONSES.remove(&req.id) {
             let _: Result<(), HttpResponse> = tx.send(response);
-            return true;
+            return f64::from_bits(TAG_TRUE);
         }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Set a response header (for building response incrementally)

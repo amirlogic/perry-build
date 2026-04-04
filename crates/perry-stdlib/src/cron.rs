@@ -36,10 +36,13 @@ static CALLBACK_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// Validate a cron expression.
 #[no_mangle]
-pub unsafe extern "C" fn js_cron_validate(expr_ptr: *const StringHeader) -> bool {
+pub unsafe extern "C" fn js_cron_validate(expr_ptr: *const StringHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     let expr = match string_from_header(expr_ptr) {
         Some(e) => e,
-        None => return false,
+        None => return f64::from_bits(TAG_FALSE),
     };
 
     // Convert 5-field cron to 6-field (add seconds)
@@ -49,7 +52,11 @@ pub unsafe extern "C" fn js_cron_validate(expr_ptr: *const StringHeader) -> bool
         expr
     };
 
-    Schedule::from_str(&expr).is_ok()
+    if Schedule::from_str(&expr).is_ok() {
+        f64::from_bits(TAG_TRUE)
+    } else {
+        f64::from_bits(TAG_FALSE)
+    }
 }
 
 /// cron.schedule(expression, callback_id) -> CronJob
@@ -141,11 +148,16 @@ pub unsafe extern "C" fn js_cron_job_stop(handle: Handle) {
 ///
 /// Check if the job is currently running.
 #[no_mangle]
-pub unsafe extern "C" fn js_cron_job_is_running(handle: Handle) -> bool {
+pub unsafe extern "C" fn js_cron_job_is_running(handle: Handle) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
     if let Some(job) = get_handle::<CronJobHandle>(handle) {
-        return job.running.load(Ordering::SeqCst);
+        if job.running.load(Ordering::SeqCst) {
+            return f64::from_bits(TAG_TRUE);
+        }
     }
-    false
+    f64::from_bits(TAG_FALSE)
 }
 
 /// Get the next scheduled execution time as ISO string
