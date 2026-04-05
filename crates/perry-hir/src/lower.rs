@@ -2637,7 +2637,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     if let Expr::Number(val) = *operand {
                         Ok(Expr::Number(-val))
                     } else if let Expr::Integer(val) = *operand {
-                        Ok(Expr::Integer(-val))
+                        // Special case: -0 must be preserved as -0.0 (negative zero)
+                        // because integers collapse +0 and -0 into the same bit pattern.
+                        // JS distinguishes these in `console.log`, `Object.is`, and
+                        // `1/x` — so fold to Number(-0.0) instead of Integer(0).
+                        if val == 0 {
+                            Ok(Expr::Number(-0.0))
+                        } else {
+                            Ok(Expr::Integer(-val))
+                        }
                     } else {
                         Ok(Expr::Unary { op: UnaryOp::Neg, operand })
                     }
@@ -6069,23 +6077,34 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
             }
 
-            // Lower body with JS function hoisting
+            // Lower body with JS function hoisting.
+            // Only `var` declarations and function declarations are hoisted
+            // to the top per JS semantics — `let`/`const` MUST remain at their
+            // lexical position because they have block-scoped temporal dead
+            // zone semantics and, critically, their init expressions are only
+            // evaluated when control flow reaches them. Hoisting a `const x =
+            // someCall()` above a conditional that should skip it would
+            // eagerly invoke the call and break user code.
             let mut body = match &*arrow.body {
                 ast::BlockStmtOrExpr::BlockStmt(block) => {
-                    let mut var_decls = Vec::new();
+                    let mut var_hoisted = Vec::new();
                     let mut func_decls = Vec::new();
                     let mut exec_stmts = Vec::new();
                     for stmt in &block.stmts {
                         let lowered = crate::lower_decl::lower_body_stmt(ctx, stmt)?;
                         match stmt {
                             ast::Stmt::Decl(ast::Decl::Fn(_)) => func_decls.extend(lowered),
-                            ast::Stmt::Decl(ast::Decl::Var(_)) => var_decls.extend(lowered),
+                            ast::Stmt::Decl(ast::Decl::Var(var_decl))
+                                if var_decl.kind == ast::VarDeclKind::Var =>
+                            {
+                                var_hoisted.extend(lowered);
+                            }
                             _ => exec_stmts.extend(lowered),
                         }
                     }
-                    var_decls.extend(func_decls);
-                    var_decls.extend(exec_stmts);
-                    var_decls
+                    var_hoisted.extend(func_decls);
+                    var_hoisted.extend(exec_stmts);
+                    var_hoisted
                 }
                 ast::BlockStmtOrExpr::Expr(expr) => {
                     let return_expr = lower_expr(ctx, expr)?;
@@ -6210,24 +6229,30 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
             }
 
-            // Lower body with JS function hoisting: variable declarations first,
-            // then function declarations, then executable statements.
-            // This ensures captured variables are initialized before closures reference them.
+            // Lower body with JS hoisting: only `var` declarations and function
+            // declarations are hoisted per JS semantics. `let`/`const` MUST remain
+            // at their lexical position because their init expressions are only
+            // evaluated when control flow reaches them — hoisting `const x = fn()`
+            // out of a conditional branch would eagerly run the call.
             let mut body = if let Some(ref block) = fn_expr.function.body {
-                let mut var_decls = Vec::new();
+                let mut var_hoisted = Vec::new();
                 let mut func_decls = Vec::new();
                 let mut exec_stmts = Vec::new();
                 for stmt in &block.stmts {
                     let lowered = crate::lower_decl::lower_body_stmt(ctx, stmt)?;
                     match stmt {
                         ast::Stmt::Decl(ast::Decl::Fn(_)) => func_decls.extend(lowered),
-                        ast::Stmt::Decl(ast::Decl::Var(_)) => var_decls.extend(lowered),
+                        ast::Stmt::Decl(ast::Decl::Var(var_decl))
+                            if var_decl.kind == ast::VarDeclKind::Var =>
+                        {
+                            var_hoisted.extend(lowered);
+                        }
                         _ => exec_stmts.extend(lowered),
                     }
                 }
-                var_decls.extend(func_decls);
-                var_decls.extend(exec_stmts);
-                var_decls
+                var_hoisted.extend(func_decls);
+                var_hoisted.extend(exec_stmts);
+                var_hoisted
             } else {
                 Vec::new()
             };

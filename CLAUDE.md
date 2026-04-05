@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.52
+**Current Version:** 0.4.53
 
 ## Workflow Requirements
 
@@ -139,6 +139,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.53
+- fix: `const`/`let` inside arrow-function and function-expression bodies were being hoisted to the top of the body — lower.rs classified every `ast::Decl::Var` as hoistable alongside `var` and `function` declarations, so `const result = fn(n)` inside an `if/else` branch would run its initializer eagerly (e.g., memoize returning a closure that called its `fn` capture before the cache-hit check). Now only `VarDeclKind::Var` is hoisted; `Let`/`Const` remain in lexical position. `test_edge_higher_order` memoize test passes.
+- fix: `groups["a"].length` on `Record<string, T[]>` returned undefined — the `.length` dispatch in `PropertyGet` codegen didn't treat `Expr::IndexGet` as a dynamic-array candidate, so the intermediate array from `obj[stringKey]` fell through to `js_dynamic_object_get_property("length")` (always undefined). Added `IndexGet` to the `use_dynamic_length` detection so it routes through `js_dynamic_array_length`. `test_edge_objects_records` passes.
+- fix: `console.log(-0)` / `console.log(Math.round(-0.5))` printed `0` instead of `-0` — runtime number-printing paths used `.fract() == 0.0 && n.abs() < i64::MAX as f64` which treats ±0 identically. Added an `is_negative_zero` bit-pattern check to `js_console_log`, `js_console_log_dynamic`, `js_console_log_number`, their `error`/`warn` counterparts, and `format_jsvalue`/`format_jsvalue_for_json`. `String(-0)` and `JSON.stringify(-0)` still return `"0"` per ECMA-262. `test_edge_numeric` passes.
 
 ### v0.4.52
 - feat: labeled `break`/`continue` and `do...while` loops — new HIR variants `Labeled`, `LabeledBreak`, `LabeledContinue`, `DoWhile`; thread-local `LABEL_STACK`/`PENDING_LABEL` in codegen lets nested loops resolve labels without restructuring `loop_ctx`. `contains_loop_control` now recurses into nested loops to detect labeled control flow (prevents unsafe for-unrolling when an inner loop's `break outer`/`continue outer` targets an unrolled outer loop). `test_edge_control_flow` passes.

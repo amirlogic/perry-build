@@ -5,6 +5,14 @@
 use crate::JSValue;
 use crate::string::{StringHeader, js_string_from_bytes};
 
+/// Returns true if the f64 value is negative zero (-0.0).
+/// Uses bit pattern comparison so +0.0 and -0.0 are distinguished
+/// (they compare equal with normal `==`).
+#[inline]
+fn is_negative_zero(n: f64) -> bool {
+    n.to_bits() == 0x8000_0000_0000_0000u64
+}
+
 /// Print a value to stdout (console.log implementation)
 #[no_mangle]
 pub extern "C" fn js_console_log(value: JSValue) {
@@ -16,8 +24,11 @@ pub extern "C" fn js_console_log(value: JSValue) {
         println!("{}", value.as_bool());
     } else if value.is_number() {
         let n = value.as_number();
-        // Print integers without decimal point
-        if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        // Match Node/V8 console.log semantics: distinguish -0 from 0
+        if is_negative_zero(n) {
+            println!("-0");
+        } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+            // Print integers without decimal point
             println!("{}", n as i64);
         } else {
             println!("{}", n);
@@ -73,6 +84,8 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
             println!("NaN");
         } else if n.is_infinite() {
             if n > 0.0 { println!("Infinity"); } else { println!("-Infinity"); }
+        } else if is_negative_zero(n) {
+            println!("-0");
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             println!("{}", n as i64);
         } else {
@@ -84,7 +97,9 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
 /// Print a number to stdout (optimized path for known numbers)
 #[no_mangle]
 pub extern "C" fn js_console_log_number(value: f64) {
-    if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
+    if is_negative_zero(value) {
+        println!("-0");
+    } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         println!("{}", value as i64);
     } else {
         println!("{}", value);
@@ -135,6 +150,8 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
             eprintln!("NaN");
         } else if n.is_infinite() {
             if n > 0.0 { eprintln!("Infinity"); } else { eprintln!("-Infinity"); }
+        } else if is_negative_zero(n) {
+            eprintln!("-0");
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
@@ -146,7 +163,9 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
 /// Print a number to stderr (console.error for numbers)
 #[no_mangle]
 pub extern "C" fn js_console_error_number(value: f64) {
-    if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
+    if is_negative_zero(value) {
+        eprintln!("-0");
+    } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
         eprintln!("{}", value);
@@ -197,6 +216,8 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
             eprintln!("NaN");
         } else if n.is_infinite() {
             if n > 0.0 { eprintln!("Infinity"); } else { eprintln!("-Infinity"); }
+        } else if is_negative_zero(n) {
+            eprintln!("-0");
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
@@ -208,7 +229,9 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
 /// Print a number to stderr (console.warn for numbers)
 #[no_mangle]
 pub extern "C" fn js_console_warn_number(value: f64) {
-    if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
+    if is_negative_zero(value) {
+        eprintln!("-0");
+    } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
         eprintln!("{}", value);
@@ -390,6 +413,8 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 "NaN".to_string()
             } else if n.is_infinite() {
                 if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+            } else if is_negative_zero(n) {
+                "-0".to_string()
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
@@ -558,6 +583,8 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                 "NaN".to_string()
             } else if n.is_infinite() {
                 if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+            } else if is_negative_zero(n) {
+                "-0".to_string()
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {

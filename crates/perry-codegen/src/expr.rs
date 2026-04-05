@@ -1297,10 +1297,13 @@ pub(crate) fn compile_expr(
             Ok(builder.ins().ceil(coerced))
         }
         Expr::MathRound(expr) => {
-            // JS Math.round: round-half-away-from-zero for positives (0.5 → 1),
-            // round-half-toward-positive-infinity (−0.5 → 0 because toward +∞).
+            // JS Math.round: round-half-toward-positive-infinity
+            //   0.5 → 1, -0.5 → -0 (sign-preserved), -1.5 → -1
             // Cranelift's `nearest` uses IEEE round-half-to-even (banker's rounding)
-            // which gives the wrong answer for 0.5. Emulate JS via floor(x + 0.5).
+            // which gives the wrong answer for 0.5. Emulate JS via floor(x + 0.5),
+            // then restore the sign of the original input with fcopysign so that
+            // `Math.round(-0.5)` returns -0 rather than +0 (JS preserves -0 for
+            // inputs in (-0.5, 0]).
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
             let val_f64 = ensure_f64(builder, val);
             let coerce_func = extern_funcs.get("js_number_coerce").ok_or_else(|| anyhow!("js_number_coerce not declared"))?;
@@ -1309,7 +1312,8 @@ pub(crate) fn compile_expr(
             let coerced = builder.inst_results(call)[0];
             let half = builder.ins().f64const(0.5);
             let plus_half = builder.ins().fadd(coerced, half);
-            Ok(builder.ins().floor(plus_half))
+            let rounded = builder.ins().floor(plus_half);
+            Ok(builder.ins().fcopysign(rounded, coerced))
         }
         Expr::MathAbs(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
@@ -15036,6 +15040,12 @@ pub(crate) fn compile_expr(
                 } else if let Expr::Call { .. } = object.as_ref() {
                     // Call result (e.g., stmt.all().length, str.split().length) - the result
                     // could be an array, so use dynamic length handling
+                    true
+                } else if let Expr::IndexGet { .. } = object.as_ref() {
+                    // Index access result (e.g., groups["a"].length where groups is
+                    // Record<string, T[]>) - the retrieved value could be an array, so
+                    // use dynamic length handling which unboxes the NaN-boxed pointer
+                    // and reads the ArrayHeader length.
                     true
                 } else {
                     false
