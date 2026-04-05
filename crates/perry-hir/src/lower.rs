@@ -3576,7 +3576,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         }
                                         "from" => {
                                             let value = args.get(0).cloned().unwrap_or(Expr::Undefined);
-                                            return Ok(Expr::ArrayFrom(Box::new(value)));
+                                            let array_from = Expr::ArrayFrom(Box::new(value));
+                                            // `Array.from(iterable, mapFn)` desugars to
+                                            // ArrayMap { array: ArrayFrom(iterable), callback: mapFn }
+                                            if let Some(map_fn) = args.get(1).cloned() {
+                                                return Ok(Expr::ArrayMap {
+                                                    array: Box::new(array_from),
+                                                    callback: Box::new(map_fn),
+                                                });
+                                            }
+                                            return Ok(array_from);
                                         }
                                         _ => {} // Fall through to generic handling
                                     }

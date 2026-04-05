@@ -1153,6 +1153,62 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_array_sort_with_comparator"), func_id);
         }
 
+        // js_array_sort_default(arr: *mut ArrayHeader) -> *mut ArrayHeader
+        // Lexicographic string sort per JS semantics when no comparator is given.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // same array pointer
+            let func_id = self.module.declare_function(
+                "js_array_sort_default",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_sort_default"), func_id);
+        }
+
+        // js_array_reverse(arr: *mut ArrayHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // same array pointer (in-place)
+            let func_id = self.module.declare_function(
+                "js_array_reverse",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_reverse"), func_id);
+        }
+
+        // js_array_fill(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::F64)); // fill value (NaN-boxed JSValue)
+            sig.returns.push(AbiParam::new(types::I64)); // same array pointer (in-place)
+            let func_id = self.module.declare_function(
+                "js_array_fill",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_fill"), func_id);
+        }
+
+        // js_array_concat_new(a: *const ArrayHeader, b: *const ArrayHeader) -> *mut ArrayHeader
+        // JS semantics: creates a NEW array; neither input is mutated.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // first array pointer
+            sig.params.push(AbiParam::new(types::I64)); // second array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_concat_new",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_concat_new"), func_id);
+        }
+
         // js_array_filter(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();

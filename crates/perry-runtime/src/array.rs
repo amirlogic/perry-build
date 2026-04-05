@@ -701,6 +701,120 @@ pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeade
     }
 }
 
+/// JS-semantic `Array.prototype.concat`: returns a NEW array with the
+/// elements of both `arr` and `other`. Neither input is mutated. This is
+/// what users get when they call `a.concat(b)`. `js_array_concat` above
+/// mutates its first argument and is reserved for the internal
+/// push-spread desugaring path.
+#[no_mangle]
+pub extern "C" fn js_array_concat_new(arr: *const ArrayHeader, other: *const ArrayHeader) -> *mut ArrayHeader {
+    let a = clean_arr_ptr(arr);
+    let b = clean_arr_ptr(other);
+    unsafe {
+        let a_len = if a.is_null() { 0 } else { (*a).length };
+        let b_len = if b.is_null() { 0 } else { (*b).length };
+        let total = a_len + b_len;
+
+        let mut result = js_array_alloc(total);
+        if !a.is_null() && a_len > 0 {
+            let src = (a as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+            for i in 0..a_len as usize {
+                result = js_array_push_f64(result, *src.add(i));
+            }
+        }
+        if !b.is_null() && b_len > 0 {
+            let src = (b as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+            for i in 0..b_len as usize {
+                result = js_array_push_f64(result, *src.add(i));
+            }
+        }
+        result
+    }
+}
+
+/// `Array.prototype.reverse` — reverses in place and returns the same pointer.
+#[no_mangle]
+pub extern "C" fn js_array_reverse(arr: *mut ArrayHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return arr; }
+    unsafe {
+        let len = (*arr).length as usize;
+        if len <= 1 { return arr; }
+        let elements = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        let mut i = 0usize;
+        let mut j = len - 1;
+        while i < j {
+            let tmp = *elements.add(i);
+            *elements.add(i) = *elements.add(j);
+            *elements.add(j) = tmp;
+            i += 1;
+            j -= 1;
+        }
+        arr
+    }
+}
+
+/// `Array.prototype.fill(value)` — fills every element (0..length) with
+/// `value`. Returns the same array pointer.
+#[no_mangle]
+pub extern "C" fn js_array_fill(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return arr; }
+    unsafe {
+        let len = (*arr).length as usize;
+        if len == 0 { return arr; }
+        let elements = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        for i in 0..len {
+            *elements.add(i) = value;
+        }
+        arr
+    }
+}
+
+/// `Array.prototype.sort()` — default sort with no comparator. Per JS
+/// semantics, elements are converted to strings and compared
+/// lexicographically. Sorts in place and returns the same array pointer.
+#[no_mangle]
+pub extern "C" fn js_array_sort_default(arr: *mut ArrayHeader) -> *mut ArrayHeader {
+    use crate::value::js_jsvalue_to_string;
+    use crate::string::StringHeader;
+    unsafe {
+        let arr = clean_arr_ptr(arr as *const ArrayHeader) as *mut ArrayHeader;
+        if arr.is_null() { return arr; }
+        let length = (*arr).length as usize;
+        if length <= 1 { return arr; }
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+
+        // Materialize each element as an owned Rust `String` while keeping the
+        // original f64 bits. Using strings (not pointer equality) guarantees
+        // correct ordering for numbers, NaN-boxed strings, booleans, null and
+        // undefined — matching JS default sort semantics.
+        let mut pairs: Vec<(String, f64)> = Vec::with_capacity(length);
+        for i in 0..length {
+            let val = *elements_ptr.add(i);
+            let str_ptr = js_jsvalue_to_string(val);
+            let s = if str_ptr.is_null() {
+                String::new()
+            } else {
+                let header = &*(str_ptr as *const StringHeader);
+                let bytes_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let slice = std::slice::from_raw_parts(bytes_ptr, header.length as usize);
+                std::str::from_utf8(slice).unwrap_or("").to_string()
+            };
+            pairs.push((s, val));
+        }
+
+        // Stable lexicographic sort on the string keys.
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (i, (_, val)) in pairs.into_iter().enumerate() {
+            *elements_ptr.add(i) = val;
+        }
+
+        arr
+    }
+}
+
 /// Flatten an array of arrays into a single array (depth=1).
 /// For each element: if it's an array pointer (NaN-boxed with POINTER_TAG or raw pointer),
 /// append all its elements; otherwise append the element directly.
@@ -1278,11 +1392,16 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
 }
 
 /// Check if a value is an array (Array.isArray)
-/// Returns 1.0 if the value is an array, 0.0 otherwise
+/// Returns a NaN-boxed TAG_TRUE/TAG_FALSE JS boolean per JS semantics.
 #[no_mangle]
 pub extern "C" fn js_array_is_array(value: f64) -> f64 {
     use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_TYPE_ARRAY};
     use crate::value::JSValue;
+
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    let false_val = f64::from_bits(TAG_FALSE);
+    let true_val = f64::from_bits(TAG_TRUE);
 
     let bits = value.to_bits();
     let jsvalue = JSValue::from_bits(bits);
@@ -1297,21 +1416,21 @@ pub extern "C" fn js_array_is_array(value: f64) -> f64 {
         if upper == 0 && (raw & 0x0000_FFFF_FFFF_FFFF) > 0x10000 {
             raw as *const u8
         } else {
-            return 0.0;
+            return false_val;
         }
     };
 
     if raw_ptr.is_null() {
-        return 0.0;
+        return false_val;
     }
 
     // Check the GC header's obj_type to confirm this is an array
     unsafe {
         let gc_header = raw_ptr.sub(GC_HEADER_SIZE) as *const GcHeader;
         if (*gc_header).obj_type == GC_TYPE_ARRAY {
-            1.0
+            true_val
         } else {
-            0.0
+            false_val
         }
     }
 }

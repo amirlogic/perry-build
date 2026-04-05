@@ -11046,6 +11046,123 @@ pub(crate) fn compile_expr(
                                 let call = builder.ins().call(func_ref, &[arr_ptr, cmp_ptr]);
                                 let result = builder.inst_results(call)[0];
                                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result));
+                            } else {
+                                // arr.sort() with no comparator — JS default: stringify-and-compare.
+                                // Only dispatch when we know the receiver is an array; otherwise fall through.
+                                let is_arr = match object.as_ref() {
+                                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array && !i.is_string).unwrap_or(false),
+                                    Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
+                                    Expr::Call { callee, .. } => matches!(callee.as_ref(), Expr::PropertyGet { property: p, .. }
+                                        if matches!(p.as_str(), "split" | "map" | "filter" | "concat" | "flat" | "flatMap" | "reverse" | "sort" | "slice" | "toSorted" | "toReversed" | "with")),
+                                    _ => false,
+                                };
+                                if is_arr {
+                                    let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                    let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                        let c = builder.ins().call(get_ptr_ref, &[arr_val]);
+                                        builder.inst_results(c)[0]
+                                    } else { arr_val };
+                                    let func = extern_funcs.get("js_array_sort_default")
+                                        .ok_or_else(|| anyhow!("js_array_sort_default not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                    let result = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_pointer(builder, result));
+                                }
+                            }
+                        }
+                        "reverse" => {
+                            // arr.reverse() — in-place; returns the same array
+                            let is_arr = match object.as_ref() {
+                                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array && !i.is_string).unwrap_or(false),
+                                Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
+                                Expr::Call { callee, .. } => matches!(callee.as_ref(), Expr::PropertyGet { property: p, .. }
+                                    if matches!(p.as_str(), "split" | "map" | "filter" | "concat" | "flat" | "flatMap" | "reverse" | "sort" | "slice" | "toSorted" | "toReversed" | "with")),
+                                _ => false,
+                            };
+                            if is_arr {
+                                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let c = builder.ins().call(get_ptr_ref, &[arr_val]);
+                                    builder.inst_results(c)[0]
+                                } else { arr_val };
+                                let func = extern_funcs.get("js_array_reverse")
+                                    .ok_or_else(|| anyhow!("js_array_reverse not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                let result = builder.inst_results(call)[0];
+                                return Ok(inline_nanbox_pointer(builder, result));
+                            }
+                        }
+                        "fill" => {
+                            // arr.fill(value) — only dispatch when receiver is an array (buffer .fill is handled earlier)
+                            let is_arr = match object.as_ref() {
+                                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array && !i.is_buffer).unwrap_or(false),
+                                Expr::Array(_) | Expr::ArraySpread(_) => true,
+                                Expr::Call { callee, .. } => matches!(callee.as_ref(), Expr::PropertyGet { property: p, .. }
+                                    if matches!(p.as_str(), "map" | "filter" | "concat" | "flat" | "flatMap" | "reverse" | "sort" | "slice" | "toSorted" | "toReversed" | "with")),
+                                _ => false,
+                            };
+                            if is_arr && !arg_vals.is_empty() {
+                                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let c = builder.ins().call(get_ptr_ref, &[arr_val]);
+                                    builder.inst_results(c)[0]
+                                } else { arr_val };
+                                let fill_val = ensure_f64(builder, arg_vals[0]);
+                                let func = extern_funcs.get("js_array_fill")
+                                    .ok_or_else(|| anyhow!("js_array_fill not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[arr_ptr, fill_val]);
+                                let result = builder.inst_results(call)[0];
+                                return Ok(inline_nanbox_pointer(builder, result));
+                            }
+                        }
+                        "concat" => {
+                            // arr.concat(other) — returns a new array (does NOT mutate inputs).
+                            // Only dispatch when receiver is known to be an array; strings use `+`
+                            // for concat so they should not reach here, but guard anyway.
+                            let is_arr = match object.as_ref() {
+                                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array && !i.is_string).unwrap_or(false),
+                                Expr::Array(_) | Expr::ArraySpread(_) => true,
+                                Expr::Call { callee, .. } => matches!(callee.as_ref(), Expr::PropertyGet { property: p, .. }
+                                    if matches!(p.as_str(), "map" | "filter" | "concat" | "flat" | "flatMap" | "reverse" | "sort" | "slice" | "toSorted" | "toReversed" | "with")),
+                                _ => false,
+                            };
+                            if is_arr && !arg_vals.is_empty() {
+                                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                    let c = builder.ins().call(get_ptr_ref, &[arr_val]);
+                                    builder.inst_results(c)[0]
+                                } else { arr_val };
+                                let other_ptr = {
+                                    let v = arg_vals[0];
+                                    if builder.func.dfg.value_type(v) == types::F64 {
+                                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                        let c = builder.ins().call(get_ptr_ref, &[v]);
+                                        builder.inst_results(c)[0]
+                                    } else { v }
+                                };
+                                let func = extern_funcs.get("js_array_concat_new")
+                                    .ok_or_else(|| anyhow!("js_array_concat_new not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[arr_ptr, other_ptr]);
+                                let result = builder.inst_results(call)[0];
+                                return Ok(inline_nanbox_pointer(builder, result));
                             }
                         }
                         "includes" => {
@@ -15104,10 +15221,11 @@ pub(crate) fn compile_expr(
                     // could be an array, so use dynamic length handling
                     true
                 } else if let Expr::IndexGet { .. } = object.as_ref() {
-                    // Index access result (e.g., groups["a"].length where groups is
-                    // Record<string, T[]>) - the retrieved value could be an array, so
-                    // use dynamic length handling which unboxes the NaN-boxed pointer
-                    // and reads the ArrayHeader length.
+                    // Index-access result (e.g., groups["a"].length where groups is
+                    // Record<string, T[]>, or matrix[i].length for nested arrays) —
+                    // the retrieved value could itself be an array, so use dynamic
+                    // length handling which unboxes the NaN-boxed pointer and reads
+                    // the ArrayHeader length.
                     true
                 } else {
                     false
