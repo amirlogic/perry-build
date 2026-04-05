@@ -845,7 +845,23 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
         let ptr = jsval.as_bigint_ptr();
         crate::bigint::js_bigint_to_string(ptr)
     } else if jsval.is_pointer() {
-        // Object/array - return "[object Object]" for now
+        // Pointer: could be an array, object, or other heap type. Arrays
+        // stringify via `Array.prototype.join(",")` per JS semantics; other
+        // objects fall back to "[object Object]".
+        let ptr: *const u8 = jsval.as_pointer();
+        if !ptr.is_null() && (ptr as usize) >= 0x10000 {
+            unsafe {
+                let gc_header = ptr.sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+                if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+                    // Use js_array_join with a "," separator to match Array.prototype.toString.
+                    let sep = crate::string::js_string_from_bytes(b",".as_ptr(), 1);
+                    return crate::array::js_array_join(
+                        ptr as *const crate::array::ArrayHeader,
+                        sep as *const crate::string::StringHeader,
+                    );
+                }
+            }
+        }
         crate::string::js_string_from_bytes(b"[object Object]".as_ptr(), 15)
     } else {
         // Regular number - use js_number_to_string

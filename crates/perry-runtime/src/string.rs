@@ -413,6 +413,36 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
     }
 }
 
+/// Find the last index of a substring (-1 if not found).
+/// Matches JS `String.prototype.lastIndexOf(searchValue)` semantics: returns the
+/// byte offset of the LAST occurrence of `needle` in `haystack`, or -1 if not found.
+/// An empty needle returns `haystack.length`.
+#[no_mangle]
+pub extern "C" fn js_string_last_index_of(haystack: *const StringHeader, needle: *const StringHeader) -> i32 {
+    if !is_valid_string_ptr(haystack) {
+        return -1;
+    }
+    // If needle is invalid (null), treat as empty string (JS coerces undefined to "undefined", but
+    // an empty string matches at every position and the last match is at haystack.length).
+    if !is_valid_string_ptr(needle) {
+        let h = string_as_str(haystack);
+        return h.len() as i32;
+    }
+
+    let h = string_as_str(haystack);
+    let n = string_as_str(needle);
+
+    // Empty needle: per JS spec, returns the haystack length.
+    if n.is_empty() {
+        return h.len() as i32;
+    }
+
+    match h.rfind(n) {
+        Some(pos) => pos as i32,
+        None => -1,
+    }
+}
+
 /// Compare two strings lexicographically.
 /// Returns -1 if a < b, 0 if a == b, 1 if a > b.
 #[no_mangle]

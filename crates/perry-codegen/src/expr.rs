@@ -5287,12 +5287,26 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // Check if an expression is an array being used in string concatenation.
+            // Arrays need to be stringified via `Array.prototype.join(",")` per JS semantics.
+            fn is_array_operand_for_concat(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::Array(_) | Expr::ArraySpread(_) => true,
+                    Expr::LocalGet(id) => {
+                        locals.get(id).map(|i| i.is_array && !i.is_string && !i.is_union).unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            }
+
             let is_string_left = is_string_operand(left, locals);
             let is_string_right = is_string_operand(right, locals);
             let is_nanboxed_left = is_nanboxed_string_operand(left, locals);
             let is_nanboxed_right = is_nanboxed_string_operand(right, locals);
             let is_union_left = is_union_operand(left, locals);
             let is_union_right = is_union_operand(right, locals);
+            let is_array_left = is_array_operand_for_concat(left, locals);
+            let is_array_right = is_array_operand_for_concat(right, locals);
 
             if matches!(op, BinaryOp::Add) && (is_string_left || is_string_right) {
                 // String concatenation
@@ -5300,7 +5314,44 @@ pub(crate) fn compile_expr(
                 let rhs_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
 
                 // Convert non-string values to strings
-                let lhs_ptr = if is_nanboxed_left {
+                let lhs_ptr = if is_array_left {
+                    // Array operand - stringify via Array.prototype.join(",")
+                    // `js_array_join` takes a raw i64 array pointer, so extract it if the
+                    // value is NaN-boxed as a pointer (f64) or use the raw i64 directly.
+                    let lhs_type = builder.func.dfg.value_type(lhs_val);
+                    let arr_ptr = if lhs_type == types::I64 {
+                        lhs_val
+                    } else {
+                        // NaN-boxed pointer - extract via js_nanbox_get_pointer
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let val_f64 = ensure_f64(builder, lhs_val);
+                        let call = builder.ins().call(get_ptr_ref, &[val_f64]);
+                        builder.inst_results(call)[0]
+                    };
+                    // Build a "," separator string on the stack (literals in the compiler's
+                    // address space cannot be referenced from the compiled program).
+                    let sep_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        1,
+                        0,
+                    ));
+                    let comma_byte = builder.ins().iconst(types::I8, b',' as i64);
+                    builder.ins().stack_store(comma_byte, sep_slot, 0);
+                    let sep_addr = builder.ins().stack_addr(types::I64, sep_slot, 0);
+                    let sep_len = builder.ins().iconst(types::I32, 1);
+                    let from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                        .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                    let from_bytes_ref = module.declare_func_in_func(*from_bytes_func, builder.func);
+                    let sep_call = builder.ins().call(from_bytes_ref, &[sep_addr, sep_len]);
+                    let sep_ptr = builder.inst_results(sep_call)[0];
+                    let join_func = extern_funcs.get("js_array_join")
+                        .ok_or_else(|| anyhow!("js_array_join not declared"))?;
+                    let join_ref = module.declare_func_in_func(*join_func, builder.func);
+                    let join_call = builder.ins().call(join_ref, &[arr_ptr, sep_ptr]);
+                    builder.inst_results(join_call)[0]
+                } else if is_nanboxed_left {
                     // NaN-boxed string (from Conditional) - extract the raw pointer (inline, no FFI)
                     let val_f64 = ensure_f64(builder, lhs_val);
                     inline_get_string_pointer(builder, val_f64)
@@ -5357,7 +5408,40 @@ pub(crate) fn compile_expr(
                     }
                 };
 
-                let rhs_ptr = if is_nanboxed_right {
+                let rhs_ptr = if is_array_right {
+                    // Array operand - stringify via Array.prototype.join(",")
+                    let rhs_type = builder.func.dfg.value_type(rhs_val);
+                    let arr_ptr = if rhs_type == types::I64 {
+                        rhs_val
+                    } else {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let val_f64 = ensure_f64(builder, rhs_val);
+                        let call = builder.ins().call(get_ptr_ref, &[val_f64]);
+                        builder.inst_results(call)[0]
+                    };
+                    // Build a "," separator string on the stack.
+                    let sep_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        1,
+                        0,
+                    ));
+                    let comma_byte = builder.ins().iconst(types::I8, b',' as i64);
+                    builder.ins().stack_store(comma_byte, sep_slot, 0);
+                    let sep_addr = builder.ins().stack_addr(types::I64, sep_slot, 0);
+                    let sep_len = builder.ins().iconst(types::I32, 1);
+                    let from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                        .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                    let from_bytes_ref = module.declare_func_in_func(*from_bytes_func, builder.func);
+                    let sep_call = builder.ins().call(from_bytes_ref, &[sep_addr, sep_len]);
+                    let sep_ptr = builder.inst_results(sep_call)[0];
+                    let join_func = extern_funcs.get("js_array_join")
+                        .ok_or_else(|| anyhow!("js_array_join not declared"))?;
+                    let join_ref = module.declare_func_in_func(*join_func, builder.func);
+                    let join_call = builder.ins().call(join_ref, &[arr_ptr, sep_ptr]);
+                    builder.inst_results(join_call)[0]
+                } else if is_nanboxed_right {
                     // NaN-boxed string (from Conditional) - extract the raw pointer
                     // Inline extract pointer from NaN-boxed string (no FFI)
                     let val_f64 = ensure_f64(builder, rhs_val);
@@ -8805,6 +8889,25 @@ pub(crate) fn compile_expr(
                                         let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
                                         return Ok(result_f64);
                                     }
+                                    "lastIndexOf" => {
+                                        // str.lastIndexOf(needle)
+                                        // Extract needle string pointer from NaN-boxed value
+                                        let needle_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                                        let needle_ptr = builder.inst_results(needle_call)[0];
+
+                                        let last_index_of_func = extern_funcs.get("js_string_last_index_of")
+                                            .ok_or_else(|| anyhow!("js_string_last_index_of not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*last_index_of_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
+                                        let result_i32 = builder.inst_results(call)[0];
+                                        // Convert i32 to f64
+                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
+                                        return Ok(result_f64);
+                                    }
                                     "split" => {
                                         // str.split(delimiter)
                                         let split_func = extern_funcs.get("js_string_split")
@@ -10382,7 +10485,7 @@ pub(crate) fn compile_expr(
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
-                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "includes" | "split" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "lastIndexOf" | "includes" | "split" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                             // Compile the object expression to get a string value
                             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -10498,6 +10601,25 @@ pub(crate) fn compile_expr(
                                             let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
                                             builder.inst_results(call)[0]
                                         };
+                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
+                                        return Ok(result_f64);
+                                    }
+                                }
+                                "lastIndexOf" => {
+                                    if !arg_vals.is_empty() {
+                                        // Extract needle string pointer from NaN-boxed value
+                                        let needle_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                                        let needle_ptr = builder.inst_results(needle_call)[0];
+
+                                        let last_index_of_func = extern_funcs.get("js_string_last_index_of")
+                                            .ok_or_else(|| anyhow!("js_string_last_index_of not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*last_index_of_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
+                                        let result_i32 = builder.inst_results(call)[0];
                                         let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
                                         return Ok(result_f64);
                                     }

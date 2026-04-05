@@ -1884,6 +1884,20 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_index_of_from"), func_id);
         }
 
+        // js_string_last_index_of(haystack: *const StringHeader, needle: *const StringHeader) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // haystack pointer
+            sig.params.push(AbiParam::new(types::I64)); // needle pointer
+            sig.returns.push(AbiParam::new(types::I32)); // index or -1
+            let func_id = self.module.declare_function(
+                "js_string_last_index_of",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_last_index_of"), func_id);
+        }
+
         // js_string_split(s: *const StringHeader, delimiter: *const StringHeader) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();

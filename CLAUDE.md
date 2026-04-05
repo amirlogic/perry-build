@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.51
+**Current Version:** 0.4.52
 
 ## Workflow Requirements
 
@@ -148,6 +148,8 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - fix: `for (const ch of "hello")` produced garbage — ForOf lowering now detects string iterables via new `is_ast_string_expr` helper in `perry-hir/src/lower.rs`; typing the internal `__arr` holder as `Type::String` routes `__arr.length` and `__arr[__idx]` through the existing `is_string_object_expr` codegen path that calls `js_string_char_at` and NaN-boxes the 1-char result.
 - fix: `[..."hello"]` array spread produced garbage — `ArrayElement::Spread` codegen in `perry-codegen/src/expr.rs` now detects string spread sources (`is_string_spread_expr`) and iterates `StringHeader.length` via `js_string_char_at` instead of `js_array_get_f64`.
 - fix: object spread override semantics — `{...base, x: 10}` now correctly returns `10` for `x` (previously returned `base.x` because `js_object_clone_with_extra` added the static key as a duplicate entry in `keys_array`, and the linear scan returned the first match). Runtime `js_object_clone_with_extra` now reserves scratch slot capacity only; codegen routes static props through `js_object_set_field_by_name` (find-or-append with overwrite). Multi-spread `{...a, ...b}` supported via new `js_object_copy_own_fields` runtime helper. Also fixed latent `field_count=0` bump bug in `js_object_set_field_by_name`.
+- feat: `String.prototype.lastIndexOf(needle)` — new `js_string_last_index_of` runtime function (uses `str::rfind`), wired through `runtime_decls.rs` and dispatched in both the LocalGet-string and generic string-method paths of expr.rs; returns f64 index or -1.
+- fix: `"str " + array` printed `[object Object]` instead of the joined contents — string-concat codegen now detects `Expr::Array`/`is_array` LocalGet operands and routes them through `js_array_join` with a `,` separator per JS `Array.prototype.toString` semantics; `js_jsvalue_to_string` also learns to detect arrays via the `GcHeader.obj_type` so other stringification paths get the same behavior for free. Makes `test_edge_strings` pass full Node.js parity.
 
 ### v0.4.51
 
