@@ -1549,6 +1549,11 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             // Desugar for-of to a regular for loop (same as in lower_stmt).
             // Push a block scope so loop variables and internal temporaries don't leak.
             let for_scope_mark = ctx.push_block_scope();
+
+            // Detect string iteration BEFORE lowering — each iteration yields a
+            // 1-char string via str[i] rather than an array element.
+            let is_string_iter = crate::lower::is_ast_string_expr(ctx, &for_of_stmt.right);
+
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
 
             // If the iterable is a Map, wrap in MapEntries to convert to array
@@ -1566,23 +1571,32 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 arr_expr
             };
 
+            // For string iteration the __arr holder is typed as String (so codegen
+            // uses string.length + js_string_char_at via the existing str[i] path).
+            let holder_type = if is_string_iter {
+                Type::String
+            } else {
+                Type::Array(Box::new(Type::Any))
+            };
+            let item_hir_type = if is_string_iter { Type::String } else { Type::Any };
+
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();
-            ctx.locals.push((format!("__arr_{}", arr_id), arr_id, Type::Array(Box::new(Type::Any))));
+            ctx.locals.push((format!("__arr_{}", arr_id), arr_id, holder_type.clone()));
             ctx.locals.push((format!("__idx_{}", idx_id), idx_id, Type::Number));
 
             // Store array reference
             result.push(Stmt::Let {
                 id: arr_id,
                 name: format!("__arr_{}", arr_id),
-                ty: Type::Array(Box::new(Type::Any)),
+                ty: holder_type.clone(),
                 mutable: false,
                 init: Some(arr_expr),
             });
 
             // IMPORTANT: Define iteration variables BEFORE lowering the body
             let item_id = ctx.fresh_local();
-            ctx.locals.push((format!("__item_{}", item_id), item_id, Type::Any));
+            ctx.locals.push((format!("__item_{}", item_id), item_id, item_hir_type.clone()));
 
             // Pre-define all variables from the pattern
             let var_ids: Vec<(String, u32)> = match &for_of_stmt.left {
@@ -1591,7 +1605,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                         match &decl.name {
                             ast::Pat::Ident(ident) => {
                                 let name = ident.id.sym.to_string();
-                                let id = ctx.define_local(name.clone(), Type::Any);
+                                let id = ctx.define_local(name.clone(), item_hir_type.clone());
                                 vec![(name, id)]
                             }
                             ast::Pat::Array(arr_pat) => {
@@ -1664,7 +1678,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                                 vec![Stmt::Let {
                                     id,
                                     name,
-                                    ty: Type::Any,
+                                    ty: item_hir_type.clone(),
                                     mutable: false,
                                     init: Some(item_expr),
                                 }]

@@ -15395,67 +15395,162 @@ pub(crate) fn compile_expr(
                         builder.def_var(arr_var, new_arr_ptr);
                     }
                     ArrayElement::Spread(spread_expr) => {
-                        // Spread element - iterate over source array and push each element
-                        let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                        let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+                        // Detect string spread: [..."hello"] should iterate character-by-character,
+                        // not element-by-element. Each char becomes a 1-char NaN-boxed string.
+                        fn is_string_spread_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            match expr {
+                                Expr::String(_) => true,
+                                Expr::StringFromCharCode(_) => true,
+                                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                Expr::StringCoerce(_) => true,
+                                // String concatenation produces a string
+                                Expr::Binary { op: BinaryOp::Add, left, right } => {
+                                    is_string_spread_expr(left, locals) || is_string_spread_expr(right, locals)
+                                }
+                                // String methods that return strings
+                                Expr::Call { callee, .. } => {
+                                    if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                                        matches!(property.as_str(),
+                                            "charAt" | "slice" | "substring" | "substr" | "trim" |
+                                            "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
+                                            "replace" | "replaceAll" | "padStart" | "padEnd" |
+                                            "repeat" | "normalize" | "toString" |
+                                            "toLocaleLowerCase" | "toLocaleUpperCase"
+                                        )
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            }
+                        }
 
-                        // Use unchecked for known plain arrays (skips buffer/set/map checks)
-                        let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
-                        let get_func = extern_funcs.get(get_func_name)
-                            .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
-                        let get_ref = module.declare_func_in_func(*get_func, builder.func);
+                        if is_string_spread_expr(spread_expr, locals) {
+                            // String spread: iterate over characters via js_string_char_at.
+                            let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
 
-                        // Get length of spread array (inline load: ArrayHeader.length at offset 0)
-                        let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
+                            // Extract raw string pointer (handles both raw i64 and NaN-boxed f64).
+                            let str_f64 = ensure_f64(builder, str_val);
+                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            let call = builder.ins().call(get_str_ptr_ref, &[str_f64]);
+                            let str_ptr = builder.inst_results(call)[0];
 
-                        // Create loop to iterate over spread array
-                        let loop_header = builder.create_block();
-                        let loop_body = builder.create_block();
-                        let loop_exit = builder.create_block();
+                            // StringHeader.length is u32 at offset 0 (same layout slot as ArrayHeader.length).
+                            let str_len = builder.ins().load(types::I32, MemFlags::new(), str_ptr, 0);
 
-                        // Initialize loop counter
-                        let idx_var = Variable::new(next_temp_var_id());
-                        builder.declare_var(idx_var, types::I32);
-                        let zero = builder.ins().iconst(types::I32, 0);
-                        builder.def_var(idx_var, zero);
+                            let char_at_func = extern_funcs.get("js_string_char_at")
+                                .ok_or_else(|| anyhow!("js_string_char_at not declared"))?;
+                            let char_at_ref = module.declare_func_in_func(*char_at_func, builder.func);
+                            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
 
-                        // Jump to loop header
-                        builder.ins().jump(loop_header, &[]);
+                            let loop_header = builder.create_block();
+                            let loop_body_blk = builder.create_block();
+                            let loop_exit = builder.create_block();
 
-                        // Loop header: check if idx < length
-                        builder.switch_to_block(loop_header);
-                        let idx = builder.use_var(idx_var);
-                        let cmp = builder.ins().icmp(IntCC::SignedLessThan, idx, spread_len);
-                        builder.ins().brif(cmp, loop_body, &[], loop_exit, &[]);
+                            let idx_var = Variable::new(next_temp_var_id());
+                            builder.declare_var(idx_var, types::I32);
+                            let zero = builder.ins().iconst(types::I32, 0);
+                            builder.def_var(idx_var, zero);
 
-                        // Loop body: get element and push it
-                        builder.switch_to_block(loop_body);
-                        let idx = builder.use_var(idx_var);
-                        let get_call = builder.ins().call(get_ref, &[spread_arr_ptr, idx]);
-                        let elem_val = builder.inst_results(get_call)[0];
+                            builder.ins().jump(loop_header, &[]);
 
-                        let arr_ptr = builder.use_var(arr_var);
-                        // js_array_get_f64 returns f64, so use push_f64
-                        let push_call = builder.ins().call(push_f64_ref, &[arr_ptr, elem_val]);
-                        let new_arr_ptr = builder.inst_results(push_call)[0];
-                        builder.def_var(arr_var, new_arr_ptr);
+                            builder.switch_to_block(loop_header);
+                            let idx = builder.use_var(idx_var);
+                            let cmp = builder.ins().icmp(IntCC::SignedLessThan, idx, str_len);
+                            builder.ins().brif(cmp, loop_body_blk, &[], loop_exit, &[]);
 
-                        // Increment counter
-                        let idx = builder.use_var(idx_var);
-                        let one = builder.ins().iconst(types::I32, 1);
-                        let next_idx = builder.ins().iadd(idx, one);
-                        builder.def_var(idx_var, next_idx);
+                            builder.switch_to_block(loop_body_blk);
+                            let idx = builder.use_var(idx_var);
+                            let ca_call = builder.ins().call(char_at_ref, &[str_ptr, idx]);
+                            let ch_ptr = builder.inst_results(ca_call)[0];
+                            // NaN-box the 1-char string so it is pushed as an f64 string value.
+                            let nb_call = builder.ins().call(nanbox_ref, &[ch_ptr]);
+                            let ch_f64 = builder.inst_results(nb_call)[0];
 
-                        // Jump back to header
-                        builder.ins().jump(loop_header, &[]);
+                            let arr_ptr = builder.use_var(arr_var);
+                            let push_call = builder.ins().call(push_f64_ref, &[arr_ptr, ch_f64]);
+                            let new_arr_ptr = builder.inst_results(push_call)[0];
+                            builder.def_var(arr_var, new_arr_ptr);
 
-                        // Seal the loop blocks now that all predecessors are known
-                        builder.seal_block(loop_header);
-                        builder.seal_block(loop_body);
-                        builder.seal_block(loop_exit);
+                            let idx = builder.use_var(idx_var);
+                            let one = builder.ins().iconst(types::I32, 1);
+                            let next_idx = builder.ins().iadd(idx, one);
+                            builder.def_var(idx_var, next_idx);
 
-                        // Continue after loop
-                        builder.switch_to_block(loop_exit);
+                            builder.ins().jump(loop_header, &[]);
+
+                            builder.seal_block(loop_header);
+                            builder.seal_block(loop_body_blk);
+                            builder.seal_block(loop_exit);
+
+                            builder.switch_to_block(loop_exit);
+                        } else {
+                            // Spread element - iterate over source array and push each element
+                            let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
+                            let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
+
+                            // Use unchecked for known plain arrays (skips buffer/set/map checks)
+                            let get_func_name = if is_known_plain_array_expr(spread_expr, locals) { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                            let get_func = extern_funcs.get(get_func_name)
+                                .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
+                            let get_ref = module.declare_func_in_func(*get_func, builder.func);
+
+                            // Get length of spread array (inline load: ArrayHeader.length at offset 0)
+                            let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
+
+                            // Create loop to iterate over spread array
+                            let loop_header = builder.create_block();
+                            let loop_body = builder.create_block();
+                            let loop_exit = builder.create_block();
+
+                            // Initialize loop counter
+                            let idx_var = Variable::new(next_temp_var_id());
+                            builder.declare_var(idx_var, types::I32);
+                            let zero = builder.ins().iconst(types::I32, 0);
+                            builder.def_var(idx_var, zero);
+
+                            // Jump to loop header
+                            builder.ins().jump(loop_header, &[]);
+
+                            // Loop header: check if idx < length
+                            builder.switch_to_block(loop_header);
+                            let idx = builder.use_var(idx_var);
+                            let cmp = builder.ins().icmp(IntCC::SignedLessThan, idx, spread_len);
+                            builder.ins().brif(cmp, loop_body, &[], loop_exit, &[]);
+
+                            // Loop body: get element and push it
+                            builder.switch_to_block(loop_body);
+                            let idx = builder.use_var(idx_var);
+                            let get_call = builder.ins().call(get_ref, &[spread_arr_ptr, idx]);
+                            let elem_val = builder.inst_results(get_call)[0];
+
+                            let arr_ptr = builder.use_var(arr_var);
+                            // js_array_get_f64 returns f64, so use push_f64
+                            let push_call = builder.ins().call(push_f64_ref, &[arr_ptr, elem_val]);
+                            let new_arr_ptr = builder.inst_results(push_call)[0];
+                            builder.def_var(arr_var, new_arr_ptr);
+
+                            // Increment counter
+                            let idx = builder.use_var(idx_var);
+                            let one = builder.ins().iconst(types::I32, 1);
+                            let next_idx = builder.ins().iadd(idx, one);
+                            builder.def_var(idx_var, next_idx);
+
+                            // Jump back to header
+                            builder.ins().jump(loop_header, &[]);
+
+                            // Seal the loop blocks now that all predecessors are known
+                            builder.seal_block(loop_header);
+                            builder.seal_block(loop_body);
+                            builder.seal_block(loop_exit);
+
+                            // Continue after loop
+                            builder.switch_to_block(loop_exit);
+                        }
                     }
                 }
             }

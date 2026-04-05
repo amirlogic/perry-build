@@ -1983,6 +1983,10 @@ fn lower_stmt(
             // Push a block scope so loop variables and internal temporaries don't leak.
             let for_scope_mark = ctx.push_block_scope();
 
+            // Detect string iteration BEFORE lowering (so we can use the AST-level type info).
+            // for (const ch of "hello") — each iteration yields a 1-char string via str[i].
+            let is_string_iter = is_ast_string_expr(ctx, &for_of_stmt.right);
+
             // Lower the iterable expression (the array)
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
 
@@ -2014,13 +2018,21 @@ fn lower_stmt(
                 arr_expr
             };
 
-            // Determine the array element type: Tuple(K, V) for Maps, Any otherwise
-            let elem_type = if let (Some(ref k), Some(ref v)) = (&map_key_type, &map_val_type) {
+            // Determine the array element type: String for strings, Tuple(K, V) for Maps, Any otherwise.
+            let elem_type = if is_string_iter {
+                Type::String
+            } else if let (Some(ref k), Some(ref v)) = (&map_key_type, &map_val_type) {
                 Type::Tuple(vec![k.clone(), v.clone()])
             } else {
                 Type::Any
             };
-            let arr_type = Type::Array(Box::new(elem_type.clone()));
+            // The __arr holder's type: String for string iteration (so codegen uses
+            // string.length and the str[i] char-access path), Array otherwise.
+            let arr_type = if is_string_iter {
+                Type::String
+            } else {
+                Type::Array(Box::new(elem_type.clone()))
+            };
 
             // Create internal variables for the array and index
             let arr_id = ctx.fresh_local();
@@ -7847,6 +7859,64 @@ fn prop_name_to_string(name: &ast::PropName) -> String {
         ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
         ast::PropName::Num(n) => format!("{}", n.value),
         _ => String::new(),
+    }
+}
+
+/// Detect whether an AST expression statically produces a string value.
+///
+/// Used to specialize `for...of` and array-spread lowering when the iterable is
+/// a string — in that case we need char-by-char iteration via `str[i]` rather
+/// than array-element access.
+pub(crate) fn is_ast_string_expr(ctx: &LoweringContext, expr: &ast::Expr) -> bool {
+    match expr {
+        // String literals: "hello"
+        ast::Expr::Lit(ast::Lit::Str(_)) => true,
+        // Template literals: `hello ${x}`
+        ast::Expr::Tpl(_) => true,
+        // String identifier: look up the declared type in the current scope
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.to_string();
+            matches!(ctx.lookup_local_type(&name), Some(Type::String))
+        }
+        // Parenthesized expression: recurse
+        ast::Expr::Paren(p) => is_ast_string_expr(ctx, &p.expr),
+        // Type assertions (`x as string`): check inner
+        ast::Expr::TsAs(ts_as) => {
+            if matches!(&*ts_as.type_ann,
+                ast::TsType::TsKeywordType(kw)
+                    if matches!(kw.kind, ast::TsKeywordTypeKind::TsStringKeyword))
+            {
+                return true;
+            }
+            is_ast_string_expr(ctx, &ts_as.expr)
+        }
+        ast::Expr::TsNonNull(nn) => is_ast_string_expr(ctx, &nn.expr),
+        ast::Expr::TsTypeAssertion(ta) => is_ast_string_expr(ctx, &ta.expr),
+        // String-returning method calls on string receivers
+        ast::Expr::Call(call) => {
+            if let ast::Callee::Expr(callee_expr) = &call.callee {
+                if let ast::Expr::Member(member) = callee_expr.as_ref() {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let prop = prop_ident.sym.as_ref();
+                        if matches!(prop,
+                            "charAt" | "slice" | "substring" | "substr" | "trim" |
+                            "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
+                            "replace" | "replaceAll" | "padStart" | "padEnd" |
+                            "repeat" | "normalize" | "concat" | "toString" |
+                            "toLocaleLowerCase" | "toLocaleUpperCase"
+                        ) {
+                            return is_ast_string_expr(ctx, &member.obj);
+                        }
+                    }
+                }
+            }
+            false
+        }
+        // String concatenation: "a" + x or x + "a"
+        ast::Expr::Bin(bin) if matches!(bin.op, ast::BinaryOp::Add) => {
+            is_ast_string_expr(ctx, &bin.left) || is_ast_string_expr(ctx, &bin.right)
+        }
+        _ => false,
     }
 }
 
