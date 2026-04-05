@@ -1505,6 +1505,20 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_map_foreach"), func_id);
         }
 
+        // js_map_from_array(arr: *const ArrayHeader) -> *mut MapHeader
+        // For `new Map([["k", v], ...])` construction
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer (array of [k,v] arrays)
+            sig.returns.push(AbiParam::new(types::I64)); // map pointer
+            let func_id = self.module.declare_function(
+                "js_map_from_array",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_map_from_array"), func_id);
+        }
+
         // Set runtime functions
         // js_set_alloc(capacity: u32) -> *mut SetHeader
         {
@@ -1611,6 +1625,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert(Cow::Borrowed("js_set_to_array"), func_id);
+        }
+
+        // js_set_foreach(set: *const SetHeader, callback: f64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // set pointer
+            sig.params.push(AbiParam::new(types::F64)); // callback (closure as f64)
+            let func_id = self.module.declare_function(
+                "js_set_foreach",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_set_foreach"), func_id);
         }
 
         // String runtime functions

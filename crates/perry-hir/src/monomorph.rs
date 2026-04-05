@@ -1176,6 +1176,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
 
         // Map operations
         Expr::MapNew => Expr::MapNew,
+        Expr::MapNewFromArray(expr) => Expr::MapNewFromArray(Box::new(substitute_expr(expr, substitutions))),
         Expr::MapSet { map, key, value } => Expr::MapSet {
             map: Box::new(substitute_expr(map, substitutions)),
             key: Box::new(substitute_expr(key, substitutions)),
@@ -1318,6 +1319,10 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         // Array.isArray / Array.from
         Expr::ArrayIsArray(value) => Expr::ArrayIsArray(Box::new(substitute_expr(value, substitutions))),
         Expr::ArrayFrom(value) => Expr::ArrayFrom(Box::new(substitute_expr(value, substitutions))),
+        Expr::ArrayFromMapped { iterable, map_fn } => Expr::ArrayFromMapped {
+            iterable: Box::new(substitute_expr(iterable, substitutions)),
+            map_fn: Box::new(substitute_expr(map_fn, substitutions)),
+        },
 
         // Global built-in functions
         Expr::ParseInt { string, radix } => Expr::ParseInt {
@@ -1932,6 +1937,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(code, ctx, module, idx);
         }
         Expr::MapNew => {}
+        Expr::MapNewFromArray(expr) => { collect_instantiations_in_expr(expr, ctx, module, idx); }
         Expr::MapSet { map, key, value } => {
             collect_instantiations_in_expr(map, ctx, module, idx);
             collect_instantiations_in_expr(key, ctx, module, idx);
@@ -2359,6 +2365,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(code, ctx, lookup);
         }
         Expr::MapNew => {}
+        Expr::MapNewFromArray(expr) => { update_call_sites_in_expr(expr, ctx, lookup); }
         Expr::MapSet { map, key, value } => {
             update_call_sites_in_expr(map, ctx, lookup);
             update_call_sites_in_expr(key, ctx, lookup);

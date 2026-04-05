@@ -1662,6 +1662,11 @@ impl JsEmitter {
 
             // --- Map operations ---
             Expr::MapNew => self.output.push_str("new Map()"),
+            Expr::MapNewFromArray(expr) => {
+                self.output.push_str("new Map(");
+                self.emit_expr(expr);
+                self.output.push_str(")");
+            }
             Expr::MapSet { map, key, value } => {
                 self.emit_expr(map);
                 self.output.push_str(".set(");
@@ -1972,6 +1977,13 @@ impl JsEmitter {
             Expr::ArrayFrom(val) => {
                 self.output.push_str("Array.from(");
                 self.emit_expr(val);
+                self.output.push(')');
+            }
+            Expr::ArrayFromMapped { iterable, map_fn } => {
+                self.output.push_str("Array.from(");
+                self.emit_expr(iterable);
+                self.output.push_str(", ");
+                self.emit_expr(map_fn);
                 self.output.push(')');
             }
 

@@ -803,7 +803,8 @@ impl crate::codegen::Compiler {
             }
             // Map/Set size, clear, and iterator operations
             Expr::MapSize(map) | Expr::MapClear(map) |
-            Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
+            Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) |
+            Expr::MapNewFromArray(map) => {
                 self.collect_closures_from_expr(map, closures, enclosing_class);
             }
             Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) |
@@ -859,6 +860,10 @@ impl crate::codegen::Compiler {
             // Array static methods
             Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
+            }
+            Expr::ArrayFromMapped { iterable, map_fn } => {
+                self.collect_closures_from_expr(iterable, closures, enclosing_class);
+                self.collect_closures_from_expr(map_fn, closures, enclosing_class);
             }
             // Global functions
             Expr::ParseFloat(s) | Expr::NumberCoerce(s) | Expr::BigIntCoerce(s) | Expr::StringCoerce(s) |

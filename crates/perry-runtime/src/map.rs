@@ -412,6 +412,48 @@ pub extern "C" fn js_map_values(map: *const MapHeader) -> *mut crate::array::Arr
     }
 }
 
+/// Create a new Map from an array of [key, value] pair arrays.
+/// Used for `new Map([["a", 1], ["b", 2]])` construction.
+#[no_mangle]
+pub extern "C" fn js_map_from_array(arr: *const crate::array::ArrayHeader) -> *mut MapHeader {
+    let map = js_map_alloc(4);
+    if arr.is_null() {
+        return map;
+    }
+    unsafe {
+        let len = crate::array::js_array_length(arr);
+        for i in 0..len {
+            // Each entry must itself be a 2-element array [key, value].
+            // Array elements are stored as f64 NaN-boxed values; nested arrays
+            // come through as POINTER_TAG-boxed f64 values.
+            let entry_val = crate::array::js_array_get_f64(arr, i);
+            let entry_bits = entry_val.to_bits();
+            // Extract the inner array pointer (strip NaN-box tag if present).
+            let upper = entry_bits >> 48;
+            let inner_ptr = if upper == 0x7FFD || upper == 0x7FFF || upper == 0x7FFA {
+                // NaN-boxed pointer
+                (entry_bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::array::ArrayHeader
+            } else if upper == 0x0000 {
+                let lower = entry_bits & 0x0000_FFFF_FFFF_FFFF;
+                if lower > 0x10000 { lower as *const crate::array::ArrayHeader } else { continue }
+            } else {
+                continue;
+            };
+            if inner_ptr.is_null() {
+                continue;
+            }
+            let inner_len = crate::array::js_array_length(inner_ptr);
+            if inner_len < 2 {
+                continue;
+            }
+            let key = crate::array::js_array_get_f64(inner_ptr, 0);
+            let value = crate::array::js_array_get_f64(inner_ptr, 1);
+            js_map_set(map, key, value);
+        }
+    }
+    map
+}
+
 /// Iterate over map entries, calling a callback with (value, key, map) for each
 #[no_mangle]
 pub extern "C" fn js_map_foreach(map: *const MapHeader, callback: f64) {

@@ -2843,6 +2843,10 @@ impl WasmModuleEmitter {
             Expr::ArrayFlat { array } | Expr::ArrayIsArray(array) | Expr::ArrayFrom(array) => {
                 self.collect_strings_in_expr(array);
             }
+            Expr::ArrayFromMapped { iterable, map_fn } => {
+                self.collect_strings_in_expr(iterable);
+                self.collect_strings_in_expr(map_fn);
+            }
             Expr::MapSet { map, key, value } => {
                 self.collect_strings_in_expr(map);
                 self.collect_strings_in_expr(key);
@@ -2853,7 +2857,7 @@ impl WasmModuleEmitter {
                 self.collect_strings_in_expr(key);
             }
             Expr::MapSize(e) | Expr::MapClear(e) | Expr::MapEntries(e) |
-            Expr::MapKeys(e) | Expr::MapValues(e) => {
+            Expr::MapKeys(e) | Expr::MapValues(e) | Expr::MapNewFromArray(e) => {
                 self.collect_strings_in_expr(e);
             }
             Expr::SetNewFromArray(e) | Expr::SetSize(e) | Expr::SetClear(e) | Expr::SetValues(e) => {
@@ -5250,6 +5254,12 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_store_arg(func, 0, val);
                 self.emit_memcall(func, "array_from", 1);
             }
+            Expr::ArrayFromMapped { iterable, map_fn } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, iterable);
+                self.emit_store_arg(func, 1, map_fn);
+                self.emit_memcall(func, "array_from_mapped", 2);
+            }
 
             // --- Array higher-order methods ---
             Expr::ArrayMap { array, callback } => {
@@ -5731,6 +5741,11 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::MapNew => {
                 self.emit_frame_begin(func, 0);
                 self.emit_memcall(func, "map_new", 0);
+            }
+            Expr::MapNewFromArray(arr) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, arr);
+                self.emit_memcall(func, "map_new_from_array", 1);
             }
             Expr::MapSet { map, key, value } => {
                 self.emit_frame_begin(func, 3);

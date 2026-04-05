@@ -868,7 +868,7 @@ impl Compiler {
                                 "BN" | "EventEmitter" | "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command" | "Redis")
                         }
                         Expr::Array(_) | Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::ArraySpread(_) |
-                        Expr::Closure { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                        Expr::Closure { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                         // JS interop expressions return pointers
                         Expr::JsCallFunction { .. } | Expr::JsCallMethod { .. } |
                         Expr::JsGetExport { .. } | Expr::JsNew { .. } |
@@ -1008,7 +1008,7 @@ impl Compiler {
                     },
                     is_closure, closure_func_id: None,
                     is_boxed: false,
-                    is_map: matches!(init, Some(Expr::MapNew)) || is_map_from_type,
+                    is_map: matches!(init, Some(Expr::MapNew) | Some(Expr::MapNewFromArray(_))) || is_map_from_type,
                     is_set: matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) || is_set_from_type,
                     is_buffer,
                     is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
@@ -1022,7 +1022,7 @@ impl Compiler {
                     is_union: matches!(ty, HirType::Union(_)) ||
                         (matches!(ty, HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown)
                          && !is_array && !is_string && !is_closure
-                         && !matches!(init, Some(Expr::MapNew)) && !is_map_from_type
+                         && !matches!(init, Some(Expr::MapNew) | Some(Expr::MapNewFromArray(_))) && !is_map_from_type
                          && !matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) && !is_set_from_type
                          && !is_buffer
                          && !matches!(ty, HirType::BigInt) && !matches!(init, Some(Expr::BigInt(_))) && !matches!(init, Some(Expr::BigIntCoerce(_)))),

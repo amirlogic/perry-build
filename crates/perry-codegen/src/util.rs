@@ -431,7 +431,7 @@ pub(crate) fn expr_type_name(expr: &Expr) -> &'static str {
         Expr::Object(_) => "Object",
         Expr::ObjectSpread { .. } => "ObjectSpread",
         Expr::Array(_) => "Array",
-        Expr::MapNew => "MapNew",
+        Expr::MapNew | Expr::MapNewFromArray(_) => "MapNew",
         Expr::SetNew | Expr::SetNewFromArray(_) => "SetNew",
         Expr::New { .. } => "New",
         Expr::Await(_) => "Await",
@@ -752,6 +752,7 @@ pub(crate) fn is_known_plain_array_expr(expr: &Expr, locals: &HashMap<LocalId, L
         }
         // These expressions always return a freshly-allocated plain Array
         Expr::ArrayFrom(_) |
+        Expr::ArrayFromMapped { .. } |
         Expr::ArraySlice { .. } |
         Expr::ObjectKeys(_) |
         Expr::ObjectValues(_) |

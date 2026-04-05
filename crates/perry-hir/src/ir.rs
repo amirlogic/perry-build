@@ -1212,6 +1212,7 @@ pub enum Expr {
 
     // Map operations
     MapNew,                                                    // new Map() -> empty map
+    MapNewFromArray(Box<Expr>),                                // new Map([[k,v], ...]) -> map from entries
     MapSet { map: Box<Expr>, key: Box<Expr>, value: Box<Expr> }, // map.set(key, value) -> map
     MapGet { map: Box<Expr>, key: Box<Expr> },                 // map.get(key) -> value | undefined
     MapHas { map: Box<Expr>, key: Box<Expr> },                 // map.has(key) -> boolean
@@ -1391,6 +1392,9 @@ pub enum Expr {
     /// Array.from(iterable) -> Array
     /// Creates a new array from an iterable (e.g., Map.entries(), Map.keys(), another array)
     ArrayFrom(Box<Expr>),
+    /// Array.from(iterable, mapFn) -> Array
+    /// Creates a new array by applying mapFn to each element of the iterable.
+    ArrayFromMapped { iterable: Box<Expr>, map_fn: Box<Expr> },
 
     // Global built-in functions
     /// parseInt(string, radix?) -> number

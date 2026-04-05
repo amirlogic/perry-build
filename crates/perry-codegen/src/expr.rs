@@ -1220,7 +1220,7 @@ pub(crate) fn compile_expr(
                 // OR a newly created object/array literal (these return I64 and need boxing)
                 let is_literal_pointer = matches!(value_expr.as_ref(),
                     Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) | Expr::ObjectSpread { .. } |
-                    Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_)
+                    Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_)
                 );
 
                 // Check if it's a LocalGet to a variable that stores raw I64 pointers
@@ -3144,7 +3144,7 @@ pub(crate) fn compile_expr(
                 // Check if the value expression produces a pointer type (Object, New, etc.)
                 let is_pointer_expr = matches!(value.as_ref(),
                     Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
-                    Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                    Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                     Expr::JsonParse(_) | Expr::Closure { .. });
                 if is_pointer_expr {
                     // It's a pointer stored as f64 - bitcast to i64 and use jsvalue push
@@ -3394,7 +3394,7 @@ pub(crate) fn compile_expr(
             } else {
                 let is_pointer_expr = matches!(value.as_ref(),
                     Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
-                    Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                    Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                     Expr::JsonParse(_) | Expr::Closure { .. });
                 if is_pointer_expr {
                     let val_i64 = ensure_i64(builder, val);
@@ -4053,6 +4053,17 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(alloc_ref, &[capacity]);
             let map_ptr = builder.inst_results(call)[0];
             // Return as f64 (raw bitcast from i64 pointer)
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), map_ptr))
+        }
+        Expr::MapNewFromArray(entries_expr) => {
+            // new Map([[k, v], ...]) — create a Map from an array of [key, value] pair arrays
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, entries_expr, this_ctx)?;
+            let arr_ptr = ensure_i64(builder, arr_val);
+            let func = extern_funcs.get("js_map_from_array")
+                .ok_or_else(|| anyhow!("js_map_from_array not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr]);
+            let map_ptr = builder.inst_results(call)[0];
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), map_ptr))
         }
         Expr::MapSet { map, key, value } => {
@@ -7367,7 +7378,7 @@ pub(crate) fn compile_expr(
                                                         // The f64 representation preserves NaN-boxing, so js_array_push_f64 handles both cases
                                                         let is_pointer_expr = matches!(&args[0],
                                                             Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
-                                                            Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                                                            Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                                                             Expr::JsonParse(_) | Expr::Closure { .. });
                                                         if is_pointer_expr {
                                                             // It's a pointer stored as f64 - bitcast to i64 and use jsvalue push
@@ -9556,7 +9567,7 @@ pub(crate) fn compile_expr(
                                 }
                             }
 
-                            // Handle Set method calls (add, has, delete, clear)
+                            // Handle Set method calls (add, has, delete, clear, forEach)
                             if info.is_set {
                                 let set_raw = builder.use_var(info.var);
                                 let set_ptr = ensure_i64(builder, set_raw);
@@ -9605,6 +9616,18 @@ pub(crate) fn compile_expr(
                                         builder.ins().call(func_ref, &[set_ptr]);
                                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))); // undefined
+                                    }
+                                    "forEach" => {
+                                        // set.forEach(callback) -> undefined
+                                        if !arg_vals.is_empty() {
+                                            let callback = ensure_f64(builder, arg_vals[0]);
+                                            let foreach_func = extern_funcs.get("js_set_foreach")
+                                                .ok_or_else(|| anyhow!("js_set_foreach not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*foreach_func, builder.func);
+                                            builder.ins().call(func_ref, &[set_ptr, callback]);
+                                            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                            return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -10225,6 +10248,17 @@ pub(crate) fn compile_expr(
                                                         builder.ins().call(func_ref, &[ptr]);
                                                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                                                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                                    }
+                                                    "forEach" => {
+                                                        if !arg_vals.is_empty() {
+                                                            let callback = ensure_f64(builder, arg_vals[0]);
+                                                            let foreach_func = extern_funcs.get("js_set_foreach")
+                                                                .ok_or_else(|| anyhow!("js_set_foreach not declared"))?;
+                                                            let func_ref = module.declare_func_in_func(*foreach_func, builder.func);
+                                                            builder.ins().call(func_ref, &[ptr, callback]);
+                                                            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                                            return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                                                        }
                                                     }
                                                     _ => {}
                                                 }
@@ -11918,7 +11952,7 @@ pub(crate) fn compile_expr(
                                     let is_pointer_arg = if idx < args.len() {
                                         matches!(&args[idx],
                                             Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
-                                            Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                                            Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                                             Expr::Closure { .. } | Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } |
                                             Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_)
                                         ) || matches!(&args[idx], Expr::LocalGet(id) if locals.get(id).map(|i| i.is_pointer || i.is_array || i.is_closure || i.is_map || i.is_set || i.is_buffer).unwrap_or(false))
@@ -13828,7 +13862,7 @@ pub(crate) fn compile_expr(
                                 builder.inst_results(nanbox_call)[0]
                             }
                             // New expressions produce NaN-boxed values (inline_nanbox_pointer is called in Expr::New)
-                            Expr::New { .. } | Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) => {
+                            Expr::New { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) => {
                                 ensure_f64(builder, init_val)
                             }
                             // Numbers, booleans, and other f64 values store directly
@@ -14747,7 +14781,7 @@ pub(crate) fn compile_expr(
             // Handle .length on expressions that return arrays (Object.keys, Object.values, Object.entries, ArrayFrom, etc.)
             if property == "length" && matches!(object.as_ref(),
                 Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_) |
-                Expr::ArrayFrom(_) | Expr::ArraySlice { .. }
+                Expr::ArrayFrom(_) | Expr::ArrayFromMapped { .. } | Expr::ArraySlice { .. }
             ) {
                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                 // Result is NaN-boxed pointer — extract raw pointer
@@ -14860,8 +14894,19 @@ pub(crate) fn compile_expr(
 
                     // Handle map.size
                     if info.is_map && property == "size" {
-                        let map_raw = builder.use_var(info.var);
-                        let map_ptr = ensure_i64(builder, map_raw);
+                        let map_ptr = if info.is_boxed {
+                            // Boxed module-level capture: read via js_box_get then strip to I64 pointer.
+                            let box_ptr = builder.use_var(info.var);
+                            let box_get_func = extern_funcs.get("js_box_get")
+                                .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                            let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                            let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                            let val_f64 = builder.inst_results(call)[0];
+                            ensure_i64(builder, val_f64)
+                        } else {
+                            let map_raw = builder.use_var(info.var);
+                            ensure_i64(builder, map_raw)
+                        };
                         let size_func = extern_funcs.get("js_map_size")
                             .ok_or_else(|| anyhow!("js_map_size not declared"))?;
                         let func_ref = module.declare_func_in_func(*size_func, builder.func);
@@ -14874,8 +14919,19 @@ pub(crate) fn compile_expr(
 
                     // Handle set.size
                     if info.is_set && property == "size" {
-                        let set_raw = builder.use_var(info.var);
-                        let set_ptr = ensure_i64(builder, set_raw);
+                        let set_ptr = if info.is_boxed {
+                            // Boxed module-level capture: read via js_box_get then strip to I64 pointer.
+                            let box_ptr = builder.use_var(info.var);
+                            let box_get_func = extern_funcs.get("js_box_get")
+                                .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                            let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                            let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                            let val_f64 = builder.inst_results(call)[0];
+                            ensure_i64(builder, val_f64)
+                        } else {
+                            let set_raw = builder.use_var(info.var);
+                            ensure_i64(builder, set_raw)
+                        };
                         let size_func = extern_funcs.get("js_set_size")
                             .ok_or_else(|| anyhow!("js_set_size not declared"))?;
                         let func_ref = module.declare_func_in_func(*size_func, builder.func);
@@ -16996,9 +17052,39 @@ pub(crate) fn compile_expr(
                 };
 
                 if is_union_index {
-                    // Runtime dispatch: NaN = string key, not-NaN = integer index
+                    // Runtime dispatch: NaN = string key, not-NaN = integer index.
+                    // However if we statically know the object is a plain object/Record (not
+                    // an array/buffer), treat numeric indices as string keys too so
+                    // `g[numericVar] = v` sets a property rather than corrupting an array slot.
+                    let object_is_non_array = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id).map(|i| !i.is_array && !i.is_buffer && !i.is_mixed_array && !i.is_union).unwrap_or(false)
+                    } else {
+                        matches!(object.as_ref(), Expr::Object(_) | Expr::ObjectSpread { .. })
+                    };
+
                     let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                     let idx_f64 = ensure_f64(builder, idx_val);
+
+                    if object_is_non_array {
+                        // Non-array object: always use string-key path (convert number to string)
+                        let to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                            .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                        let to_str_ref = module.declare_func_in_func(*to_str_func, builder.func);
+                        let str_call = builder.ins().call(to_str_ref, &[idx_f64]);
+                        let key_ptr = builder.inst_results(str_call)[0];
+
+                        let val_type = builder.func.dfg.value_type(val);
+                        let val_f64 = if val_type == types::I64 {
+                            inline_nanbox_pointer(builder, val)
+                        } else {
+                            ensure_f64(builder, val)
+                        };
+                        let set_func = extern_funcs.get("js_object_set_field_by_name")
+                            .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
+                        let func_ref = module.declare_func_in_func(*set_func, builder.func);
+                        builder.ins().call(func_ref, &[obj_ptr, key_ptr, val_f64]);
+                        return Ok(val);
+                    }
 
                     let is_nan = builder.ins().fcmp(FloatCC::NotEqual, idx_f64, idx_f64);
 
@@ -17050,24 +17136,57 @@ pub(crate) fn compile_expr(
                     builder.seal_block(merge_block);
                     Ok(val)
                 } else {
-                    // Integer index - use js_array_set_jsvalue
-                    let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
-                        builder.ins().iconst(types::I32, *n)
+                    // Integer index — but first check if the object is a plain object/Record
+                    // rather than an array. `obj[numKey]` on a non-array should set a string-keyed
+                    // field, not an array element.
+                    let object_is_non_array = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id).map(|i| !i.is_array && !i.is_buffer && !i.is_mixed_array && !i.is_union).unwrap_or(false)
                     } else {
-                        let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
-                        let idx_f64 = ensure_f64(builder, idx_val);
-                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
+                        matches!(object.as_ref(), Expr::Object(_) | Expr::ObjectSpread { .. })
                     };
 
-                    // Convert value to JSValue bits (u64)
-                    let jsvalue_bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    if object_is_non_array {
+                        // Record<number, T> or plain object literal — convert numeric key to string
+                        let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                        let idx_f64 = ensure_f64(builder, idx_val);
+                        let to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                            .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                        let to_str_ref = module.declare_func_in_func(*to_str_func, builder.func);
+                        let str_call = builder.ins().call(to_str_ref, &[idx_f64]);
+                        let key_ptr = builder.inst_results(str_call)[0];
 
-                    let set_func = extern_funcs.get("js_array_set_jsvalue")
-                        .ok_or_else(|| anyhow!("js_array_set_jsvalue not declared"))?;
-                    let func_ref = module.declare_func_in_func(*set_func, builder.func);
-                    builder.ins().call(func_ref, &[obj_ptr, idx_i32, jsvalue_bits]);
+                        // NaN-box I64 pointer values with POINTER_TAG so downstream reads work
+                        let val_type = builder.func.dfg.value_type(val);
+                        let val_f64 = if val_type == types::I64 {
+                            inline_nanbox_pointer(builder, val)
+                        } else {
+                            ensure_f64(builder, val)
+                        };
+                        let set_func = extern_funcs.get("js_object_set_field_by_name")
+                            .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
+                        let func_ref = module.declare_func_in_func(*set_func, builder.func);
+                        builder.ins().call(func_ref, &[obj_ptr, key_ptr, val_f64]);
+                        Ok(val)
+                    } else {
+                        // Integer index - use js_array_set_jsvalue
+                        let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
+                            builder.ins().iconst(types::I32, *n)
+                        } else {
+                            let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                            let idx_f64 = ensure_f64(builder, idx_val);
+                            builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
+                        };
 
-                    Ok(val)
+                        // Convert value to JSValue bits (u64)
+                        let jsvalue_bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+
+                        let set_func = extern_funcs.get("js_array_set_jsvalue")
+                            .ok_or_else(|| anyhow!("js_array_set_jsvalue not declared"))?;
+                        let func_ref = module.declare_func_in_func(*set_func, builder.func);
+                        builder.ins().call(func_ref, &[obj_ptr, idx_i32, jsvalue_bits]);
+
+                        Ok(val)
+                    }
                 }
             }
         }
@@ -22993,9 +23112,11 @@ pub(crate) fn compile_expr(
         Expr::ArrayFrom(value_expr) => {
             // Array.from(iterable) - clone array from iterable (e.g., Map.entries(), Map.keys(), Set, another array)
 
-            // Check at compile time if the inner expression is a Set
+            // Check at compile time if the inner expression is a Set.
+            // Covers LocalGet of a Set variable, a fresh `new Set(...)`, or a `new Set()`.
             let is_set = match value_expr.as_ref() {
                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_set).unwrap_or(false),
+                Expr::SetNew | Expr::SetNewFromArray(_) => true,
                 _ => false,
             };
 
@@ -23028,6 +23149,52 @@ pub(crate) fn compile_expr(
                 let clone_call = builder.ins().call(clone_ref, &[ptr]);
                 Ok(builder.inst_results(clone_call)[0])
             }
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            // Array.from(iterable, mapFn) — clone array and apply mapFn to each element.
+            // Implemented via clone + Array.map runtime call.
+            let is_set = match iterable.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_set).unwrap_or(false),
+                Expr::SetNew | Expr::SetNewFromArray(_) => true,
+                _ => false,
+            };
+
+            let iter_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, iterable, this_ctx)?;
+
+            let ptr = if builder.func.dfg.value_type(iter_val) == types::I64 {
+                iter_val
+            } else {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let get_ptr_call = builder.ins().call(get_ptr_ref, &[iter_val]);
+                builder.inst_results(get_ptr_call)[0]
+            };
+
+            // Step 1: materialize as a plain array
+            let arr_ptr = if is_set {
+                let func = extern_funcs.get("js_set_to_array")
+                    .ok_or_else(|| anyhow!("js_set_to_array not declared"))?;
+                let func_ref = module.declare_func_in_func(*func, builder.func);
+                let call = builder.ins().call(func_ref, &[ptr]);
+                builder.inst_results(call)[0]
+            } else {
+                let clone_func = extern_funcs.get("js_array_clone")
+                    .ok_or_else(|| anyhow!("js_array_clone not declared"))?;
+                let clone_ref = module.declare_func_in_func(*clone_func, builder.func);
+                let clone_call = builder.ins().call(clone_ref, &[ptr]);
+                builder.inst_results(clone_call)[0]
+            };
+
+            // Step 2: apply map_fn via js_array_map(arr, callback_ptr)
+            let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map_fn, this_ctx)?;
+            let cb_ptr = ensure_i64(builder, cb_val);
+            let map_func = extern_funcs.get("js_array_map")
+                .ok_or_else(|| anyhow!("js_array_map not declared"))?;
+            let map_ref = module.declare_func_in_func(*map_func, builder.func);
+            let map_call = builder.ins().call(map_ref, &[arr_ptr, cb_ptr]);
+            let result = builder.inst_results(map_call)[0];
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
         }
         Expr::TypeOf(inner) => {
             // Compile the inner expression

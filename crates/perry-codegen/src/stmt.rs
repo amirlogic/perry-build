@@ -817,12 +817,12 @@ pub(crate) fn compile_stmt(
                     Some(Expr::ArrayMap { .. }) | Some(Expr::ArrayFilter { .. }) |
                     Some(Expr::ArraySort { .. }) | Some(Expr::ArraySlice { .. }) |
                     Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
-                    // string.match(regex) / string.matchAll(regex) return arrays (or null for match)
+                    // string.match(regex) / string.matchAll(regex) return arrays (or null for match).
                     // The result is NaN-boxed as F64 by the codegen, so is_pointer=false (union-style storage)
                     Some(Expr::StringMatch { .. }) | Some(Expr::StringMatchAll { .. }) =>
                         (None, false, true, false, false, false, false, false, false, false),
-                    // MapNew returns a Map pointer
-                    Some(Expr::MapNew) => (None, true, false, false, false, false, true, false, false, false),
+                    // MapNew / MapNewFromArray returns a Map pointer
+                    Some(Expr::MapNew) | Some(Expr::MapNewFromArray(_)) => (None, true, false, false, false, false, true, false, false, false),
                     // SetNew/SetNewFromArray returns a Set pointer
                     Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_)) => (None, true, false, false, false, false, false, true, false, false),
                     // Buffer expressions return buffer pointers
@@ -1257,7 +1257,7 @@ pub(crate) fn compile_stmt(
                                 // Array/Map/Set constructors may return NaN-boxed
                                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::ArrayMap { .. } |
                                 Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } |
-                                Expr::MapNew | Expr::SetNew | Expr::SetNewFromArray(_) |
+                                Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                                 Expr::MapEntries(_) | Expr::MapKeys(_) | Expr::MapValues(_) => true,
                                 // Map.get() returns NaN-boxed value (may be POINTER_TAG object)
                                 Expr::MapGet { .. } => true,

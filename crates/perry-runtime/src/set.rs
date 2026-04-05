@@ -399,6 +399,29 @@ pub extern "C" fn js_set_from_array(arr: *const crate::array::ArrayHeader) -> *m
     set
 }
 
+/// Iterate over set elements, calling a callback with (value, value, set) for each
+/// Matches JS Set.forEach signature where key===value (so we pass value twice).
+#[no_mangle]
+pub extern "C" fn js_set_foreach(set: *const SetHeader, callback: f64) {
+    let set = clean_set_ptr(set);
+    if set.is_null() {
+        return;
+    }
+    unsafe {
+        let size = (*set).size as usize;
+        if size == 0 {
+            return;
+        }
+        let elements = elements_ptr(set);
+        for i in 0..size {
+            let value = ptr::read(elements.add(i));
+            // Call closure with (value, value) - Set.forEach callback gets (value, value) in JS
+            let closure_ptr = callback.to_bits() as *const crate::closure::ClosureHeader;
+            crate::closure::js_closure_call2(closure_ptr, value, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

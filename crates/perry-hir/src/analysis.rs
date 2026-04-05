@@ -261,6 +261,7 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         }
         // Map operations
         Expr::MapNew => {}
+        Expr::MapNewFromArray(expr) => { collect_local_refs_expr(expr, refs, visited); }
         Expr::MapSet { map, key, value } => {
             collect_local_refs_expr(map, refs, visited);
             collect_local_refs_expr(key, refs, visited);
@@ -498,6 +499,10 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_local_refs_expr(value, refs, visited);
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            collect_local_refs_expr(iterable, refs, visited);
+            collect_local_refs_expr(map_fn, refs, visited);
         }
         Expr::RegExpTest { regex, string } => {
             collect_local_refs_expr(regex, refs, visited);
@@ -1059,6 +1064,7 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         }
         // Map operations
         Expr::MapNew => {}
+        Expr::MapNewFromArray(expr) => { collect_assigned_locals_expr(expr, assigned); }
         Expr::MapSet { map, key, value } => {
             collect_assigned_locals_expr(map, assigned);
             collect_assigned_locals_expr(key, assigned);
@@ -1301,6 +1307,10 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            collect_assigned_locals_expr(iterable, assigned);
+            collect_assigned_locals_expr(map_fn, assigned);
         }
         Expr::RegExpTest { regex, string } => {
             collect_assigned_locals_expr(regex, assigned);

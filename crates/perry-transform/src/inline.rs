@@ -1461,6 +1461,10 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         Expr::ArrayFlat { array } | Expr::ArrayFrom(array) => {
             substitute_this(array, obj_id);
         }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            substitute_this(iterable, obj_id);
+            substitute_this(map_fn, obj_id);
+        }
         Expr::StringSplit(s, sep) => {
             substitute_this(s, obj_id);
             substitute_this(sep, obj_id);

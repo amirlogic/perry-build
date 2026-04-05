@@ -3576,16 +3576,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         }
                                         "from" => {
                                             let value = args.get(0).cloned().unwrap_or(Expr::Undefined);
-                                            let array_from = Expr::ArrayFrom(Box::new(value));
-                                            // `Array.from(iterable, mapFn)` desugars to
-                                            // ArrayMap { array: ArrayFrom(iterable), callback: mapFn }
+                                            // `Array.from(iterable, mapFn)` uses a dedicated HIR
+                                            // variant so codegen can handle Map/Set/Array sources
+                                            // uniformly (materialize + js_array_map).
                                             if let Some(map_fn) = args.get(1).cloned() {
-                                                return Ok(Expr::ArrayMap {
-                                                    array: Box::new(array_from),
-                                                    callback: Box::new(map_fn),
+                                                return Ok(Expr::ArrayFromMapped {
+                                                    iterable: Box::new(value),
+                                                    map_fn: Box::new(map_fn),
                                                 });
                                             }
-                                            return Ok(array_from);
+                                            return Ok(Expr::ArrayFrom(Box::new(value)));
                                         }
                                         _ => {} // Fall through to generic handling
                                     }
@@ -6591,8 +6591,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
                     // Handle built-in types
                     if class_name == "Map" {
-                        // new Map() -> create empty map
-                        return Ok(Expr::MapNew);
+                        // new Map() or new Map(entries)
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        if args.is_empty() {
+                            return Ok(Expr::MapNew);
+                        } else {
+                            return Ok(Expr::MapNewFromArray(Box::new(args.into_iter().next().unwrap())));
+                        }
                     }
                     if class_name == "Set" {
                         // new Set() or new Set(iterable)
