@@ -226,10 +226,8 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
         }
     }
 
-    // Safe GC collection point after all setTimeout callbacks have run.
-    if fired > 0 {
-        crate::gc::gc_check_trigger();
-    }
+    // NOTE: Do NOT call gc_check_trigger() here — same reason as interval
+    // tick: register-held values get swept by conservative scanner.
 
     fired
 }
@@ -353,13 +351,13 @@ pub extern "C" fn js_interval_timer_tick() -> i32 {
         fired += 1;
     }
 
-    // After processing all interval callbacks, check whether GC should run.
-    // This is a safe collection point: any objects allocated during callbacks
-    // that are still needed have been stored in JS state (module globals,
-    // closure captures, etc.). Keeps long-running services bounded.
-    if fired > 0 {
-        crate::gc::gc_check_trigger();
-    }
+    // NOTE: Do NOT call gc_check_trigger() here. Timer callbacks may leave
+    // live values in registers (not yet stored to stack/globals). The
+    // conservative GC scanner only scans the stack, so register-held
+    // pointers get missed → use-after-free → SIGSEGV. GC is triggered
+    // safely from arena_alloc (on block creation) and from the malloc
+    // count threshold check, which fire during allocation when values are
+    // guaranteed to be stored.
 
     fired
 }
