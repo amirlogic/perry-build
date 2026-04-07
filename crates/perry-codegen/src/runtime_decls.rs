@@ -1021,6 +1021,15 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_array_clone"), func_id);
         }
 
+        // js_iterator_to_array(iter: f64) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_iterator_to_array", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_iterator_to_array"), func_id);
+        }
+
         // === JSValue-based array functions for mixed-type arrays ===
 
         // js_array_from_jsvalue(elements: *const u64, count: u32) -> *mut ArrayHeader

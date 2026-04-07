@@ -1067,7 +1067,7 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(object, closures, enclosing_class);
             }
             // Array static methods
-            Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
+            Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) | Expr::IteratorToArray(value) => {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
             }
             Expr::ArrayFromMapped { iterable, map_fn } => {

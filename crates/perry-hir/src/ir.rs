@@ -1545,6 +1545,7 @@ pub enum Expr {
     /// Array.from(iterable) -> Array
     /// Creates a new array from an iterable (e.g., Map.entries(), Map.keys(), another array)
     ArrayFrom(Box<Expr>),
+    IteratorToArray(Box<Expr>),          // collect iterator (.next() loop) into array
     /// Array.from(iterable, mapFn) -> Array
     /// Creates a new array by applying mapFn to each element of the iterable.
     ArrayFromMapped { iterable: Box<Expr>, map_fn: Box<Expr> },

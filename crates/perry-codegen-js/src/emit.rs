@@ -2307,6 +2307,11 @@ impl JsEmitter {
                 self.emit_expr(val);
                 self.output.push(')');
             }
+            Expr::IteratorToArray(val) => {
+                self.output.push_str("Array.from(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
             Expr::ArrayFromMapped { iterable, map_fn } => {
                 self.output.push_str("Array.from(");
                 self.emit_expr(iterable);

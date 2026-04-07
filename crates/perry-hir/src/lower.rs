@@ -4295,6 +4295,11 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                     map_fn: Box::new(map_fn),
                                                 });
                                             }
+                                            // Check if the source is a generator call — use iterator protocol
+                                            let is_gen = is_generator_call_expr(ctx, &value);
+                                            if is_gen {
+                                                return Ok(Expr::IteratorToArray(Box::new(value)));
+                                            }
                                             return Ok(Expr::ArrayFrom(Box::new(value)));
                                         }
                                         "of" => {
@@ -10264,6 +10269,21 @@ fn prop_name_to_string(name: &ast::PropName) -> String {
 /// Used to specialize `for...of` and array-spread lowering when the iterable is
 /// a string — in that case we need char-by-char iteration via `str[i]` rather
 /// than array-element access.
+/// Check if a lowered HIR expression is a call to a generator function.
+fn is_generator_call_expr(ctx: &LoweringContext, expr: &Expr) -> bool {
+    if let Expr::Call { callee, .. } = expr {
+        if let Expr::FuncRef(func_id) = callee.as_ref() {
+            // Look up the function name by its ID
+            for (name, id) in &ctx.functions {
+                if *id == *func_id && ctx.generator_func_names.contains(name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn is_ast_string_expr(ctx: &LoweringContext, expr: &ast::Expr) -> bool {
     match expr {
         // String literals: "hello"

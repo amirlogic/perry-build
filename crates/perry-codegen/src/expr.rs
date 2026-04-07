@@ -24823,6 +24823,16 @@ pub(crate) fn compile_expr(
                 Ok(builder.inst_results(clone_call)[0])
             }
         }
+        Expr::IteratorToArray(iter_expr) => {
+            // Convert iterator to array: calls .next() in a loop, collecting .value entries
+            let iter_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, iter_expr, this_ctx)?;
+            let iter_f64 = ensure_f64(builder, iter_val);
+            let func = extern_funcs.get("js_iterator_to_array")
+                .ok_or_else(|| anyhow!("js_iterator_to_array not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[iter_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::ArrayFromMapped { iterable, map_fn } => {
             // Array.from(iterable, mapFn) — clone array and apply mapFn to each element.
             // Implemented via clone + Array.map runtime call.
