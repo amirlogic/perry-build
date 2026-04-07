@@ -11923,6 +11923,36 @@ pub(crate) fn compile_expr(
                             let result_ptr = builder.inst_results(call)[0];
                             return Ok(inline_nanbox_string(builder, result_ptr));
                         }
+                        "toPrecision" => {
+                            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let num_f64 = ensure_f64(builder, obj_val);
+                            let precision = if !arg_vals.is_empty() {
+                                ensure_f64(builder, arg_vals[0])
+                            } else {
+                                builder.ins().f64const(0.0)
+                            };
+                            let func = extern_funcs.get("js_number_to_precision")
+                                .ok_or_else(|| anyhow!("js_number_to_precision not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[num_f64, precision]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            return Ok(inline_nanbox_string(builder, result_ptr));
+                        }
+                        "toExponential" => {
+                            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let num_f64 = ensure_f64(builder, obj_val);
+                            let decimals = if !arg_vals.is_empty() {
+                                ensure_f64(builder, arg_vals[0])
+                            } else {
+                                builder.ins().f64const(6.0)
+                            };
+                            let func = extern_funcs.get("js_number_to_exponential")
+                                .ok_or_else(|| anyhow!("js_number_to_exponential not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[num_f64, decimals]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            return Ok(inline_nanbox_string(builder, result_ptr));
+                        }
                         "toString" if !matches!(object.as_ref(), Expr::LocalGet(_) | Expr::StaticMethodCall { .. } | Expr::New { .. }) => {
                             let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                             let num_f64 = ensure_f64(builder, obj_val);
