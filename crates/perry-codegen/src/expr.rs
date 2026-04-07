@@ -10030,7 +10030,24 @@ pub(crate) fn compile_expr(
                                         // str.replace(pattern, replacement) / str.replaceAll(pattern, replacement)
                                         if arg_vals.len() >= 2 {
                                             let is_regex = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                            let is_callback = matches!(args.get(1), Some(Expr::Closure { .. }));
                                             let is_replace_all = property == "replaceAll";
+
+                                            // str.replace(regex, fn) → js_string_replace_regex_fn
+                                            if is_regex && is_callback {
+                                                let re_i64 = ensure_i64(builder, arg_vals[0]);
+                                                let cb_f64 = ensure_f64(builder, arg_vals[1]);
+                                                let func = extern_funcs.get("js_string_replace_regex_fn")
+                                                    .ok_or_else(|| anyhow!("js_string_replace_regex_fn not declared"))?;
+                                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                                let call = builder.ins().call(func_ref, &[str_ptr, re_i64, cb_f64]);
+                                                let result_ptr = builder.inst_results(call)[0];
+                                                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                                let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                                return Ok(builder.inst_results(nanbox_call)[0]);
+                                            }
 
                                             let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
                                                 .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
@@ -10042,8 +10059,10 @@ pub(crate) fn compile_expr(
 
                                             let (replace_func, pattern_ptr) = if is_regex {
                                                 let p = ensure_i64(builder, arg_vals[0]);
-                                                let f = extern_funcs.get("js_string_replace_regex")
-                                                    .ok_or_else(|| anyhow!("js_string_replace_regex not declared"))?;
+                                                // Use the _named variant which handles $<name> AND falls back
+                                                // to plain js_string_replace_regex when no named refs are present.
+                                                let f = extern_funcs.get("js_string_replace_regex_named")
+                                                    .ok_or_else(|| anyhow!("js_string_replace_regex_named not declared"))?;
                                                 (f, p)
                                             } else {
                                                 let pattern_f64 = ensure_f64(builder, arg_vals[0]);
@@ -12087,11 +12106,27 @@ pub(crate) fn compile_expr(
                                 "replace" | "replaceAll" => {
                                     if arg_vals.len() >= 2 {
                                         let is_regex = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                        let is_callback = matches!(args.get(1), Some(Expr::Closure { .. }));
                                         let is_replace_all = property == "replaceAll";
+
+                                        // str.replace(regex, fn) → js_string_replace_regex_fn
+                                        if is_regex && is_callback {
+                                            let re_i64 = ensure_i64(builder, arg_vals[0]);
+                                            let cb_f64 = ensure_f64(builder, arg_vals[1]);
+                                            let func = extern_funcs.get("js_string_replace_regex_fn")
+                                                .ok_or_else(|| anyhow!("js_string_replace_regex_fn not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            let call = builder.ins().call(func_ref, &[str_ptr, re_i64, cb_f64]);
+                                            let result_ptr = builder.inst_results(call)[0];
+                                            return Ok(inline_nanbox_string(builder, result_ptr));
+                                        }
+
                                         let (replace_func_name, pattern_ptr) = if is_regex {
                                             // Regex pattern: bitcast to raw I64 pointer
                                             let p = ensure_i64(builder, arg_vals[0]);
-                                            ("js_string_replace_regex", p)
+                                            // Use the _named variant which handles $<name> AND falls back
+                                            // to plain js_string_replace_regex when no named refs are present.
+                                            ("js_string_replace_regex_named", p)
                                         } else {
                                             // String pattern: extract string pointer via js_get_string_pointer_unified
                                             let pattern_f64 = ensure_f64(builder, arg_vals[0]);
@@ -24702,10 +24737,10 @@ pub(crate) fn compile_expr(
             let cb = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback, this_ctx)?;
             let s_i64 = ensure_i64(builder, s);
             let re_i64 = ensure_i64(builder, re);
-            let cb_i64 = ensure_i64(builder, cb);
+            let cb_f64 = ensure_f64(builder, cb);
             let func = extern_funcs.get("js_string_replace_regex_fn").ok_or_else(|| anyhow!("missing"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[s_i64, re_i64, cb_i64]);
+            let call = builder.ins().call(func_ref, &[s_i64, re_i64, cb_f64]);
             let result = builder.inst_results(call)[0];
             Ok(inline_nanbox_string(builder, result))
         }

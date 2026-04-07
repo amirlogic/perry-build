@@ -1613,6 +1613,42 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     }
 
     unsafe {
+        // Special handling for built-in Error and its subclasses (TypeError, RangeError, etc.).
+        // ErrorHeader uses GC_TYPE_ERROR; we match by error_kind against the requested CLASS_ID_*.
+        let gc_header = (obj_ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let gc_type = (*gc_header).obj_type;
+        if gc_type == crate::gc::GC_TYPE_ERROR {
+            let err_ptr = obj_ptr as *const crate::error::ErrorHeader;
+            let kind = (*err_ptr).error_kind;
+            return match class_id {
+                crate::error::CLASS_ID_ERROR => true_val,
+                crate::error::CLASS_ID_TYPE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_TYPE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_RANGE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_RANGE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_REFERENCE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_REFERENCE_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_SYNTAX_ERROR => {
+                    if kind == crate::error::ERROR_KIND_SYNTAX_ERROR { true_val } else { false_val }
+                }
+                crate::error::CLASS_ID_AGGREGATE_ERROR => {
+                    if kind == crate::error::ERROR_KIND_AGGREGATE_ERROR { true_val } else { false_val }
+                }
+                _ => false_val,
+            };
+        }
+
+        // For user-defined classes that extend Error: `myErr instanceof Error` should be true.
+        if class_id == crate::error::CLASS_ID_ERROR {
+            let obj_class_id = (*obj_ptr).class_id;
+            if extends_builtin_error(obj_class_id) {
+                return true_val;
+            }
+        }
+
         // Check if the object's class_id matches directly
         let obj_class_id = (*obj_ptr).class_id;
         if obj_class_id == class_id {

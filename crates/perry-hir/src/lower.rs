@@ -142,6 +142,10 @@ pub struct LoweringContext {
     /// calls in `for...of` so the iterator protocol loop is emitted instead of
     /// the array-index loop.
     pub(crate) generator_func_names: HashSet<String>,
+    /// Local names whose value was assigned from `regex.exec(...)`. Used to
+    /// route `local.index` / `local.groups` to the bare RegExpExecIndex/Groups
+    /// HIR variants which read the runtime's thread-local exec metadata.
+    pub(crate) regex_exec_locals: HashSet<String>,
 }
 
 impl LoweringContext {
@@ -200,6 +204,7 @@ impl LoweringContext {
             weakmap_locals: HashSet::new(),
             weakset_locals: HashSet::new(),
             generator_func_names: HashSet::new(),
+            regex_exec_locals: HashSet::new(),
         }
     }
 
@@ -3059,6 +3064,13 @@ fn lower_stmt(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        // Track locals assigned from `regex.exec(...)` so .index/.groups
+                        // accesses route to the bare RegExpExecIndex/Groups variants.
+                        if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
+                            if is_regex_exec_init(ctx, init) {
+                                ctx.regex_exec_locals.insert(ident.id.sym.to_string());
                             }
                         }
                         let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
@@ -6807,11 +6819,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                     }
 
-                    // Check for regex .test() method call on any expression
+                    // Check for regex .test() / .exec() method call on any expression
                     if let ast::Callee::Expr(callee_expr) = &call.callee {
                         if let ast::Expr::Member(member) = callee_expr.as_ref() {
                             if let ast::MemberProp::Ident(method_ident) = &member.prop {
-                                if method_ident.sym.as_ref() == "test" && args.len() == 1 {
+                                let m = method_ident.sym.as_ref();
+                                if (m == "test" || m == "exec") && args.len() == 1 {
                                     // Check if the object is a regex literal or a local assigned to a regex
                                     let is_regex_obj = match member.obj.as_ref() {
                                         ast::Expr::Lit(ast::Lit::Regex(_)) => true,
@@ -6824,13 +6837,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     };
                                     if is_regex_obj {
                                         let regex_expr = lower_expr(ctx, &member.obj)?;
-                                        // Only emit RegExpTest if the object is actually a regex
+                                        // Only emit RegExp method calls if the object is actually a regex
                                         if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
                                             let string_expr = args.into_iter().next().unwrap();
-                                            return Ok(Expr::RegExpTest {
-                                                regex: Box::new(regex_expr),
-                                                string: Box::new(string_expr),
-                                            });
+                                            if m == "test" {
+                                                return Ok(Expr::RegExpTest {
+                                                    regex: Box::new(regex_expr),
+                                                    string: Box::new(string_expr),
+                                                });
+                                            } else {
+                                                return Ok(Expr::RegExpExec {
+                                                    regex: Box::new(regex_expr),
+                                                    string: Box::new(string_expr),
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -7677,6 +7697,53 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
             }
 
+            // RegExp property access: regex.source / .flags / .lastIndex
+            // Detect when receiver is a regex literal or local typed as RegExp.
+            if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                let prop_name = prop_ident.sym.as_ref();
+                if prop_name == "source" || prop_name == "flags" || prop_name == "lastIndex" {
+                    let is_regex_obj = match member.obj.as_ref() {
+                        ast::Expr::Lit(ast::Lit::Regex(_)) => true,
+                        ast::Expr::Ident(ident) => {
+                            ctx.lookup_local_type(&ident.sym.to_string())
+                                .map(|ty| matches!(ty, Type::Named(n) if n == "RegExp"))
+                                .unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    if is_regex_obj {
+                        let regex_expr = lower_expr(ctx, &member.obj)?;
+                        if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
+                            return Ok(match prop_name {
+                                "source" => Expr::RegExpSource(Box::new(regex_expr)),
+                                "flags" => Expr::RegExpFlags(Box::new(regex_expr)),
+                                "lastIndex" => Expr::RegExpLastIndex(Box::new(regex_expr)),
+                                _ => unreachable!(),
+                            });
+                        }
+                    }
+                }
+                // RegExpExecArray.index / .groups — receiver is a local that holds the result
+                // of regex.exec(...). The runtime stores the most recent exec metadata in
+                // thread-locals which RegExpExecIndex/Groups read.
+                if prop_name == "index" || prop_name == "groups" {
+                    // Strip non-null assertion (m1! → m1)
+                    let inner = match member.obj.as_ref() {
+                        ast::Expr::TsNonNull(nn) => nn.expr.as_ref(),
+                        other => other,
+                    };
+                    if let ast::Expr::Ident(ident) = inner {
+                        if ctx.regex_exec_locals.contains(&ident.sym.to_string()) {
+                            return Ok(if prop_name == "index" {
+                                Expr::RegExpExecIndex
+                            } else {
+                                Expr::RegExpExecGroups
+                            });
+                        }
+                    }
+                }
+            }
+
             let object = Box::new(lower_expr(ctx, &member.obj)?);
             match &member.prop {
                 ast::MemberProp::Ident(ident) => {
@@ -7919,6 +7986,29 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     return Ok(Expr::StaticFieldSet {
                                         class_name: obj_name,
                                         field_name,
+                                        value,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // regex.lastIndex = N → RegExpSetLastIndex
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        if prop_ident.sym.as_ref() == "lastIndex" {
+                            let is_regex_obj = match member.obj.as_ref() {
+                                ast::Expr::Lit(ast::Lit::Regex(_)) => true,
+                                ast::Expr::Ident(ident) => ctx
+                                    .lookup_local_type(&ident.sym.to_string())
+                                    .map(|ty| matches!(ty, Type::Named(n) if n == "RegExp"))
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
+                            if is_regex_obj {
+                                let regex_expr = lower_expr(ctx, &member.obj)?;
+                                if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
+                                    return Ok(Expr::RegExpSetLastIndex {
+                                        regex: Box::new(regex_expr),
                                         value,
                                     });
                                 }
@@ -10437,6 +10527,35 @@ pub(crate) fn is_ast_string_expr(ctx: &LoweringContext, expr: &ast::Expr) -> boo
         }
         _ => false,
     }
+}
+
+/// Detect whether a var initializer is `regex.exec(str)` (after stripping
+/// non-null assertion `!`). Used to mark locals so subsequent `.index`/`.groups`
+/// accesses can route to the bare RegExpExecIndex/Groups HIR variants.
+fn is_regex_exec_init(ctx: &LoweringContext, init: &ast::Expr) -> bool {
+    let expr = match init {
+        ast::Expr::TsNonNull(nn) => nn.expr.as_ref(),
+        other => other,
+    };
+    if let ast::Expr::Call(call) = expr {
+        if let ast::Callee::Expr(callee) = &call.callee {
+            if let ast::Expr::Member(member) = callee.as_ref() {
+                if let ast::MemberProp::Ident(method) = &member.prop {
+                    if method.sym.as_ref() == "exec" {
+                        return match member.obj.as_ref() {
+                            ast::Expr::Lit(ast::Lit::Regex(_)) => true,
+                            ast::Expr::Ident(ident) => ctx
+                                .lookup_local_type(&ident.sym.to_string())
+                                .map(|ty| matches!(ty, Type::Named(n) if n == "RegExp"))
+                                .unwrap_or(false),
+                            _ => false,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

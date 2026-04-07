@@ -680,13 +680,13 @@ impl Compiler {
             let func_id = self.module.declare_function("js_regexp_set_last_index", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_regexp_set_last_index"), func_id);
         }
-        // js_string_replace_regex_fn(s: i64, re: i64, cb: i64) -> i64
+        // js_string_replace_regex_fn(s: *const StringHeader, re: *const RegExpHeader, cb: f64) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));   // string pointer
+            sig.params.push(AbiParam::new(types::I64));   // regex pointer
+            sig.params.push(AbiParam::new(types::F64));   // callback (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::I64));  // result string pointer
             let func_id = self.module.declare_function("js_string_replace_regex_fn", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_string_replace_regex_fn"), func_id);
         }
@@ -8610,6 +8610,17 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64)); // result string pointer
             let func_id = self.module.declare_function("js_string_replace_regex", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_string_replace_regex"), func_id);
+        }
+
+        // js_string_replace_regex_named — handles $<name> back-refs, falls back to plain replace
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_replace_regex_named", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_replace_regex_named"), func_id);
         }
 
         // js_string_replace_string(s: *const StringHeader, pattern: *const StringHeader, replacement: *const StringHeader) -> *mut StringHeader
