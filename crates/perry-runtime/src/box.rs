@@ -36,6 +36,10 @@ pub extern "C" fn js_box_alloc(initial_value: f64) -> *mut Box {
 pub extern "C" fn js_box_get(ptr: *mut Box) -> f64 {
     unsafe {
         if ptr.is_null() {
+            let count = BOX_GET_NULL_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 3 {
+                eprintln!("[PERRY WARN] js_box_get: null box pointer #{}", count);
+            }
             return f64::NAN;
         }
         (*ptr).value
@@ -48,17 +52,8 @@ pub extern "C" fn js_box_set(ptr: *mut Box, value: f64) {
     unsafe {
         if ptr.is_null() {
             let count = BOX_SET_NULL_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count < 5 {
-                let ra: *const u8;
-                #[cfg(target_arch = "aarch64")]
-                {
-                    core::arch::asm!("mov {}, x30", out(reg) ra, options(nomem, nostack));
-                }
-                #[cfg(not(target_arch = "aarch64"))]
-                {
-                    ra = std::ptr::null();
-                }
-                eprintln!("[PERRY WARN] js_box_set: null box pointer #{} (return addr: {:?}, value bits: 0x{:016x}) — ignoring", count, ra, value.to_bits());
+            if count < 3 {
+                eprintln!("[PERRY WARN] js_box_set: null box pointer #{} (value bits: 0x{:016x})", count, value.to_bits());
             }
             return;
         }

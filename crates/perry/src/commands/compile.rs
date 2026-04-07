@@ -4504,6 +4504,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Native macOS/iOS via clang driver
             cmd.arg("-Wl,-dead_strip");
         }
+    } else {
+        // MSVC link.exe / lld-link equivalents:
+        //   /OPT:REF — drop unreferenced functions/data (= --gc-sections)
+        //   /OPT:ICF — fold identical COMDATs (= --icf=safe)
+        // These are documented as defaults under /RELEASE, but Perry doesn't
+        // pass /RELEASE so the linker falls back to /OPT:NOREF, pulling in the
+        // entire perry-stdlib archive even when only a fraction is used.
+        cmd.arg("/OPT:REF").arg("/OPT:ICF");
     }
 
     // Link libraries - jsruntime bundles V8 + stdlib; runtime provides base FFI symbols.
