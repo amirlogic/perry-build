@@ -2554,6 +2554,34 @@ impl JsEmitter {
                 self.emit_expr(index);
                 self.output.push(')');
             }
+            // Object property descriptor stubs
+            Expr::ObjectDefineProperty(obj, key, desc) => {
+                self.output.push_str("Object.defineProperty("); self.emit_expr(obj);
+                self.output.push_str(", "); self.emit_expr(key);
+                self.output.push_str(", "); self.emit_expr(desc); self.output.push(')');
+            }
+            Expr::ObjectGetOwnPropertyDescriptor(obj, key) => {
+                self.output.push_str("Object.getOwnPropertyDescriptor("); self.emit_expr(obj);
+                self.output.push_str(", "); self.emit_expr(key); self.output.push(')');
+            }
+            Expr::ObjectGetOwnPropertyNames(obj) => { self.output.push_str("Object.getOwnPropertyNames("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectCreate(proto) => { self.output.push_str("Object.create("); self.emit_expr(proto); self.output.push(')'); }
+            Expr::ObjectFreeze(obj) => { self.output.push_str("Object.freeze("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectSeal(obj) => { self.output.push_str("Object.seal("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectPreventExtensions(obj) => { self.output.push_str("Object.preventExtensions("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectIsFrozen(obj) => { self.output.push_str("Object.isFrozen("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectIsSealed(obj) => { self.output.push_str("Object.isSealed("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectIsExtensible(obj) => { self.output.push_str("Object.isExtensible("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectGetPrototypeOf(obj) => { self.output.push_str("Object.getPrototypeOf("); self.emit_expr(obj); self.output.push(')'); }
+            // RegExp stubs
+            Expr::RegExpExec { regex, string } => { self.emit_expr(regex); self.output.push_str(".exec("); self.emit_expr(string); self.output.push(')'); }
+            Expr::RegExpSource(re) => { self.emit_expr(re); self.output.push_str(".source"); }
+            Expr::RegExpFlags(re) => { self.emit_expr(re); self.output.push_str(".flags"); }
+            Expr::RegExpLastIndex(re) => { self.emit_expr(re); self.output.push_str(".lastIndex"); }
+            Expr::RegExpSetLastIndex { regex, value } => { self.emit_expr(regex); self.output.push_str(".lastIndex = "); self.emit_expr(value); }
+            Expr::RegExpReplaceFn { string, regex, callback } => { self.emit_expr(string); self.output.push_str(".replace("); self.emit_expr(regex); self.output.push_str(", "); self.emit_expr(callback); self.output.push(')'); }
+            Expr::RegExpExecIndex => { self.output.push_str("__perry_exec_index"); }
+            Expr::RegExpExecGroups => { self.output.push_str("__perry_exec_groups"); }
         }
     }
 

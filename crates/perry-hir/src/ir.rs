@@ -1041,8 +1041,31 @@ pub enum Expr {
     },
     FinalizationRegistryUnregister { registry: Box<Expr>, token: Box<Expr> },                  // registry.unregister(token) -> bool
 
+    // Object property descriptor methods
+    ObjectDefineProperty(Box<Expr>, Box<Expr>, Box<Expr>), // Object.defineProperty(obj, key, desc)
+    ObjectGetOwnPropertyDescriptor(Box<Expr>, Box<Expr>),  // Object.getOwnPropertyDescriptor(obj, key)
+    ObjectGetOwnPropertyNames(Box<Expr>),                  // Object.getOwnPropertyNames(obj) -> string[]
+    ObjectCreate(Box<Expr>),                               // Object.create(proto)
+    ObjectFreeze(Box<Expr>),                               // Object.freeze(obj)
+    ObjectSeal(Box<Expr>),                                 // Object.seal(obj)
+    ObjectPreventExtensions(Box<Expr>),                    // Object.preventExtensions(obj)
+    ObjectIsFrozen(Box<Expr>),                             // Object.isFrozen(obj)
+    ObjectIsSealed(Box<Expr>),                             // Object.isSealed(obj)
+    ObjectIsExtensible(Box<Expr>),                         // Object.isExtensible(obj)
+    ObjectGetPrototypeOf(Box<Expr>),                       // Object.getPrototypeOf(obj)
+
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string
+
+    // RegExp operations
+    RegExpExec { regex: Box<Expr>, string: Box<Expr> },
+    RegExpSource(Box<Expr>),
+    RegExpFlags(Box<Expr>),
+    RegExpLastIndex(Box<Expr>),
+    RegExpSetLastIndex { regex: Box<Expr>, value: Box<Expr> },
+    RegExpReplaceFn { string: Box<Expr>, regex: Box<Expr>, callback: Box<Expr> },
+    RegExpExecIndex,
+    RegExpExecGroups,
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value

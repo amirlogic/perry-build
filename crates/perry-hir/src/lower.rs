@@ -4347,6 +4347,30 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             let key = iter.next().unwrap_or(Expr::Undefined);
                                             return Ok(Expr::ObjectHasOwn(Box::new(obj), Box::new(key)));
                                         }
+                                        "freeze" => { return Ok(Expr::ObjectFreeze(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "seal" => { return Ok(Expr::ObjectSeal(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "preventExtensions" => { return Ok(Expr::ObjectPreventExtensions(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "create" => { return Ok(Expr::ObjectCreate(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "isFrozen" => { return Ok(Expr::ObjectIsFrozen(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "isSealed" => { return Ok(Expr::ObjectIsSealed(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "isExtensible" => { return Ok(Expr::ObjectIsExtensible(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "getPrototypeOf" => { return Ok(Expr::ObjectGetPrototypeOf(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined)))); }
+                                        "defineProperty" => {
+                                            let mut iter = args.into_iter();
+                                            let obj = iter.next().unwrap_or(Expr::Undefined);
+                                            let key = iter.next().unwrap_or(Expr::Undefined);
+                                            let descriptor = iter.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectDefineProperty(Box::new(obj), Box::new(key), Box::new(descriptor)));
+                                        }
+                                        "getOwnPropertyDescriptor" => {
+                                            let mut iter = args.into_iter();
+                                            let obj = iter.next().unwrap_or(Expr::Undefined);
+                                            let key = iter.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectGetOwnPropertyDescriptor(Box::new(obj), Box::new(key)));
+                                        }
+                                        "getOwnPropertyNames" => {
+                                            return Ok(Expr::ObjectGetOwnPropertyNames(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined))));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

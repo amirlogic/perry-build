@@ -600,6 +600,38 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_object_has_own"), func_id);
         }
 
+        // Object property descriptor methods — 1-arg f64→f64
+        for fname in &[
+            "js_object_freeze", "js_object_seal", "js_object_prevent_extensions",
+            "js_object_is_frozen", "js_object_is_sealed", "js_object_is_extensible",
+            "js_object_get_prototype_of", "js_object_create", "js_object_get_own_property_names",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(fname, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(fname), func_id);
+        }
+        // defineProperty: 3 f64 args → f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_object_define_property", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_define_property"), func_id);
+        }
+        // getOwnPropertyDescriptor: 2 f64 args → f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_object_get_own_property_descriptor", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_get_own_property_descriptor"), func_id);
+        }
+
         // js_object_values(obj: i64) -> *mut ArrayHeader (array of values)
         {
             let mut sig = self.module.make_signature();
