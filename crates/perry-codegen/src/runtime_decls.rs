@@ -2411,6 +2411,69 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_path_is_absolute"), func_id);
         }
 
+        // js_path_relative(from: *const StringHeader, to: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_relative", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_relative"), func_id);
+        }
+
+        // js_path_normalize(path: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_normalize", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_normalize"), func_id);
+        }
+
+        // js_path_parse(path: *const StringHeader) -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_parse", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_parse"), func_id);
+        }
+
+        // js_path_format(obj: f64) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_format", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_format"), func_id);
+        }
+
+        // js_path_basename_ext(path: *const StringHeader, ext: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_basename_ext", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_basename_ext"), func_id);
+        }
+
+        // js_path_sep_get() -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_sep_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_sep_get"), func_id);
+        }
+
+        // js_path_delimiter_get() -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_path_delimiter_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_path_delimiter_get"), func_id);
+        }
+
         // BigInt runtime functions
         // js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader
         {

@@ -994,9 +994,16 @@ pub enum Expr {
     PathJoin(Box<Expr>, Box<Expr>),      // path.join(a, b) -> string
     PathDirname(Box<Expr>),              // path.dirname(path) -> string
     PathBasename(Box<Expr>),             // path.basename(path) -> string
+    PathBasenameExt(Box<Expr>, Box<Expr>), // path.basename(path, ext) -> string (strips ext suffix)
     PathExtname(Box<Expr>),              // path.extname(path) -> string
     PathResolve(Box<Expr>),              // path.resolve(path) -> string
     PathIsAbsolute(Box<Expr>),           // path.isAbsolute(path) -> boolean
+    PathRelative(Box<Expr>, Box<Expr>),  // path.relative(from, to) -> string
+    PathNormalize(Box<Expr>),            // path.normalize(path) -> string
+    PathParse(Box<Expr>),                // path.parse(path) -> { root, dir, base, ext, name }
+    PathFormat(Box<Expr>),               // path.format({ dir, base }) -> string
+    PathSep,                             // path.sep constant
+    PathDelimiter,                       // path.delimiter constant
 
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string

@@ -775,9 +775,14 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(a, closures, enclosing_class);
                 self.collect_closures_from_expr(b, closures, enclosing_class);
             }
-            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) => {
+            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::PathIsAbsolute(path) | Expr::FileURLToPath(path) | Expr::PathNormalize(path) | Expr::PathParse(path) | Expr::PathFormat(path) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
             }
+            Expr::PathRelative(from, to) | Expr::PathBasenameExt(from, to) => {
+                self.collect_closures_from_expr(from, closures, enclosing_class);
+                self.collect_closures_from_expr(to, closures, enclosing_class);
+            }
+            Expr::PathSep | Expr::PathDelimiter => {}
             // JSON operations
             Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);

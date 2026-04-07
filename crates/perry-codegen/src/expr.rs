@@ -1138,6 +1138,79 @@ pub(crate) fn compile_expr(
             let result = builder.ins().select(result_i32, true_bits, false_bits);
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
         }
+        Expr::PathRelative(from_expr, to_expr) => {
+            let from_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, from_expr, this_ctx)?;
+            let to_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, to_expr, this_ctx)?;
+            let from_ptr = get_raw_string_ptr(builder, from_val);
+            let to_ptr = get_raw_string_ptr(builder, to_val);
+            let func = extern_funcs.get("js_path_relative")
+                .ok_or_else(|| anyhow!("js_path_relative not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[from_ptr, to_ptr]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathNormalize(path_expr) => {
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let path_ptr = get_raw_string_ptr(builder, path_val);
+            let func = extern_funcs.get("js_path_normalize")
+                .ok_or_else(|| anyhow!("js_path_normalize not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathParse(path_expr) => {
+            // Returns an object { root, dir, base, ext, name }
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let path_ptr = get_raw_string_ptr(builder, path_val);
+            let func = extern_funcs.get("js_path_parse")
+                .ok_or_else(|| anyhow!("js_path_parse not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_ptr]);
+            let obj_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_pointer(builder, obj_ptr))
+        }
+        Expr::PathFormat(obj_expr) => {
+            // Takes an object { dir, base } and returns a path string.
+            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+            let obj_f64 = ensure_f64(builder, obj_val);
+            let func = extern_funcs.get("js_path_format")
+                .ok_or_else(|| anyhow!("js_path_format not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[obj_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathBasenameExt(path_expr, ext_expr) => {
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let ext_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, ext_expr, this_ctx)?;
+            let path_ptr = get_raw_string_ptr(builder, path_val);
+            let ext_ptr = get_raw_string_ptr(builder, ext_val);
+            let func = extern_funcs.get("js_path_basename_ext")
+                .ok_or_else(|| anyhow!("js_path_basename_ext not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_ptr, ext_ptr]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathSep => {
+            // POSIX: '/', Windows: '\\' — for Perry compiled binaries we always emit POSIX-style.
+            let func = extern_funcs.get("js_path_sep_get")
+                .ok_or_else(|| anyhow!("js_path_sep_get not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::PathDelimiter => {
+            let func = extern_funcs.get("js_path_delimiter_get")
+                .ok_or_else(|| anyhow!("js_path_delimiter_get not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
         Expr::FileURLToPath(url_expr) => {
             // fileURLToPath takes a NaN-boxed string (f64) and returns a NaN-boxed string (f64)
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;

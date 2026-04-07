@@ -4103,6 +4103,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                         }
                                         "basename" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let path_arg = iter.next().unwrap();
+                                                let ext_arg = iter.next().unwrap();
+                                                return Ok(Expr::PathBasenameExt(Box::new(path_arg), Box::new(ext_arg)));
+                                            }
                                             if args.len() >= 1 {
                                                 return Ok(Expr::PathBasename(Box::new(args.into_iter().next().unwrap())));
                                             }
@@ -4128,6 +4134,29 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "isAbsolute" => {
                                             if args.len() >= 1 {
                                                 return Ok(Expr::PathIsAbsolute(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "relative" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let from = iter.next().unwrap();
+                                                let to = iter.next().unwrap();
+                                                return Ok(Expr::PathRelative(Box::new(from), Box::new(to)));
+                                            }
+                                        }
+                                        "normalize" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::PathNormalize(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "parse" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::PathParse(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "format" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::PathFormat(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
@@ -6097,6 +6126,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         }
                                     }
                                     "basename" => {
+                                        if args.len() >= 2 {
+                                            let mut iter = args.into_iter();
+                                            let path_arg = iter.next().unwrap();
+                                            let ext_arg = iter.next().unwrap();
+                                            return Ok(Expr::PathBasenameExt(Box::new(path_arg), Box::new(ext_arg)));
+                                        }
                                         if args.len() >= 1 {
                                             return Ok(Expr::PathBasename(Box::new(args.into_iter().next().unwrap())));
                                         }
@@ -6120,6 +6155,29 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     "isAbsolute" => {
                                         if args.len() >= 1 {
                                             return Ok(Expr::PathIsAbsolute(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "relative" => {
+                                        if args.len() >= 2 {
+                                            let mut iter = args.into_iter();
+                                            let from = iter.next().unwrap();
+                                            let to = iter.next().unwrap();
+                                            return Ok(Expr::PathRelative(Box::new(from), Box::new(to)));
+                                        }
+                                    }
+                                    "normalize" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathNormalize(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "parse" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathParse(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "format" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathFormat(Box::new(args.into_iter().next().unwrap())));
                                         }
                                     }
                                     _ => {} // Fall through

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.65
+**Current Version:** 0.4.66
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.66
+- feat: `path.relative` / `path.parse` / `path.format` / `path.normalize` / `path.basename(p, ext)` / `path.sep` / `path.delimiter` — new HIR variants `PathRelative`, `PathParse`, `PathFormat`, `PathNormalize`, `PathBasenameExt`, `PathSep`, `PathDelimiter`; runtime functions `js_path_relative` / `js_path_normalize` / `js_path_parse` / `js_path_format` / `js_path_basename_ext` / `js_path_sep_get` / `js_path_delimiter_get` in `crates/perry-runtime/src/path.rs`. Shared `normalize_str` helper handles `..`/`.`/double-slash collapse. `path.parse` returns a `{ root, dir, base, ext, name }` shape object via `js_object_alloc_with_shape`. `path.join` now also normalizes its result so `join('/a', 'b', '..', 'c') === '/a/c'` (matches Node). Lowering added to both `is_path_module` dispatch sites in `lower.rs`. `test_gap_node_path.ts` now passes with zero diffs vs Node.
 
 ### v0.4.65
 - feat(wasm): `--target web` (alias `--target wasm`) now compiles real-world multi-module apps end-to-end. Mango (50 modules, 998 functions, classes, async, fetch with headers, Hone code editor FFI) compiles to WASM, validates, instantiates, and renders its welcome screen in the browser matching the native app. Major fixes:

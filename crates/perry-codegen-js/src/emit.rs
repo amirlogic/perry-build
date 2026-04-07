@@ -1212,6 +1212,41 @@ impl JsEmitter {
                 self.emit_expr(p);
                 self.output.push(')');
             }
+            Expr::PathRelative(from, to) => {
+                self.output.push_str("__perry.path.relative(");
+                self.emit_expr(from);
+                self.output.push_str(", ");
+                self.emit_expr(to);
+                self.output.push(')');
+            }
+            Expr::PathNormalize(p) => {
+                self.output.push_str("__perry.path.normalize(");
+                self.emit_expr(p);
+                self.output.push(')');
+            }
+            Expr::PathParse(p) => {
+                self.output.push_str("__perry.path.parse(");
+                self.emit_expr(p);
+                self.output.push(')');
+            }
+            Expr::PathFormat(p) => {
+                self.output.push_str("__perry.path.format(");
+                self.emit_expr(p);
+                self.output.push(')');
+            }
+            Expr::PathBasenameExt(p, ext) => {
+                self.output.push_str("__perry.path.basename(");
+                self.emit_expr(p);
+                self.output.push_str(", ");
+                self.emit_expr(ext);
+                self.output.push(')');
+            }
+            Expr::PathSep => {
+                self.output.push_str("__perry.path.sep");
+            }
+            Expr::PathDelimiter => {
+                self.output.push_str("__perry.path.delimiter");
+            }
 
             // --- URL ---
             Expr::FileURLToPath(u) => {

@@ -53,7 +53,7 @@ default-members = [
 [profile.release]
 lto = "thin"          # Thin LTO for faster builds and fewer duplicate symbols
 codegen-units = 1     # Better optimization, slower compile
-panic = "abort"       # EXPERIMENT: drop unwind tables (saves ~12% binary size)
+panic = "unwind"      # Allow catch_unwind for graceful error recovery
 strip = true          # Strip symbols automatically
 opt-level = 3         # Maximum optimization
 
@@ -85,7 +85,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.4.65"
+version = "0.4.66"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
