@@ -24643,6 +24643,72 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[obj_f64, key_f64]);
             Ok(builder.inst_results(call)[0])
         }
+        // RegExp operations
+        Expr::RegExpExec { regex, string } => {
+            let re = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
+            let s = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
+            let re_i64 = ensure_i64(builder, re);
+            let s_i64 = ensure_i64(builder, s);
+            let func = extern_funcs.get("js_regexp_exec").ok_or_else(|| anyhow!("js_regexp_exec not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[re_i64, s_i64]);
+            let result = builder.inst_results(call)[0];
+            Ok(inline_nanbox_pointer(builder, result))
+        }
+        Expr::RegExpExecIndex => {
+            let func = extern_funcs.get("js_regexp_exec_get_index").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::RegExpExecGroups => {
+            let func = extern_funcs.get("js_regexp_exec_get_groups").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            let result = builder.inst_results(call)[0];
+            Ok(inline_nanbox_pointer(builder, result))
+        }
+        Expr::RegExpSource(re_expr) | Expr::RegExpFlags(re_expr) => {
+            let re = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, re_expr, this_ctx)?;
+            let re_i64 = ensure_i64(builder, re);
+            let fname = if matches!(expr, Expr::RegExpSource(_)) { "js_regexp_get_source" } else { "js_regexp_get_flags" };
+            let func = extern_funcs.get(fname).ok_or_else(|| anyhow!("{} not declared", fname))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[re_i64]);
+            let result = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result))
+        }
+        Expr::RegExpLastIndex(re_expr) => {
+            let re = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, re_expr, this_ctx)?;
+            let re_i64 = ensure_i64(builder, re);
+            let func = extern_funcs.get("js_regexp_get_last_index").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[re_i64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::RegExpSetLastIndex { regex, value } => {
+            let re = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
+            let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let re_i64 = ensure_i64(builder, re);
+            let v_f64 = ensure_f64(builder, v);
+            let func = extern_funcs.get("js_regexp_set_last_index").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[re_i64, v_f64]);
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001))) // undefined
+        }
+        Expr::RegExpReplaceFn { string, regex, callback } => {
+            let s = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
+            let re = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
+            let cb = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback, this_ctx)?;
+            let s_i64 = ensure_i64(builder, s);
+            let re_i64 = ensure_i64(builder, re);
+            let cb_i64 = ensure_i64(builder, cb);
+            let func = extern_funcs.get("js_string_replace_regex_fn").ok_or_else(|| anyhow!("missing"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[s_i64, re_i64, cb_i64]);
+            let result = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result))
+        }
         // Object property descriptor methods — all call f64→f64 runtime functions
         Expr::ObjectDefineProperty(obj_expr, key_expr, desc_expr) => {
             let obj = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;

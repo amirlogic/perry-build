@@ -632,6 +632,65 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_object_get_own_property_descriptor"), func_id);
         }
 
+        // RegExp runtime functions
+        // js_regexp_exec(re: i64, s: i64) -> i64 (array ptr or null)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_regexp_exec", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_regexp_exec"), func_id);
+        }
+        // js_regexp_exec_get_index() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_regexp_exec_get_index", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_regexp_exec_get_index"), func_id);
+        }
+        // js_regexp_exec_get_groups() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_regexp_exec_get_groups", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_regexp_exec_get_groups"), func_id);
+        }
+        // 1-arg i64→i64 regex functions
+        for fname in &["js_regexp_get_source", "js_regexp_get_flags"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(fname, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(fname), func_id);
+        }
+        // js_regexp_get_last_index(re: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_regexp_get_last_index", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_regexp_get_last_index"), func_id);
+        }
+        // js_regexp_set_last_index(re: i64, val: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_regexp_set_last_index", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_regexp_set_last_index"), func_id);
+        }
+        // js_string_replace_regex_fn(s: i64, re: i64, cb: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_replace_regex_fn", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_replace_regex_fn"), func_id);
+        }
+
         // js_object_values(obj: i64) -> *mut ArrayHeader (array of values)
         {
             let mut sig = self.module.make_signature();
