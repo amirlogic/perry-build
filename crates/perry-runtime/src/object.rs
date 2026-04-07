@@ -2649,16 +2649,29 @@ unsafe fn dispatch_bigint_binary_method(
 /// `entries` is an array of arrays. Returns a NaN-boxed pointer to a new object.
 #[no_mangle]
 pub extern "C" fn js_object_from_entries(entries_value: f64) -> f64 {
-    // Get the entries array pointer
-    let arr_ptr = if (entries_value.to_bits() & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
-        (entries_value.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
-    } else {
-        // Try as raw pointer
+    // Get the entries array pointer — handle both arrays and Maps
+    let raw_ptr = {
         let bits = entries_value.to_bits();
-        if bits == 0 || bits > 0x0000_FFFF_FFFF_FFFF {
+        let tag = bits & 0xFFFF_0000_0000_0000;
+        if tag == 0x7FFD_0000_0000_0000 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+        } else if bits != 0 && bits <= 0x0000_FFFF_FFFF_FFFF {
+            bits as *const u8
+        } else {
             return f64::from_bits(crate::value::TAG_UNDEFINED);
         }
-        bits as *const ArrayHeader
+    };
+    if raw_ptr.is_null() || (raw_ptr as usize) < 0x10000 {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+
+    // Check if the input is a Map — if so, convert to entries array first
+    let arr_ptr = unsafe {
+        if crate::map::is_registered_map(raw_ptr as usize) {
+            crate::map::js_map_entries(raw_ptr as *const crate::map::MapHeader)
+        } else {
+            raw_ptr as *const ArrayHeader
+        }
     };
     if arr_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
