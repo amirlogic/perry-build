@@ -20361,7 +20361,7 @@ pub(crate) fn compile_expr(
             }
 
             // Determine which FFI function to call based on module, class, and method
-            let func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
+            let mut func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
                 // mysql2 module functions (no object)
                 ("mysql2" | "mysql2/promise", false, "createConnection") => "js_mysql2_create_connection",
                 ("mysql2" | "mysql2/promise", false, "createPool") => "js_mysql2_create_pool",
@@ -21258,6 +21258,27 @@ pub(crate) fn compile_expr(
                     return Err(anyhow!("Unsupported native method: {}.{}()", native_module, method));
                 }
             };
+
+            // jsonwebtoken.sign(payload, key, { algorithm: 'ES256' | 'RS256' })
+            // Detect a literal `algorithm` key in the options object and route to the
+            // appropriate signer. Falls through to the default `js_jwt_sign` (HS256) if no
+            // options object is present or the algorithm isn't statically known.
+            if native_module == "jsonwebtoken" && method == "sign" && args.len() > 2 {
+                if let Expr::Object(fields) = &args[2] {
+                    for (key, val) in fields {
+                        if key == "algorithm" {
+                            if let Expr::String(algo) = val {
+                                match algo.as_str() {
+                                    "ES256" => func_name = "js_jwt_sign_es256",
+                                    "RS256" => func_name = "js_jwt_sign_rs256",
+                                    _ => {}
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
 
             // Get the extern function
             let ext_func = extern_funcs.get(func_name)

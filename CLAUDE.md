@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.59
+**Current Version:** 0.4.60
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.60
+- feat: `js_jwt_sign_es256` / `js_jwt_sign_rs256` + reqwest `http2` feature — new ES256 (EC PEM key) and RS256 (RSA PEM key) JWT signers in `perry-stdlib/src/jsonwebtoken.rs` via shared `sign_common` helper using `EncodingKey::from_ec_pem`/`from_rsa_pem`. Codegen detects `jwt.sign(payload, key, { algorithm: 'ES256' | 'RS256' })` literal in `expr.rs` and reroutes `func_name` to the appropriate signer (HS256 stays default). Both registered in `runtime_decls.rs` (loop over the three names, identical signature) and stubbed in Android `stdlib_stubs.rs`. Also enables reqwest `http2` feature in `perry-stdlib/Cargo.toml`. Unblocks FCM (Firebase Cloud Messaging) OAuth assertion signing.
 
 ### v0.4.59
 - feat: `Promise.allSettled` and `Promise.any` — both implemented as new runtime functions `js_promise_all_settled` / `js_promise_any` modeled on `js_promise_all`/`race`. `allSettled` builds `{ status: "fulfilled", value }` / `{ status: "rejected", reason }` result objects via `js_object_alloc_with_shape`. `any` settles with the first fulfilled promise, or rejects with an array of rejection reasons if all reject (Perry doesn't have `AggregateError` yet — it uses a plain array)

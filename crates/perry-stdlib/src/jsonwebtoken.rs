@@ -38,46 +38,35 @@ struct Claims {
     aud: Option<String>,
 }
 
-/// Sign a payload to create a JWT
-/// jwt.sign(payload, secret) -> string
-/// jwt.sign(payload, secret, options) -> string
-#[no_mangle]
-pub unsafe extern "C" fn js_jwt_sign(
-    payload_ptr: *const StringHeader,
-    secret_ptr: *const StringHeader,
-    expires_in_secs: f64,
-) -> i64 {
-    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
-    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
+/// Shared signing logic — parse payload, apply expiry, encode with given algorithm/key.
+/// Returns a NaN-boxed string i64, or 0 on error.
+unsafe fn sign_common(
+    payload_ptr: *const StringHeader,
+    expires_in_secs: f64,
+    algorithm: Algorithm,
+    key: &EncodingKey,
+) -> i64 {
     let payload_json = match string_from_header(payload_ptr) {
         Some(p) => p,
         None => return 0,
     };
 
-    let secret = match string_from_header(secret_ptr) {
-        Some(s) => s,
-        None => return 0,
-    };
-
-    // Parse the payload JSON
     let mut claims: Claims = match serde_json::from_str(&payload_json) {
         Ok(c) => c,
-        Err(_) => {
-            // If it's not valid JSON, wrap it
-            Claims {
-                data: HashMap::new(),
-                exp: None,
-                iat: None,
-                nbf: None,
-                sub: None,
-                iss: None,
-                aud: None,
-            }
-        }
+        Err(_) => Claims {
+            data: HashMap::new(),
+            exp: None,
+            iat: None,
+            nbf: None,
+            sub: None,
+            iss: None,
+            aud: None,
+        },
     };
 
-    // Set expiration if provided
     if expires_in_secs > 0.0 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -89,17 +78,79 @@ pub unsafe extern "C" fn js_jwt_sign(
         }
     }
 
-    // Create the token
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(secret.as_bytes());
-
-    match encode(&header, &claims, &key) {
+    let header = Header::new(algorithm);
+    match encode(&header, &claims, key) {
         Ok(token) => {
             let ptr = js_string_from_bytes(token.as_ptr(), token.len() as u32);
             (STRING_TAG | (ptr as u64 & POINTER_MASK)) as i64
         }
         Err(_) => 0,
     }
+}
+
+/// Sign a payload to create a JWT (HS256)
+/// jwt.sign(payload, secret) -> string
+/// jwt.sign(payload, secret, options) -> string
+#[no_mangle]
+pub unsafe extern "C" fn js_jwt_sign(
+    payload_ptr: *const StringHeader,
+    secret_ptr: *const StringHeader,
+    expires_in_secs: f64,
+) -> i64 {
+    let secret = match string_from_header(secret_ptr) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let key = EncodingKey::from_secret(secret.as_bytes());
+    sign_common(payload_ptr, expires_in_secs, Algorithm::HS256, &key)
+}
+
+/// Sign a payload to create a JWT (ES256)
+/// `pem_ptr` must contain a PKCS#8 / SEC1 PEM-encoded EC private key (P-256 curve).
+/// jwt.sign(payload, ecPrivateKeyPem, { algorithm: 'ES256' }) -> string
+#[no_mangle]
+pub unsafe extern "C" fn js_jwt_sign_es256(
+    payload_ptr: *const StringHeader,
+    pem_ptr: *const StringHeader,
+    expires_in_secs: f64,
+) -> i64 {
+    let pem = match string_from_header(pem_ptr) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let key = match EncodingKey::from_ec_pem(pem.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("[jwt-sign-es256] invalid EC PEM key: {}", e);
+            return 0;
+        }
+    };
+    sign_common(payload_ptr, expires_in_secs, Algorithm::ES256, &key)
+}
+
+/// Sign a payload to create a JWT (RS256)
+/// `pem_ptr` must contain a PKCS#1 / PKCS#8 PEM-encoded RSA private key.
+/// jwt.sign(payload, rsaPrivateKeyPem, { algorithm: 'RS256' }) -> string
+///
+/// Used by FCM (Firebase Cloud Messaging) OAuth assertions.
+#[no_mangle]
+pub unsafe extern "C" fn js_jwt_sign_rs256(
+    payload_ptr: *const StringHeader,
+    pem_ptr: *const StringHeader,
+    expires_in_secs: f64,
+) -> i64 {
+    let pem = match string_from_header(pem_ptr) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let key = match EncodingKey::from_rsa_pem(pem.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("[jwt-sign-rs256] invalid RSA PEM key: {}", e);
+            return 0;
+        }
+    };
+    sign_common(payload_ptr, expires_in_secs, Algorithm::RS256, &key)
 }
 
 /// Verify and decode a JWT
