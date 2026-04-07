@@ -4680,37 +4680,31 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 let mut iter = args.into_iter();
                                                 let text = iter.next().unwrap();
                                                 let reviver = iter.next().unwrap();
-                                                return Ok(Expr::JsonParseReviver { text: Box::new(text), reviver: Box::new(reviver) });
+                                                return Ok(Expr::JsonParseWithReviver(Box::new(text), Box::new(reviver)));
                                             } else if args.len() >= 1 {
                                                 return Ok(Expr::JsonParse(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
                                         "stringify" => {
-                                            if args.len() >= 3 {
-                                                // JSON.stringify(value, replacer, space)
-                                                let mut iter = args.into_iter();
-                                                let value = iter.next().unwrap();
-                                                let replacer_expr = iter.next().unwrap();
-                                                let space = iter.next().unwrap();
-                                                // replacer can be null/undefined (= no replacer)
-                                                let replacer = if matches!(&replacer_expr, Expr::Null | Expr::Undefined) {
-                                                    None
-                                                } else {
-                                                    Some(Box::new(replacer_expr))
-                                                };
-                                                return Ok(Expr::JsonStringifyPretty { value: Box::new(value), replacer, space: Box::new(space) });
-                                            } else if args.len() >= 2 {
-                                                // JSON.stringify(value, replacer) — no space
-                                                let mut iter = args.into_iter();
-                                                let value = iter.next().unwrap();
-                                                let replacer_expr = iter.next().unwrap();
-                                                if matches!(&replacer_expr, Expr::Null | Expr::Undefined) {
-                                                    return Ok(Expr::JsonStringify(Box::new(value)));
-                                                }
-                                                // Has a replacer function/array: wrap with space=0 (no pretty)
-                                                return Ok(Expr::JsonStringifyPretty { value: Box::new(value), replacer: Some(Box::new(replacer_expr)), space: Box::new(Expr::Number(0.0)) });
-                                            } else if args.len() >= 1 {
-                                                return Ok(Expr::JsonStringify(Box::new(args.into_iter().next().unwrap())));
+                                            if args.len() >= 2 {
+                                                let mut it = args.into_iter();
+                                                let value = it.next().unwrap();
+                                                let replacer = it.next().unwrap();
+                                                let spacer = it.next().unwrap_or(Expr::Null);
+                                                return Ok(Expr::JsonStringifyFull(
+                                                    Box::new(value),
+                                                    Box::new(replacer),
+                                                    Box::new(spacer),
+                                                ));
+                                            } else if args.len() == 1 {
+                                                let value = args.into_iter().next().unwrap();
+                                                // Route ALL single-arg stringify through JsonStringifyFull
+                                                // so the runtime can return TAG_UNDEFINED for undefined input
+                                                return Ok(Expr::JsonStringifyFull(
+                                                    Box::new(value),
+                                                    Box::new(Expr::Null),
+                                                    Box::new(Expr::Null),
+                                                ));
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
