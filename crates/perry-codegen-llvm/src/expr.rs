@@ -3402,11 +3402,15 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         // String coerce, JSON.stringify, ArrayJoin, etc. all return
         // strings.
         Expr::StringCoerce(_)
+        | Expr::TypeOf(_)
         | Expr::ArrayJoin { .. }
         | Expr::JsonStringifyFull(..)
         | Expr::PathJoin(..)
         | Expr::PathDirname(_)
-        | Expr::PathBasename(_) => true,
+        | Expr::PathBasename(_)
+        | Expr::PathExtname(_)
+        | Expr::PathResolve(_)
+        | Expr::PathNormalize(_) => true,
         // `obj.toString()` always returns a string. Recognize the
         // call shape so chained concat detects it.
         Expr::Call { callee, args, .. }
