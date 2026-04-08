@@ -52,6 +52,24 @@ fn nanbox_string_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
     blk.bitcast_i64_to_double(&tagged)
 }
 
+/// Convert an i32 boolean (0 or 1) returned by a runtime function into a
+/// NaN-tagged JSValue boolean (`TAG_TRUE` / `TAG_FALSE`). Many runtime
+/// functions like `js_string_includes`, `js_array_includes_*`, `js_map_has`,
+/// `js_set_has`, `js_regexp_test`, `fs_exists_sync`, etc. return raw i32
+/// 0/1; without this conversion `console.log(arr.includes(x))` prints `0`/
+/// `1` instead of `false`/`true`.
+fn i32_bool_to_nanbox(blk: &mut LlBlock, i32_val: &str) -> String {
+    let bit = blk.icmp_ne(I32, i32_val, "0");
+    let tagged = blk.select(
+        I1,
+        &bit,
+        I64,
+        crate::nanbox::TAG_TRUE_I64,
+        crate::nanbox::TAG_FALSE_I64,
+    );
+    blk.bitcast_i64_to_double(&tagged)
+}
+
 /// Per-function codegen context. Held briefly during lowering, never stored.
 pub(crate) struct FnCtx<'a> {
     /// Function being built (blocks, params, registers).
@@ -191,7 +209,16 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::ArraySlice { .. }
         | Expr::ArrayMap { .. }
         | Expr::ArrayFilter { .. }
-        | Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::Any))),
+        | Expr::ArrayFlat { .. }
+        | Expr::ArrayFlatMap { .. }
+        | Expr::ObjectKeys(_)
+        | Expr::ObjectValues(_)
+        | Expr::ObjectEntries(_)
+        | Expr::ArrayEntries { .. }
+        | Expr::ArrayKeys { .. }
+        | Expr::ArrayValues { .. }
+        | Expr::StringMatch { .. }
+        | Expr::StringMatchAll { .. } => Some(HirType::Array(Box::new(HirType::Any))),
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {
             Some(HirType::String)
         }
@@ -670,6 +697,38 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let tagged_i64 = blk.select(
                     crate::types::I1,
                     &bit_final,
+                    crate::types::I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged_i64));
+            }
+            // String relational fast path: `s1 < s2`, `s1 > s2`, etc.
+            // fcmp on NaN-tagged pointers is unordered (always false),
+            // so dispatch through js_string_compare which returns
+            // -1/0/1 like memcmp. Then test the result against 0 with
+            // the right icmp predicate.
+            if both_strings && matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge) {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_handle = unbox_to_i64(blk, &l);
+                let r_handle = unbox_to_i64(blk, &r);
+                let cmp_i32 = blk.call(
+                    I32,
+                    "js_string_compare",
+                    &[(I64, &l_handle), (I64, &r_handle)],
+                );
+                let bit = match op {
+                    CompareOp::Lt => blk.icmp_slt(I32, &cmp_i32, "0"),
+                    CompareOp::Le => blk.icmp_sle(I32, &cmp_i32, "0"),
+                    CompareOp::Gt => blk.icmp_sgt(I32, &cmp_i32, "0"),
+                    CompareOp::Ge => blk.icmp_sge(I32, &cmp_i32, "0"),
+                    _ => unreachable!(),
+                };
+                let tagged_i64 = blk.select(
+                    crate::types::I1,
+                    &bit,
                     crate::types::I64,
                     crate::nanbox::TAG_TRUE_I64,
                     crate::nanbox::TAG_FALSE_I64,
@@ -1461,7 +1520,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
         // Math.random — return 0.5 sentinel. Real impl needs a PRNG
         // we'd link in; sentinel keeps the compile-pass count up.
-        Expr::MathRandom => Ok(double_literal(0.5)),
+        Expr::MathRandom => Ok(ctx.block().call(DOUBLE, "js_math_random", &[])),
 
         // `JSON.stringify(value)` (3-arg form with indent ignored for now).
         Expr::JsonStringifyFull(value, _replacer, _indent) => {
@@ -2002,14 +2061,26 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- RegExpTest / RegExpExec stubs --------
-        // Real regex matching needs js_regexp_test / js_regexp_exec
-        // dispatch with the right return shape. For now we return
-        // false / null sentinels.
+        // -------- RegExpTest --------
+        // regex.test(str) -> boolean. Real call to js_regexp_test.
+        // Receiver is a NaN-tagged i64 RegExpHeader pointer; arg is
+        // a NaN-tagged string. Both must be unboxed before the call.
         Expr::RegExpTest { regex, string } => {
-            let _ = lower_expr(ctx, regex)?;
-            let _ = lower_expr(ctx, string)?;
-            Ok(double_literal(0.0))
+            let regex_box = lower_expr(ctx, regex)?;
+            let str_box = lower_expr(ctx, string)?;
+            let blk = ctx.block();
+            let regex_handle = unbox_to_i64(blk, &regex_box);
+            // String pointer extraction goes through the unified
+            // helper because the receiver may be a literal, a local,
+            // or a concat result.
+            let str_handle =
+                blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &str_box)]);
+            let i32_v = blk.call(
+                I32,
+                "js_regexp_test",
+                &[(I64, &regex_handle), (I64, &str_handle)],
+            );
+            Ok(i32_bool_to_nanbox(blk, &i32_v))
         }
         Expr::RegExpExec { regex, string } => {
             let _ = lower_expr(ctx, regex)?;
@@ -2188,8 +2259,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &result))
         }
         Expr::PathParse(p) => {
-            // Stub: return the input string unchanged.
-            lower_expr(ctx, p)
+            // path.parse(p) -> object with { dir, base, ext, name, root }
+            let p_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let p_handle = unbox_to_i64(blk, &p_box);
+            let result = blk.call(I64, "js_path_parse", &[(I64, &p_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
         }
 
         // -------- JSON.parse --------
@@ -2276,28 +2351,41 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- FuncRef as expression value (function reference) --------
-        // Returns the function pointer as a NaN-boxed value. Calls
-        // through this value will fail at runtime since we don't
-        // wrap it in a closure header — but compile succeeds, and
-        // the caller often only uses it as a unique identity check.
+        // When a user function is passed as a value (e.g. `apply(add,
+        // 3, 4)`), wrap it in a heap closure so the receiver can call
+        // it via `js_closure_callN`. The wrapper function
+        // `__perry_wrap_<name>` is emitted by `compile_module` for
+        // every user function and has the closure-call ABI: it takes
+        // `(closure_ptr, arg0, arg1, ...)` and forwards to the
+        // underlying function.
         Expr::FuncRef(id) => {
             let func_name = ctx
                 .func_names
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| "perry_unknown_func".to_string());
-            // Take the function address and box it as a pointer.
-            // ptrtoint @func to i64, then nanbox.
+            let wrap_name = format!("__perry_wrap_{}", func_name);
             let blk = ctx.block();
-            let func_ptr = format!("@{}", func_name);
-            let i64_v = blk.ptrtoint(&func_ptr, I64);
-            Ok(nanbox_pointer_inline(blk, &i64_v))
+            let wrap_ptr = format!("@{}", wrap_name);
+            // js_closure_alloc(func_ptr, capture_count=0) → ClosureHeader*
+            // The first arg is a `ptr` in LLVM IR (since the runtime
+            // takes `*const u8`). Pass `@wrap_name` directly — LLVM
+            // handles the implicit function-to-pointer cast.
+            let closure_handle = blk.call(
+                I64,
+                "js_closure_alloc",
+                &[(PTR, &wrap_ptr), (I32, "0")],
+            );
+            Ok(nanbox_pointer_inline(blk, &closure_handle))
         }
 
-        // -------- Stubs for Path/Process/Number/etc. --------
+        // -------- path.extname(p) -> string --------
         Expr::PathExtname(p) => {
-            // Stub: return the input path unchanged.
-            lower_expr(ctx, p)
+            let p_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let p_handle = unbox_to_i64(blk, &p_box);
+            let result = blk.call(I64, "js_path_extname", &[(I64, &p_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
         }
         Expr::PathFormat(o) => lower_expr(ctx, o),
         Expr::ProcessVersion => Ok(double_literal(0.0)),
@@ -2412,10 +2500,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(ctx.block(), &handle))
         }
 
-        // -------- DateGetTime / DateUtc / DateGetTimezoneOffset stubs --------
-        Expr::DateGetTime(_) | Expr::DateGetTimezoneOffset(_) | Expr::DateUtc(_) => {
-            Ok(double_literal(0.0))
+        // -------- DateGetTime / DateGetTimezoneOffset --------
+        Expr::DateGetTime(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_time", &[(DOUBLE, &v)]))
         }
+        Expr::DateGetTimezoneOffset(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_timezone_offset", &[(DOUBLE, &v)]))
+        }
+        // -------- DateUtc stub --------
+        Expr::DateUtc(_) => Ok(double_literal(0.0)),
 
         // -------- Object.defineProperty stub --------
         Expr::ObjectDefineProperty(obj, key, value) => {
@@ -2487,11 +2582,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &v), (DOUBLE, &third)]))
         }
 
-        // -------- Date.* getter stubs --------
-        Expr::DateGetFullYear(_)
-        | Expr::DateGetUtcDay(_)
-        | Expr::DateGetMonth(_)
-        | Expr::DateValueOf(_) => Ok(double_literal(0.0)),
+        // -------- Date.* getters: real runtime calls --------
+        Expr::DateGetFullYear(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_full_year", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetMonth(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_month", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcDay(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_day", &[(DOUBLE, &v)]))
+        }
+        Expr::DateValueOf(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_value_of", &[(DOUBLE, &v)]))
+        }
 
         // -------- ProcessOn (event handler registration) stub --------
         Expr::ProcessOn { handler, .. } => {
@@ -2570,23 +2677,74 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let _ = lower_expr(ctx, value)?;
             Ok(double_literal(0.0))
         }
-        Expr::DateGetDate(_)
-        | Expr::DateGetUtcDate(_)
-        | Expr::DateGetUtcFullYear(_)
-        | Expr::DateGetUtcMonth(_)
-        | Expr::DateGetHours(_)
-        | Expr::DateGetMinutes(_)
-        | Expr::DateGetSeconds(_)
-        | Expr::DateGetMilliseconds(_)
-        | Expr::DateGetUtcHours(_)
-        | Expr::DateGetUtcMinutes(_)
-        | Expr::DateGetUtcSeconds(_)
-        | Expr::DateGetUtcMilliseconds(_) => Ok(double_literal(0.0)),
+        Expr::DateGetDate(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_date", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcDate(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_date", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcFullYear(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_full_year", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcMonth(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_month", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetHours(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_hours", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetMinutes(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_minutes", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetSeconds(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_seconds", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetMilliseconds(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_milliseconds", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcHours(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_hours", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcMinutes(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_minutes", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcSeconds(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_seconds", &[(DOUBLE, &v)]))
+        }
+        Expr::DateGetUtcMilliseconds(d) => {
+            let v = lower_expr(ctx, d)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_get_utc_milliseconds", &[(DOUBLE, &v)]))
+        }
         Expr::Btoa(o) | Expr::Atob(o) => lower_expr(ctx, o),
-        Expr::ArrayFlat { array } => lower_expr(ctx, array),
+        Expr::ArrayFlat { array } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(I64, "js_array_flat", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
         Expr::ArrayFlatMap { array, callback } => {
-            let _ = lower_expr(ctx, callback)?;
-            lower_expr(ctx, array)
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(
+                I64,
+                "js_array_flatMap",
+                &[(I64, &arr_handle), (I64, &cb_handle)],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
         }
 
         // -------- Math.sin/cos via LLVM intrinsics --------
@@ -3044,7 +3202,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let p = lower_expr(ctx, path)?;
             let blk = ctx.block();
             let i32_v = blk.call(I32, "js_fs_exists_sync", &[(DOUBLE, &p)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            Ok(i32_bool_to_nanbox(blk, &i32_v))
         }
 
         // -------- Number(value) coercion --------
@@ -3300,6 +3458,41 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
             let handle =
                 blk.call(I64, "js_number_to_fixed", &[(DOUBLE, &v), (DOUBLE, &dec)]);
             return Ok(nanbox_string_inline(blk, &handle));
+        }
+        // Number.prototype.toString(radix) — special case where the
+        // single arg is the radix (2..36). Routes through
+        // js_jsvalue_to_string_radix so `(255).toString(16)` returns
+        // "ff" instead of "255".
+        if property == "toString"
+            && args.len() == 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+        {
+            // Only treat as radix call if class doesn't have toString.
+            let has_user_toString = receiver_class_name(ctx, object)
+                .map(|cls| {
+                    let mut cur = Some(cls);
+                    while let Some(c) = cur {
+                        if ctx.methods.contains_key(&(c.clone(), "toString".to_string())) {
+                            return true;
+                        }
+                        cur = ctx.classes.get(&c).and_then(|cd| cd.extends_name.clone());
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if !has_user_toString {
+                let v = lower_expr(ctx, object)?;
+                let radix_d = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let radix_i32 = blk.fptosi(DOUBLE, &radix_d, I32);
+                let handle = blk.call(
+                    I64,
+                    "js_jsvalue_to_string_radix",
+                    &[(DOUBLE, &v), (I32, &radix_i32)],
+                );
+                return Ok(nanbox_string_inline(blk, &handle));
+            }
         }
         // Universal `.toString()` — works for any JS value via the
         // runtime's js_jsvalue_to_string dispatch (numbers print as
@@ -3646,41 +3839,31 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                 ctx.block().call_void(runtime_fn, &[(DOUBLE, &v)]);
                 return Ok("0.0".to_string());
             }
-            // Multi-arg: build a single string by joining all args
-            // with spaces, then print once. Without this, multi-arg
-            // console.log printed each arg on its own line because
-            // js_console_log_dynamic uses println!.
-            let space_idx = ctx.strings.intern(" ");
-            let space_global = format!("@{}", ctx.strings.entry(space_idx).handle_global);
-            let mut acc_handle: Option<String> = None;
-            for (i, arg) in args.iter().enumerate() {
+            // Multi-arg: bundle all args into a heap array and call
+            // js_console_log_spread, which uses the runtime's
+            // format_jsvalue (Node-style util.inspect output for
+            // objects/arrays). This is more accurate than
+            // js_jsvalue_to_string which only does the JS toString
+            // protocol (returns "[object Object]" for plain objects).
+            let cap = (args.len() as u32).to_string();
+            let mut current_arr = ctx
+                .block()
+                .call(I64, "js_array_alloc", &[(I32, &cap)]);
+            for arg in args.iter() {
                 let v = lower_expr(ctx, arg)?;
                 let blk = ctx.block();
-                let arg_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
-                if let Some(prev) = acc_handle {
-                    // acc = acc + " " + arg_str
-                    let space_box = blk.load(DOUBLE, &space_global);
-                    let space_handle = unbox_to_i64(blk, &space_box);
-                    let with_space = blk.call(
-                        I64,
-                        "js_string_concat",
-                        &[(I64, &prev), (I64, &space_handle)],
-                    );
-                    acc_handle = Some(blk.call(
-                        I64,
-                        "js_string_concat",
-                        &[(I64, &with_space), (I64, &arg_handle)],
-                    ));
-                } else {
-                    let _ = i;
-                    acc_handle = Some(arg_handle);
-                }
+                current_arr = blk.call(
+                    I64,
+                    "js_array_push_f64",
+                    &[(I64, &current_arr), (DOUBLE, &v)],
+                );
             }
-            if let Some(handle) = acc_handle {
-                let blk = ctx.block();
-                let nanboxed = nanbox_string_inline(blk, &handle);
-                blk.call_void("js_console_log_dynamic", &[(DOUBLE, &nanboxed)]);
-            }
+            let runtime_fn = match property.as_str() {
+                "warn" => "js_console_warn_spread",
+                "error" => "js_console_error_spread",
+                _ => "js_console_log_spread",
+            };
+            ctx.block().call_void(runtime_fn, &[(I64, &current_arr)]);
             return Ok("0.0".to_string());
         }
     }
@@ -4428,8 +4611,38 @@ fn lower_string_method(
                 runtime_fn,
                 &[(I64, &recv_handle), (I64, &other_handle)],
             );
-            // 0/1 → 0.0/1.0 (numeric "boolean" — same as Compare results).
-            Ok(blk.sitofp(I32, &result_i32, DOUBLE))
+            Ok(i32_bool_to_nanbox(blk, &result_i32))
+        }
+        "includes" => {
+            // str.includes(sub) -> boolean. Implemented as
+            // js_string_index_of(str, sub) != -1, then NaN-tagged.
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: String.includes expects 1 or 2 args, got {}", args.len());
+            }
+            let needle_box = lower_expr(ctx, &args[0])?;
+            // Optional fromIndex param is ignored for the boolean form.
+            if args.len() == 2 {
+                let _ = lower_expr(ctx, &args[1])?;
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let idx_i32 = blk.call(
+                I32,
+                "js_string_index_of",
+                &[(I64, &recv_handle), (I64, &needle_handle)],
+            );
+            // includes := indexOf != -1
+            let neg_one = "-1".to_string();
+            let bit = blk.icmp_ne(I32, &idx_i32, &neg_one);
+            let tagged = blk.select(
+                I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
         // Best-effort fallback: lower args for side effects, return
         // the receiver string. Compile succeeds; runtime gets the
@@ -4520,11 +4733,55 @@ fn lower_array_method(
             Ok(nanbox_pointer_inline(blk, &result))
         }
         "sort" => {
-            // arr.sort() with no comparator: use the default comparator.
-            // Since we don't have js_array_sort_default declared in the
-            // runtime decls, just return the receiver unchanged. Wrong
-            // (no actual sort) but doesn't crash.
-            Ok(recv_box)
+            // arr.sort() — default comparator (stringwise compare).
+            // arr.sort(cb) — custom comparator path.
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = if args.is_empty() {
+                blk.call(I64, "js_array_sort_default", &[(I64, &recv_handle)])
+            } else {
+                let cb_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let recv_handle = unbox_to_i64(blk, &recv_box);
+                let cb_handle = unbox_to_i64(blk, &cb_box);
+                blk.call(
+                    I64,
+                    "js_array_sort_with_comparator",
+                    &[(I64, &recv_handle), (I64, &cb_handle)],
+                )
+            };
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
+        }
+        "reverse" => {
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_reverse", &[(I64, &recv_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "flat" => {
+            // arr.flat() / arr.flat(depth) — depth is ignored for now.
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_flat", &[(I64, &recv_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "flatMap" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.flatMap expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(
+                I64,
+                "js_array_flatMap",
+                &[(I64, &recv_handle), (I64, &cb_handle)],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
         }
         // Best-effort fallback: lower args for side effects, return
         // the receiver. Many array methods are property-access shapes
@@ -4694,6 +4951,9 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
             HirType::Named(name) => Some(name.clone()),
             _ => None,
         },
+        // `new ClassName(...)` — the receiver class is the constructed class.
+        // Lets `(new Config()).toString()` find Config's user toString.
+        Expr::New { class_name, .. } => Some(class_name.clone()),
         // `this` inside a constructor or method body — the class name is
         // at the top of class_stack (for inlined constructors) or comes
         // from the enclosing method's owning class.

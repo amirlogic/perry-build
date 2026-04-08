@@ -415,6 +415,42 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Emit FuncRef-as-value wrappers. For each user function, generate
+    // a thin wrapper `__perry_wrap_<name>` whose signature matches the
+    // closure-call ABI: `double(i64 this_closure, double arg0, double
+    // arg1, ...)`. The wrapper discards the closure pointer and forwards
+    // the args to the underlying function.
+    //
+    // The wrapper exists so that `apply(add, 3, 4)` can pass `add` as
+    // a value and have `apply` call it via `js_closure_call2`. Without
+    // a wrapper, the closure call would invoke `add(closure, 3, 4)`
+    // (wrong calling convention) instead of `add(3, 4)`.
+    //
+    // Wrappers are emitted unconditionally for every user function;
+    // dead-code elimination at link time will remove unused ones.
+    for f in &hir.functions {
+        let original_name = func_names.get(&f.id).cloned().unwrap();
+        // Wrapper signature: i64 closure_ptr + N doubles for args.
+        // Cap at 5 since js_closure_call only goes up to 5 args.
+        let arity = f.params.len().min(5);
+        let mut wrap_params: Vec<(LlvmType, String)> =
+            vec![(I64, "%this_closure".to_string())];
+        for i in 0..arity {
+            wrap_params.push((DOUBLE, format!("%a{}", i)));
+        }
+        let wrap_name = format!("__perry_wrap_{}", original_name);
+        let wf = llmod.define_function(&wrap_name, DOUBLE, wrap_params);
+        let _ = wf.create_block("entry");
+        let blk = wf.block_mut(0).unwrap();
+        // Call the underlying function with just the arg doubles.
+        let call_args: Vec<(LlvmType, &str)> = (0..arity)
+            .map(|i| (DOUBLE, if i == 0 { "%a0" } else if i == 1 { "%a1" }
+                else if i == 2 { "%a2" } else if i == 3 { "%a3" } else { "%a4" }))
+            .collect();
+        let result = blk.call(DOUBLE, &original_name, &call_args);
+        blk.ret(DOUBLE, &result);
+    }
+
     // Emit either `int main()` (entry module) or `void <prefix>__init()`
     // (non-entry module). The entry main calls each non-entry init in
     // order before running its own statements.
