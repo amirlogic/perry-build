@@ -1808,18 +1808,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // js_fs_read_file_binary.
         Expr::FsReadFileBinary(_path) => Ok(double_literal(0.0)),
 
-        // -------- instanceof stub --------
-        // Real instanceof needs a class_id lookup table. For now we
-        // call the runtime with class_id=0 which always returns false
-        // for non-matching types. Wrong for any positive case but
-        // doesn't crash.
-        Expr::InstanceOf { expr: e, .. } => {
+        // -------- instanceof --------
+        // Look up the target class's id and call js_instanceof. The
+        // runtime walks the object's class chain and returns a
+        // NaN-tagged TAG_TRUE/TAG_FALSE double directly — no
+        // conversion needed.
+        Expr::InstanceOf { expr: e, ty } => {
             let v = lower_expr(ctx, e)?;
-            let zero = "0".to_string();
+            let cid = ctx.class_ids.get(ty).copied().unwrap_or(0);
+            let cid_str = cid.to_string();
             Ok(ctx.block().call(
                 DOUBLE,
                 "js_instanceof",
-                &[(DOUBLE, &v), (I32, &zero)],
+                &[(DOUBLE, &v), (I32, &cid_str)],
             ))
         }
 
@@ -3728,16 +3729,28 @@ fn lower_new(
         }
     }
 
-    // Allocate the object with the per-class id from the registry
-    // (0 is reserved for anonymous object literals; user classes
-    // get 1..N). The id is read by virtual method dispatch and
-    // instanceof at runtime.
+    // Allocate the object with the per-class id and (if applicable)
+    // parent class id, so the runtime registers the inheritance
+    // chain for instanceof / virtual dispatch lookups.
     let cid = ctx.class_ids.get(class_name).copied().unwrap_or(0);
+    let parent_cid = class
+        .extends_name
+        .as_deref()
+        .and_then(|p| ctx.class_ids.get(p).copied())
+        .unwrap_or(0);
     let cid_str = cid.to_string();
+    let parent_cid_str = parent_cid.to_string();
     let n_str = field_count.to_string();
-    let obj_handle = ctx
-        .block()
-        .call(I64, "js_object_alloc", &[(I32, &cid_str), (I32, &n_str)]);
+    let obj_handle = if parent_cid != 0 {
+        ctx.block().call(
+            I64,
+            "js_object_alloc_with_parent",
+            &[(I32, &cid_str), (I32, &parent_cid_str), (I32, &n_str)],
+        )
+    } else {
+        ctx.block()
+            .call(I64, "js_object_alloc", &[(I32, &cid_str), (I32, &n_str)])
+    };
     let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
 
     // Allocate a `this` slot and store the new object there.
