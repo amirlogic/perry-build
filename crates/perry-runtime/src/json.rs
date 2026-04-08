@@ -582,9 +582,9 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
     if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
         let msg = "Converting circular structure to JSON";
         let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
-        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
-        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
-        (*err_ptr).name = type_error_name;
+        // Use js_typeerror_new so error_kind == ERROR_KIND_TYPE_ERROR and
+        // `e instanceof TypeError` returns true (matching Node).
+        let err_ptr = crate::error::js_typeerror_new(msg_ptr);
         crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
     }
     STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
@@ -1369,11 +1369,9 @@ unsafe fn stringify_object_pretty(ptr: *const u8, buf: &mut String, indent: &str
     if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
         let msg = "Converting circular structure to JSON";
         let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
-        // Create a TypeError error object
-        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
-        // Set the name to "TypeError"
-        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
-        (*err_ptr).name = type_error_name;
+        // Use js_typeerror_new so error_kind == ERROR_KIND_TYPE_ERROR and
+        // `e instanceof TypeError` returns true (matching Node).
+        let err_ptr = crate::error::js_typeerror_new(msg_ptr);
         crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
     }
     STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
@@ -1493,11 +1491,9 @@ unsafe fn stringify_object_with_array_replacer(
     if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
         let msg = "Converting circular structure to JSON";
         let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
-        // Create a TypeError error object
-        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
-        // Set the name to "TypeError"
-        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
-        (*err_ptr).name = type_error_name;
+        // Use js_typeerror_new so error_kind == ERROR_KIND_TYPE_ERROR and
+        // `e instanceof TypeError` returns true (matching Node).
+        let err_ptr = crate::error::js_typeerror_new(msg_ptr);
         crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
     }
     STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));

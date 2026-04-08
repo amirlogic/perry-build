@@ -9242,9 +9242,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             Ok(Expr::Yield { value, delegate: y.delegate })
         }
         ast::Expr::TaggedTpl(tagged) => {
-            // Tagged template literals: tag`...`
-            // Currently only String.raw is supported — it returns the raw string
-            // without escape processing (backslashes kept literal).
+            // Tagged template literals: tag`Hello ${name},${42}!`
+            // Two cases:
+            //  (a) String.raw — kept as a fast-path string concatenation that
+            //      preserves backslashes literally (no escape processing).
+            //  (b) Any other tag function — desugar to a regular function call:
+            //      tag(["Hello ", ",", "!"], name, 42)
+            //      i.e. first arg is the array of cooked string literal parts,
+            //      followed by each interpolated value as its own argument.
+            //      The matches the JS spec for `tag` callbacks (sans `.raw`).
             let is_string_raw = match &*tagged.tag {
                 ast::Expr::Member(member) => {
                     let obj_is_string = match &member.obj.as_ref() {
@@ -9260,42 +9266,76 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 _ => false,
             };
 
-            if !is_string_raw {
-                return Err(anyhow!("Unsupported tagged template literal (only String.raw is supported): {:?}", tagged.tag));
-            }
-
             let tpl = &*tagged.tpl;
             if tpl.quasis.is_empty() {
                 return Ok(Expr::String(String::new()));
             }
 
-            // For String.raw, use raw strings directly (no escape processing)
-            let first_raw = tpl.quasis.first()
-                .map(|q| q.raw.as_ref())
-                .unwrap_or("");
-            let mut result = Expr::String(first_raw.to_string());
+            if is_string_raw {
+                // Fast path: build string via direct concatenation using `raw` text
+                let first_raw = tpl.quasis.first()
+                    .map(|q| q.raw.as_ref())
+                    .unwrap_or("");
+                let mut result = Expr::String(first_raw.to_string());
 
-            for (i, expr) in tpl.exprs.iter().enumerate() {
-                let lowered = lower_expr(ctx, expr)?;
-                result = Expr::Binary {
-                    op: BinaryOp::Add,
-                    left: Box::new(result),
-                    right: Box::new(lowered),
-                };
+                for (i, expr) in tpl.exprs.iter().enumerate() {
+                    let lowered = lower_expr(ctx, expr)?;
+                    result = Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(result),
+                        right: Box::new(lowered),
+                    };
 
-                if let Some(quasi) = tpl.quasis.get(i + 1) {
-                    let quasi_str: &str = quasi.raw.as_ref();
-                    if !quasi_str.is_empty() {
-                        result = Expr::Binary {
-                            op: BinaryOp::Add,
-                            left: Box::new(result),
-                            right: Box::new(Expr::String(quasi_str.to_string())),
-                        };
+                    if let Some(quasi) = tpl.quasis.get(i + 1) {
+                        let quasi_str: &str = quasi.raw.as_ref();
+                        if !quasi_str.is_empty() {
+                            result = Expr::Binary {
+                                op: BinaryOp::Add,
+                                left: Box::new(result),
+                                right: Box::new(Expr::String(quasi_str.to_string())),
+                            };
+                        }
                     }
                 }
+
+                return Ok(result);
             }
 
-            Ok(result)
+            // General case: desugar to `tag(stringsArray, ...exprs)`
+            // The strings array uses each quasi's COOKED value (with escapes
+            // processed). Per spec it should also have a `.raw` property, but
+            // most user code doesn't read it; if a test exercises that we can
+            // upgrade to a wrapper object later.
+            let cooked_strings: Vec<Expr> = tpl
+                .quasis
+                .iter()
+                .map(|q| {
+                    // Each quasi has both `raw` and an optional `cooked` form;
+                    // prefer `cooked` so escapes like `\n` are processed.
+                    // `cooked` is a `Wtf8Atom` whose `as_str()` returns `Option<&str>`
+                    // (None when the original source had non-UTF8 bytes — falls back to raw).
+                    let cooked_owned: Option<String> = q
+                        .cooked
+                        .as_ref()
+                        .and_then(|c| c.as_str().map(|s| s.to_string()));
+                    let s = cooked_owned.unwrap_or_else(|| q.raw.as_ref().to_string());
+                    Expr::String(s)
+                })
+                .collect();
+            let strings_array = Expr::Array(cooked_strings);
+
+            let mut call_args: Vec<Expr> = Vec::with_capacity(tpl.exprs.len() + 1);
+            call_args.push(strings_array);
+            for e in &tpl.exprs {
+                call_args.push(lower_expr(ctx, e)?);
+            }
+
+            let callee = lower_expr(ctx, &tagged.tag)?;
+            Ok(Expr::Call {
+                callee: Box::new(callee),
+                args: call_args,
+                type_args: vec![],
+            })
         }
         // Class expression used as a value (not in `new` context)
         ast::Expr::Class(class_expr) => {

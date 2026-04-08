@@ -274,7 +274,13 @@ pub(crate) fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) 
                     }
                     if obj_name == "JSON" {
                         return match method_name {
-                            "stringify" => Type::String,
+                            // JSON.stringify USUALLY returns a string, but returns
+                            // `undefined` for undefined / functions / symbols. Using
+                            // Type::String would make `console.log(JSON.stringify(undefined))`
+                            // print empty (string slot stayed at TAG_UNDEFINED bits).
+                            // Use a String|Undefined union so callers route through
+                            // dynamic dispatch instead.
+                            "stringify" => Type::Union(vec![Type::String, Type::Void]),
                             _ => Type::Any,  // parse returns any
                         };
                     }

@@ -168,6 +168,20 @@ pub mod cron;
 #[cfg(feature = "scheduler")]
 pub use cron::*;
 
+// Unconditional cron timer stubs — always present so the CLI event loop in
+// `module_init.rs` can call `js_cron_timer_tick` / `js_cron_timer_has_pending`
+// even when the `scheduler` feature is disabled (e.g. an auto-optimized build
+// of a project that imports `node:crypto` but not `node-cron`). With the
+// scheduler feature ENABLED, these symbols are provided by `cron.rs` instead;
+// the `#[cfg(not(feature = "scheduler"))]` gate below prevents a duplicate
+// symbol error in that case.
+#[cfg(not(feature = "scheduler"))]
+#[no_mangle]
+pub extern "C" fn js_cron_timer_tick() -> i32 { 0 }
+#[cfg(not(feature = "scheduler"))]
+#[no_mangle]
+pub extern "C" fn js_cron_timer_has_pending() -> i32 { 0 }
+
 // === Rate Limiting ===
 #[cfg(feature = "rate-limit")]
 pub mod ratelimit;
