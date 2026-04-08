@@ -129,6 +129,11 @@ pub(crate) struct FnCtx<'a> {
     /// `Stmt::Return(value)` wraps `value` in `js_promise_resolved`
     /// before returning, so callers can `await` the result.
     pub is_async_fn: bool,
+    /// Static class fields: `(class_name, field_name) → llvm global
+    /// symbol`. Built once in `compile_module`. Used by
+    /// `Expr::StaticFieldGet/Set` to load/store the global.
+    pub static_field_globals:
+        &'a std::collections::HashMap<(String, String), String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -1682,12 +1687,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(ctx.block(), &handle))
         }
 
-        // -------- StaticMethodCall stub --------
-        // `MyClass.staticMethod(args)`. Real dispatch would call
-        // a `perry_static_<class>__<method>` function which we don't
-        // emit yet. For now we lower the args for side effects and
-        // return 0.0.
-        Expr::StaticMethodCall { args, .. } => {
+        // -------- StaticMethodCall --------
+        // `MyClass.staticMethod(args)` — look up the synthesized
+        // `perry_method_<modprefix>__<class>__<method>` in the methods
+        // registry and emit a direct call. Static methods don't take
+        // a `this` parameter (unlike instance methods).
+        Expr::StaticMethodCall { class_name, method_name, args } => {
+            let key = (class_name.clone(), method_name.clone());
+            if let Some(fn_name) = ctx.methods.get(&key).cloned() {
+                let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+                for a in args {
+                    lowered.push(lower_expr(ctx, a)?);
+                }
+                let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                    lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+                return Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices));
+            }
             for a in args {
                 let _ = lower_expr(ctx, a)?;
             }
@@ -2706,23 +2721,29 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_promise_value", &[(I64, &promise_handle)]))
         }
 
-        // -------- StaticFieldGet/Set, NativeModuleRef stubs --------
-        //
-        // These three have legitimate uses but their full
-        // implementation would need class static state and module
-        // registries we don't yet have. We emit a sentinel `0.0`
-        // (which the runtime treats as the JS number 0) so programs
-        // that touch them compile but produce slightly-wrong values.
-        // Used in places like `MyClass.staticField` and `import nodefs
-        // from "node:fs"` where the user is just checking the import
-        // works.
-        Expr::StaticFieldGet { .. } | Expr::NativeModuleRef(_) => {
-            Ok(double_literal(0.0))
+        // -------- StaticFieldGet/Set --------
+        // Look up the (class, field) → global symbol in the static
+        // field registry built at compile_module time. Load/store
+        // from the global directly. NativeModuleRef stays a stub.
+        Expr::StaticFieldGet { class_name, field_name } => {
+            let key = (class_name.clone(), field_name.clone());
+            if let Some(global_name) = ctx.static_field_globals.get(&key).cloned() {
+                let g_ref = format!("@{}", global_name);
+                Ok(ctx.block().load(DOUBLE, &g_ref))
+            } else {
+                Ok(double_literal(0.0))
+            }
         }
-        Expr::StaticFieldSet { value, .. } => {
-            // Lower the value for side effects but don't store anywhere.
-            lower_expr(ctx, value)
+        Expr::StaticFieldSet { class_name, field_name, value } => {
+            let v = lower_expr(ctx, value)?;
+            let key = (class_name.clone(), field_name.clone());
+            if let Some(global_name) = ctx.static_field_globals.get(&key).cloned() {
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &v, &g_ref);
+            }
+            Ok(v)
         }
+        Expr::NativeModuleRef(_) => Ok(double_literal(0.0)),
 
         // ObjectRest is the `...rest` capture in destructuring. We
         // stub by returning the source object — wrong (it should be

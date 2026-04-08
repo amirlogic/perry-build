@@ -207,6 +207,22 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Phase E: register and emit static class fields as module globals.
+    // Each `static foo: T = init` becomes `@perry_static_<modprefix>__
+    // <class>__<field>` initialized to 0.0. The init expression runs
+    // in compile_module_entry's main/init function before user code.
+    let mut static_field_globals: HashMap<(String, String), String> = HashMap::new();
+    for c in &hir.classes {
+        for sf in &c.static_fields {
+            let name = format!(
+                "perry_static_{}__{}__{}",
+                module_prefix, c.name, sf.name
+            );
+            llmod.add_internal_global(&name, DOUBLE, "0.0");
+            static_field_globals.insert((c.name.clone(), sf.name.clone()), name);
+        }
+    }
+
     // Method registry: (class_name, method_name) → LLVM function name.
     // Built from `class.methods` so the dispatch in `lower_call` knows
     // which mangled function name to call for `obj.method(args)`. Method
@@ -233,6 +249,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             method_names.insert(
                 (c.name.clone(), format!("__set_{}", prop)),
                 scoped_method_name(&module_prefix, &c.name, &format!("__set_{}", f.name)),
+            );
+        }
+        // Static methods. Registered under their plain method name
+        // so `Counter.increment()` (StaticMethodCall) can look them
+        // up the same way as instance methods, but emitted as
+        // `perry_static_<modprefix>__<class>__<method>` (no `this`).
+        for sm in &c.static_methods {
+            method_names.insert(
+                (c.name.clone(), sm.name.clone()),
+                format!("perry_static_{}__{}__{}", module_prefix, c.name, sm.name),
             );
         }
     }
@@ -302,7 +328,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -319,6 +345,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &module_globals,
             &opts.import_function_prefixes,
             &enum_table,
+            &static_field_globals,
             &module_prefix,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
@@ -330,7 +357,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
         // Getters and setters are also methods, just registered under
@@ -339,14 +366,34 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, getter_fn) in &class.getters {
             let mut renamed = getter_fn.clone();
             renamed.name = format!("__get_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals)
                 .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
         }
         for (prop, setter_fn) in &class.setters {
             let mut renamed = setter_fn.clone();
             renamed.name = format!("__set_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
+        }
+        // Static methods compile as plain functions named
+        // `perry_static_<modprefix>__<class>__<method>` — no `this`
+        // parameter, no class_stack push.
+        for sm in &class.static_methods {
+            compile_static_method(
+                &mut llmod,
+                &class.name,
+                sm,
+                &func_names,
+                &mut strings,
+                &class_table,
+                &method_names,
+                &module_globals,
+                &opts.import_function_prefixes,
+                &enum_table,
+                &static_field_globals,
+                &module_prefix,
+            )
+            .with_context(|| format!("lowering static method '{}::{}'", class.name, sm.name))?;
         }
     }
 
@@ -363,6 +410,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &module_globals,
         &opts.import_function_prefixes,
         &enum_table,
+        &static_field_globals,
         &module_prefix,
         opts.is_entry_module,
         &opts.non_entry_module_prefixes,
@@ -397,6 +445,7 @@ fn compile_function(
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -455,6 +504,7 @@ fn compile_function(
         current_closure_ptr: None,
         enums,
         is_async_fn: f.is_async,
+        static_field_globals,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -490,6 +540,7 @@ fn compile_function(
 /// `closure_captures` field on `FnCtx` carries the LocalId → capture
 /// index map; `current_closure_ptr` carries the closure pointer SSA
 /// value name.
+#[allow(clippy::too_many_arguments)]
 fn compile_closure(
     llmod: &mut LlModule,
     func_id: perry_types::FuncId,
@@ -501,6 +552,7 @@ fn compile_closure(
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
     module_prefix: &str,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
@@ -627,6 +679,7 @@ fn compile_closure(
         // them as plain double-returning functions; we set false
         // here to skip the wrap-in-promise behaviour.
         is_async_fn: false,
+        static_field_globals,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -654,6 +707,7 @@ fn compile_method(
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -715,6 +769,7 @@ fn compile_method(
         current_closure_ptr: None,
         enums,
         is_async_fn: method.is_async,
+        static_field_globals,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -741,6 +796,7 @@ fn compile_method(
 /// Each module gets its OWN string pool init function
 /// (`__perry_init_strings_<prefix>`) so multiple modules in the same
 /// program don't collide on the symbol name.
+#[allow(clippy::too_many_arguments)]
 fn compile_module_entry(
     llmod: &mut LlModule,
     hir: &HirModule,
@@ -751,6 +807,7 @@ fn compile_module_entry(
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
     module_prefix: &str,
     is_entry: bool,
     non_entry_module_prefixes: &[String],
@@ -799,7 +856,11 @@ fn compile_module_entry(
             current_closure_ptr: None,
             enums,
             is_async_fn: false,
+            static_field_globals,
         };
+        // Initialize static class fields with their declared init
+        // expressions. Runs once at the top of main, before user code.
+        init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
@@ -838,7 +899,9 @@ fn compile_module_entry(
             current_closure_ptr: None,
             enums,
             is_async_fn: false,
+            static_field_globals,
         };
+        init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
 
@@ -887,6 +950,118 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &
     }
 
     blk.ret_void();
+}
+
+/// Compile a static class method as a top-level LLVM function with
+/// no `this` parameter. Mostly identical to `compile_function` but
+/// the LLVM symbol name is `perry_static_<modprefix>__<class>__<method>`
+/// instead of `perry_fn_<modprefix>__<name>`.
+#[allow(clippy::too_many_arguments)]
+fn compile_static_method(
+    llmod: &mut LlModule,
+    class_name: &str,
+    f: &Function,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    module_prefix: &str,
+) -> Result<()> {
+    let llvm_name = format!("perry_static_{}__{}__{}", module_prefix, class_name, f.name);
+
+    let params: Vec<(LlvmType, String)> = f
+        .params
+        .iter()
+        .map(|p| (DOUBLE, format!("%arg{}", p.id)))
+        .collect();
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    let _ = lf.create_block("entry");
+
+    let locals: HashMap<u32, String> = {
+        let blk = lf.block_mut(0).unwrap();
+        let mut map = HashMap::new();
+        for p in &f.params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        map
+    };
+
+    let local_types: HashMap<u32, perry_types::Type> = f
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        classes,
+        this_stack: Vec::new(),
+        // Static methods have no `this` but they CAN reference
+        // sibling static methods/fields via the class name (which
+        // they handle via StaticFieldGet/StaticMethodCall, not via
+        // `this`). The class_stack is empty here.
+        class_stack: Vec::new(),
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
+        enums,
+        is_async_fn: f.is_async,
+        static_field_globals,
+    };
+    stmt::lower_stmts(&mut ctx, &f.body)
+        .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
+
+    if !ctx.block().is_terminated() {
+        if f.is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
+    }
+    Ok(())
+}
+
+/// Initialize each class's static fields with their declared init
+/// expressions. Called at the top of compile_module_entry's main /
+/// __init function. The static field globals were registered in
+/// compile_module — this just emits the per-field "store init value
+/// to global" sequence.
+fn init_static_fields(
+    ctx: &mut crate::expr::FnCtx<'_>,
+    hir: &HirModule,
+) -> Result<()> {
+    for c in &hir.classes {
+        for sf in &c.static_fields {
+            let key = (c.name.clone(), sf.name.clone());
+            let Some(global_name) = ctx.static_field_globals.get(&key).cloned() else {
+                continue;
+            };
+            if let Some(init_expr) = &sf.init {
+                let v = crate::expr::lower_expr(ctx, init_expr)?;
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &v, &g_ref);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Walk for `Expr::Closure` instances and collect each one along with
