@@ -48,6 +48,24 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         }
 
         Stmt::Let { id, init, ty, .. } => {
+            // Refine the declared type from the initializer when the
+            // declared type is Any. The HIR's destructuring lowering
+            // declares synthetic `__destruct_*` lets as `ty: Any` even
+            // when the init is obviously an Array literal — that breaks
+            // is_array_expr at later use sites that depend on
+            // `local_types[id]` to dispatch to the array fast path.
+            //
+            // We only refine Any → something more specific; we don't
+            // override declared types because the user may have written
+            // `let x: Object = ...` deliberately.
+            let refined_ty = if matches!(ty, perry_types::Type::Any) {
+                init.as_ref()
+                    .and_then(|e| crate::expr::refine_type_from_init(ctx, e))
+                    .unwrap_or_else(|| ty.clone())
+            } else {
+                ty.clone()
+            };
+
             // If the local id is registered as a module-level global
             // (pre-walked by compile_module from hir.init top-level lets),
             // store the init value directly into the global instead of
@@ -60,7 +78,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                     let g_ref = format!("@{}", global_name);
                     ctx.block().store(DOUBLE, &v, &g_ref);
                 }
-                ctx.local_types.insert(*id, ty.clone());
+                ctx.local_types.insert(*id, refined_ty);
                 return Ok(());
             }
             // Otherwise: regular function-local. Allocate a stack slot,
@@ -71,7 +89,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ctx.block().store(DOUBLE, &v, &slot);
             }
             ctx.locals.insert(*id, slot);
-            ctx.local_types.insert(*id, ty.clone());
+            ctx.local_types.insert(*id, refined_ty);
             Ok(())
         }
 

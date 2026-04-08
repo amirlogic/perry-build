@@ -121,6 +121,19 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         .map(|c| (c.name.clone(), c))
         .collect();
 
+    // Enum lookup table for `Expr::EnumMember`. Each (enum_name,
+    // member_name) maps to its EnumValue, which the codegen lowers
+    // to either a numeric or string constant. Built once here.
+    let enum_table: HashMap<(String, String), perry_hir::EnumValue> = hir
+        .enums
+        .iter()
+        .flat_map(|e| {
+            e.members
+                .iter()
+                .map(move |m| ((e.name.clone(), m.name.clone()), m.value.clone()))
+        })
+        .collect();
+
     // Module-level globals registry. Pre-walk:
     //   1. Collect every LocalId referenced from any function or method
     //      body (LocalGet / LocalSet / Update). Those that aren't a
@@ -261,7 +274,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -277,6 +290,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &method_names,
             &module_globals,
             &opts.import_function_prefixes,
+            &enum_table,
             &module_prefix,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
@@ -288,7 +302,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
     }
@@ -305,6 +319,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &method_names,
         &module_globals,
         &opts.import_function_prefixes,
+        &enum_table,
         &module_prefix,
         opts.is_entry_module,
         &opts.non_entry_module_prefixes,
@@ -338,6 +353,7 @@ fn compile_function(
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -394,6 +410,7 @@ fn compile_function(
         import_function_prefixes,
         closure_captures: HashMap::new(),
         current_closure_ptr: None,
+        enums,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -430,6 +447,7 @@ fn compile_closure(
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
     module_prefix: &str,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
@@ -518,6 +536,7 @@ fn compile_closure(
         import_function_prefixes,
         closure_captures,
         current_closure_ptr: Some("%this_closure".to_string()),
+        enums,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -544,6 +563,7 @@ fn compile_method(
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -603,6 +623,7 @@ fn compile_method(
         import_function_prefixes,
         closure_captures: HashMap::new(),
         current_closure_ptr: None,
+        enums,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -638,6 +659,7 @@ fn compile_module_entry(
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
     import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
     module_prefix: &str,
     is_entry: bool,
     non_entry_module_prefixes: &[String],
@@ -684,6 +706,7 @@ fn compile_module_entry(
             import_function_prefixes,
             closure_captures: HashMap::new(),
             current_closure_ptr: None,
+            enums,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
@@ -721,6 +744,7 @@ fn compile_module_entry(
             import_function_prefixes,
             closure_captures: HashMap::new(),
             current_closure_ptr: None,
+            enums,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
@@ -834,7 +858,15 @@ fn collect_closures_in_expr(
     seen: &mut std::collections::HashSet<perry_types::FuncId>,
     out: &mut Vec<(perry_types::FuncId, perry_hir::Expr)>,
 ) {
-    use perry_hir::Expr;
+    use perry_hir::{ArrayElement, Expr};
+    // Helper closure that recurses into a sub-expression. We use a
+    // local closure rather than a method so we can keep the same
+    // recursion entry point.
+    let mut walk = |sub: &Expr,
+                    seen: &mut std::collections::HashSet<perry_types::FuncId>,
+                    out: &mut Vec<(perry_types::FuncId, Expr)>| {
+        collect_closures_in_expr(sub, seen, out);
+    };
     match e {
         Expr::Closure { func_id, body, .. } => {
             if seen.insert(*func_id) {
@@ -847,53 +879,177 @@ fn collect_closures_in_expr(
         Expr::Binary { left, right, .. }
         | Expr::Compare { left, right, .. }
         | Expr::Logical { left, right, .. } => {
-            collect_closures_in_expr(left, seen, out);
-            collect_closures_in_expr(right, seen, out);
+            walk(left, seen, out);
+            walk(right, seen, out);
         }
         Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
-            collect_closures_in_expr(operand, seen, out);
+            walk(operand, seen, out);
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
-            collect_closures_in_expr(condition, seen, out);
-            collect_closures_in_expr(then_expr, seen, out);
-            collect_closures_in_expr(else_expr, seen, out);
+            walk(condition, seen, out);
+            walk(then_expr, seen, out);
+            walk(else_expr, seen, out);
         }
         Expr::Call { callee, args, .. } => {
-            collect_closures_in_expr(callee, seen, out);
+            walk(callee, seen, out);
             for a in args {
-                collect_closures_in_expr(a, seen, out);
+                walk(a, seen, out);
             }
         }
-        Expr::PropertyGet { object, .. } => collect_closures_in_expr(object, seen, out),
+        Expr::CallSpread { callee, args, .. } => {
+            walk(callee, seen, out);
+            for a in args {
+                use perry_hir::CallArg;
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => walk(e, seen, out),
+                }
+            }
+        }
+        Expr::PropertyGet { object, .. } => walk(object, seen, out),
         Expr::PropertySet { object, value, .. } => {
-            collect_closures_in_expr(object, seen, out);
-            collect_closures_in_expr(value, seen, out);
+            walk(object, seen, out);
+            walk(value, seen, out);
         }
         Expr::IndexGet { object, index } => {
-            collect_closures_in_expr(object, seen, out);
-            collect_closures_in_expr(index, seen, out);
+            walk(object, seen, out);
+            walk(index, seen, out);
         }
         Expr::IndexSet { object, index, value } => {
-            collect_closures_in_expr(object, seen, out);
-            collect_closures_in_expr(index, seen, out);
-            collect_closures_in_expr(value, seen, out);
+            walk(object, seen, out);
+            walk(index, seen, out);
+            walk(value, seen, out);
         }
-        Expr::LocalSet(_, value) => collect_closures_in_expr(value, seen, out),
+        Expr::LocalSet(_, value) => walk(value, seen, out),
         Expr::Array(elements) => {
             for el in elements {
-                collect_closures_in_expr(el, seen, out);
+                walk(el, seen, out);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => walk(e, seen, out),
+                }
             }
         }
         Expr::Object(props) => {
             for (_, v) in props {
-                collect_closures_in_expr(v, seen, out);
+                walk(v, seen, out);
             }
         }
         Expr::New { args, .. } => {
             for a in args {
-                collect_closures_in_expr(a, seen, out);
+                walk(a, seen, out);
             }
         }
+        // Any expression that takes a callback can hide a closure.
+        // The catch-all `_ => {}` would silently miss them, leading
+        // to "use of undefined value @perry_closure_*" link errors.
+        Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback } => {
+            walk(array, seen, out);
+            walk(callback, seen, out);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            walk(array, seen, out);
+            walk(callback, seen, out);
+            if let Some(init) = initial {
+                walk(init, seen, out);
+            }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            walk(array, seen, out);
+            if let Some(sep) = separator {
+                walk(sep, seen, out);
+            }
+        }
+        Expr::ArraySlice { array, start, end } => {
+            walk(array, seen, out);
+            walk(start, seen, out);
+            if let Some(e) = end {
+                walk(e, seen, out);
+            }
+        }
+        Expr::ArrayPush { value, .. } => walk(value, seen, out),
+        Expr::MathPow(a, b) => {
+            walk(a, seen, out);
+            walk(b, seen, out);
+        }
+        Expr::MathSqrt(o)
+        | Expr::MathFloor(o)
+        | Expr::MathCeil(o)
+        | Expr::MathRound(o)
+        | Expr::MathAbs(o)
+        | Expr::MathMinSpread(o)
+        | Expr::MathMaxSpread(o)
+        | Expr::IsFinite(o)
+        | Expr::IsNaN(o)
+        | Expr::IsUndefinedOrBareNan(o)
+        | Expr::NumberIsNaN(o)
+        | Expr::NumberIsFinite(o)
+        | Expr::StringCoerce(o)
+        | Expr::BooleanCoerce(o)
+        | Expr::NumberCoerce(o)
+        | Expr::ObjectKeys(o)
+        | Expr::SetSize(o)
+        | Expr::ParseFloat(o)
+        | Expr::Await(o) => {
+            walk(o, seen, out);
+        }
+        Expr::ParseInt { string, radix } => {
+            walk(string, seen, out);
+            if let Some(r) = radix {
+                walk(r, seen, out);
+            }
+        }
+        Expr::MathMin(values) | Expr::MathMax(values) => {
+            for v in values {
+                walk(v, seen, out);
+            }
+        }
+        Expr::MapSet { map, key, value } => {
+            walk(map, seen, out);
+            walk(key, seen, out);
+            walk(value, seen, out);
+        }
+        Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
+            walk(map, seen, out);
+            walk(key, seen, out);
+        }
+        Expr::SetAdd { value, .. } => walk(value, seen, out),
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            walk(set, seen, out);
+            walk(value, seen, out);
+        }
+        Expr::ErrorNew(opt) => {
+            if let Some(o) = opt {
+                walk(o, seen, out);
+            }
+        }
+        Expr::JsonStringifyFull(value, replacer, indent) => {
+            walk(value, seen, out);
+            walk(replacer, seen, out);
+            walk(indent, seen, out);
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                walk(o, seen, out);
+            }
+            for a in args {
+                walk(a, seen, out);
+            }
+        }
+        Expr::FsWriteFileSync(p, c) => {
+            walk(p, seen, out);
+            walk(c, seen, out);
+        }
+        Expr::FsExistsSync(p) | Expr::FsReadFileBinary(p) => walk(p, seen, out),
+        Expr::In { property, object } => {
+            walk(property, seen, out);
+            walk(object, seen, out);
+        }
+        Expr::InstanceOf { expr, .. } => walk(expr, seen, out),
         _ => {}
     }
 }

@@ -163,6 +163,25 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_set_alloc", I64, &[I32]);
     module.declare_function("js_object_has_property", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_write_file_sync", I32, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_fs_exists_sync", I32, &[DOUBLE]);
+    module.declare_function("js_number_coerce", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_set_add", I64, &[I64, DOUBLE]);
+    module.declare_function("js_set_has", I32, &[I64, DOUBLE]);
+    module.declare_function("js_set_delete", I32, &[I64, DOUBLE]);
+    module.declare_function("js_set_size", I32, &[I64]);
+    module.declare_function("js_string_to_lower_case", I64, &[I64]);
+    module.declare_function("js_string_to_upper_case", I64, &[I64]);
+    module.declare_function("js_string_trim", I64, &[I64]);
+    module.declare_function("js_string_trim_start", I64, &[I64]);
+    module.declare_function("js_string_trim_end", I64, &[I64]);
+    module.declare_function("js_string_char_at", I64, &[I64, I32]);
+    module.declare_function("js_string_repeat", I64, &[I64, I32]);
+    module.declare_function("js_string_replace_string", I64, &[I64, I64, I64]);
+    module.declare_function("js_string_replace_all_string", I64, &[I64, I64, I64]);
+    module.declare_function("js_parse_int", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_parse_float", DOUBLE, &[I64]);
+    module.declare_function("js_array_reduce", DOUBLE, &[I64, I64, I32, DOUBLE]);
+    module.declare_function("js_array_reduce_right", DOUBLE, &[I64, I64, I32, DOUBLE]);
 
     declare_phase_b_arrays(module);
 }
