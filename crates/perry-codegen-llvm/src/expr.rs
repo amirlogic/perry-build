@@ -3170,17 +3170,22 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         // Universal `.toString()` — works for any JS value via the
         // runtime's js_jsvalue_to_string dispatch (numbers print as
         // their decimal form, strings as themselves, objects as
-        // [object Object], etc.).
-        if property == "toString" && args.is_empty() {
-            // Don't intercept when the receiver is a string already —
-            // string.toString() is a no-op fast path that should
-            // route through the existing string-method dispatch.
-            if !is_string_expr(ctx, object) && !is_array_expr(ctx, object) {
-                let v = lower_expr(ctx, object)?;
-                let blk = ctx.block();
-                let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
-                return Ok(nanbox_string_inline(blk, &handle));
+        // [object Object], etc.). For (n).toString(radix) we ignore
+        // the radix and produce decimal — wrong but doesn't crash.
+        if property == "toString"
+            && args.len() <= 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+        {
+            let v = lower_expr(ctx, object)?;
+            // Lower the optional radix arg for side effects, but
+            // ignore it.
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
             }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
+            return Ok(nanbox_string_inline(blk, &handle));
         }
         if is_string_expr(ctx, object) {
             return lower_string_method(ctx, object, property, args);
