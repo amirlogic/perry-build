@@ -83,16 +83,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         ));
     }
     // Phase C.1: classes are supported (data classes + simple
-    // constructors). Inheritance and methods land in Phase C.2/C.3.
-    // We bail only if a class has features beyond the first slice.
+    // constructors). Inheritance lands in Phase C.3. Methods are
+    // ALLOWED to exist on classes — Perry's HIR lowering inlines
+    // many simple methods at use sites, so the codegen may never
+    // see a method *call*. If a real method dispatch shows up, the
+    // expression-level codegen errors at that specific call site.
     for c in &hir.classes {
-        if !c.methods.is_empty() {
-            return Err(anyhow!(
-                "perry-codegen-llvm Phase C.1: class '{}' has {} instance methods (Phase C.2)",
-                c.name,
-                c.methods.len()
-            ));
-        }
         if c.extends.is_some() || c.extends_name.is_some() {
             return Err(anyhow!(
                 "perry-codegen-llvm Phase C.1: class '{}' uses inheritance (Phase C.3)",
