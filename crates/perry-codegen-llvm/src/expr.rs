@@ -134,6 +134,10 @@ pub(crate) struct FnCtx<'a> {
     /// `Expr::StaticFieldGet/Set` to load/store the global.
     pub static_field_globals:
         &'a std::collections::HashMap<(String, String), String>,
+    /// Per-class id for object headers. Each user class gets a
+    /// unique non-zero id (anonymous objects use 0). Used by
+    /// `lower_new` and the virtual method dispatch helper.
+    pub class_ids: &'a std::collections::HashMap<String, u32>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -1748,14 +1752,55 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- super.method(args) stub --------
-        // Real super dispatch needs the parent-class lookup chain.
-        // For now: lower args, return 0.0.
-        Expr::SuperMethodCall { args, .. } => {
-            for a in args {
-                let _ = lower_expr(ctx, a)?;
+        // -------- super.method(args) --------
+        // Walk the current class's parent chain for the named method
+        // (skipping the current class itself, even if it overrides
+        // the same name) and emit a direct call to the resolved
+        // perry_method_<modprefix>__<parent>__<name> with `this`.
+        Expr::SuperMethodCall { method, args } => {
+            // Find the current class from the class_stack.
+            let Some(current_class_name) = ctx.class_stack.last().cloned() else {
+                // No enclosing class — fall back to stub.
+                for a in args {
+                    let _ = lower_expr(ctx, a)?;
+                }
+                return Ok(double_literal(0.0));
+            };
+            // Walk parent chain starting from extends_name.
+            let mut parent = ctx
+                .classes
+                .get(&current_class_name)
+                .and_then(|c| c.extends_name.clone());
+            let mut resolved_fn: Option<String> = None;
+            while let Some(p) = parent {
+                let key = (p.clone(), method.clone());
+                if let Some(fname) = ctx.methods.get(&key).cloned() {
+                    resolved_fn = Some(fname);
+                    break;
+                }
+                parent = ctx.classes.get(&p).and_then(|c| c.extends_name.clone());
             }
-            Ok(double_literal(0.0))
+            let Some(fn_name) = resolved_fn else {
+                for a in args {
+                    let _ = lower_expr(ctx, a)?;
+                }
+                return Ok(double_literal(0.0));
+            };
+            // Lower `this` (from this_stack) + args.
+            let this_slot = ctx
+                .this_stack
+                .last()
+                .cloned()
+                .ok_or_else(|| anyhow!("super.{}() outside any method body", method))?;
+            let this_box = ctx.block().load(DOUBLE, &this_slot);
+            let mut lowered: Vec<String> = Vec::with_capacity(args.len() + 1);
+            lowered.push(this_box);
+            for a in args {
+                lowered.push(lower_expr(ctx, a)?);
+            }
+            let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+            Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices))
         }
 
         // -------- fs.readFileBuffer(path) stub --------
@@ -3126,21 +3171,29 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
             return lower_array_method(ctx, object, property, args);
         }
         // Class instance method call. The receiver's static type is
-        // `Type::Named(<class>)` for typed instances. We look up the
-        // method in the registry and emit a direct call to the
-        // `perry_method_<class>_<name>` function.
+        // `Type::Named(<class>)` for typed instances.
         //
-        // For inherited methods, walk the parent chain — `dog.speak()`
-        // where `class Dog extends Animal` and only Animal defines
-        // `speak` should dispatch to `perry_method_<modprefix>__Animal__speak`.
+        // Resolution strategy:
+        //   1. Walk the receiver's class + parent chain to find a
+        //      method named `property`. The first match (most-derived
+        //      that defines the method) is the static fallback.
+        //   2. Find every subclass of the receiver's class that ALSO
+        //      defines the same method — those are the virtual
+        //      override candidates.
+        //   3. If there are no overrides, emit a direct call to the
+        //      static fallback (fast path, no runtime cost).
+        //   4. If there ARE overrides, emit a switch on the object's
+        //      runtime class_id: each override gets its own case
+        //      calling its concrete method, default falls through to
+        //      the static fallback.
         if let Some(class_name) = receiver_class_name(ctx, object) {
-            // Try direct lookup, then walk parent chain.
-            let mut resolved_fn: Option<String> = None;
+            // Step 1: walk parent chain for the static method name.
+            let mut static_fn: Option<String> = None;
             let mut current_class = Some(class_name.clone());
             while let Some(cur) = current_class {
                 let key = (cur.clone(), property.clone());
                 if let Some(fname) = ctx.methods.get(&key).cloned() {
-                    resolved_fn = Some(fname);
+                    static_fn = Some(fname);
                     break;
                 }
                 current_class = ctx
@@ -3148,16 +3201,139 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                     .get(&cur)
                     .and_then(|c| c.extends_name.clone());
             }
-            if let Some(fn_name) = resolved_fn {
+
+            if let Some(fallback_fn) = static_fn {
+                // Step 2: collect overriding subclasses. For each
+                // subclass C transitively extending class_name, look
+                // up which method C uses for `property` (walking C's
+                // parent chain). If that resolves to a different
+                // function than the static fallback, C needs an
+                // explicit case in the dispatch table.
+                let mut overrides: Vec<(u32, String)> = Vec::new();
+                for (sub_name, &sub_id) in ctx.class_ids.iter() {
+                    if *sub_name == class_name {
+                        continue;
+                    }
+                    // Is sub_name transitively a subclass of class_name?
+                    let mut parent =
+                        ctx.classes.get(sub_name).and_then(|c| c.extends_name.clone());
+                    let mut is_subclass = false;
+                    while let Some(p) = parent {
+                        if p == class_name {
+                            is_subclass = true;
+                            break;
+                        }
+                        parent = ctx.classes.get(&p).and_then(|c| c.extends_name.clone());
+                    }
+                    if !is_subclass {
+                        continue;
+                    }
+                    // Resolve the method for sub_name by walking its
+                    // own parent chain (NOT class_name's chain).
+                    let mut cur = Some(sub_name.clone());
+                    let mut sub_fn: Option<String> = None;
+                    while let Some(c) = cur {
+                        let key = (c.clone(), property.clone());
+                        if let Some(fname) = ctx.methods.get(&key).cloned() {
+                            sub_fn = Some(fname);
+                            break;
+                        }
+                        cur = ctx.classes.get(&c).and_then(|c| c.extends_name.clone());
+                    }
+                    if let Some(sub_fn) = sub_fn {
+                        if sub_fn != fallback_fn {
+                            overrides.push((sub_id, sub_fn));
+                        }
+                    }
+                }
+
                 let recv_box = lower_expr(ctx, object)?;
                 let mut lowered_args: Vec<String> = Vec::with_capacity(args.len() + 1);
-                lowered_args.push(recv_box);
+                lowered_args.push(recv_box.clone());
                 for a in args {
                     lowered_args.push(lower_expr(ctx, a)?);
                 }
                 let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                     lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
-                return Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices));
+
+                if overrides.is_empty() {
+                    // Fast path: no virtual dispatch needed.
+                    return Ok(ctx.block().call(DOUBLE, &fallback_fn, &arg_slices));
+                }
+
+                // Step 4: virtual dispatch via class_id switch.
+                // Read class_id from the object header, then branch
+                // to the right concrete method block.
+                let blk = ctx.block();
+                let recv_handle = unbox_to_i64(blk, &recv_box);
+                let cid = blk.call(I32, "js_object_get_class_id", &[(I64, &recv_handle)]);
+
+                // Pre-create blocks: one per override + default + merge.
+                let mut case_idxs: Vec<usize> = Vec::with_capacity(overrides.len());
+                for (i, _) in overrides.iter().enumerate() {
+                    case_idxs.push(ctx.new_block(&format!("vdispatch.case{}", i)));
+                }
+                let default_idx = ctx.new_block("vdispatch.default");
+                let merge_idx = ctx.new_block("vdispatch.merge");
+
+                // Default → fallback. We use a tower of icmp+br rather
+                // than the LLVM `switch` instruction (which the IR
+                // builder doesn't expose generically) — same shape,
+                // slightly more verbose.
+                let mut current_label = ctx.block().label.clone();
+                for (i, (case_cid, _)) in overrides.iter().enumerate() {
+                    let next_label = if i + 1 < overrides.len() {
+                        // We'll start the next test in this same block
+                        // — actually use a fresh block for the test.
+                        format!("vdispatch.test{}", i + 1)
+                    } else {
+                        ctx.block_label(default_idx)
+                    };
+                    let case_label = ctx.block_label(case_idxs[i]);
+                    // Make sure ctx.current_block points at the
+                    // current test block.
+                    let _ = current_label;
+                    let cmp = ctx.block().icmp_eq(I32, &cid, &case_cid.to_string());
+                    if i + 1 < overrides.len() {
+                        // Create the next test block as a fresh block
+                        // and branch into it on the false arm.
+                        let next_idx = ctx.new_block(&format!("vdispatch.test{}", i + 1));
+                        let next_lbl = ctx.block_label(next_idx);
+                        ctx.block().cond_br(&cmp, &case_label, &next_lbl);
+                        ctx.current_block = next_idx;
+                        current_label = next_lbl;
+                    } else {
+                        ctx.block().cond_br(&cmp, &case_label, &next_label);
+                    }
+                }
+
+                // Each case block: call the override and branch to merge.
+                let merge_label = ctx.block_label(merge_idx);
+                let mut phi_inputs: Vec<(String, String)> = Vec::new();
+                for ((_, fname), &case_idx) in overrides.iter().zip(case_idxs.iter()) {
+                    ctx.current_block = case_idx;
+                    let v = ctx.block().call(DOUBLE, fname, &arg_slices);
+                    let after_label = ctx.block().label.clone();
+                    if !ctx.block().is_terminated() {
+                        ctx.block().br(&merge_label);
+                    }
+                    phi_inputs.push((v, after_label));
+                }
+
+                // Default block: call the static fallback.
+                ctx.current_block = default_idx;
+                let v_def = ctx.block().call(DOUBLE, &fallback_fn, &arg_slices);
+                let def_label = ctx.block().label.clone();
+                if !ctx.block().is_terminated() {
+                    ctx.block().br(&merge_label);
+                }
+                phi_inputs.push((v_def, def_label));
+
+                // Merge: phi over all incoming case results.
+                ctx.current_block = merge_idx;
+                let phi_args: Vec<(&str, &str)> =
+                    phi_inputs.iter().map(|(v, l)| (v.as_str(), l.as_str())).collect();
+                return Ok(ctx.block().phi(DOUBLE, &phi_args));
             }
         }
     }
@@ -3552,13 +3728,16 @@ fn lower_new(
         }
     }
 
-    // Allocate the object. class_id = 0 (anonymous; we don't have proper
-    // class IDs in the LLVM backend yet — Phase C.3 adds the registry).
-    let zero = "0".to_string();
+    // Allocate the object with the per-class id from the registry
+    // (0 is reserved for anonymous object literals; user classes
+    // get 1..N). The id is read by virtual method dispatch and
+    // instanceof at runtime.
+    let cid = ctx.class_ids.get(class_name).copied().unwrap_or(0);
+    let cid_str = cid.to_string();
     let n_str = field_count.to_string();
     let obj_handle = ctx
         .block()
-        .call(I64, "js_object_alloc", &[(I32, &zero), (I32, &n_str)]);
+        .call(I64, "js_object_alloc", &[(I32, &cid_str), (I32, &n_str)]);
     let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
 
     // Allocate a `this` slot and store the new object there.
