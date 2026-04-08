@@ -8544,6 +8544,17 @@ pub(crate) fn compile_expr(
                                 }
                                 return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
                             }
+                            "table" => {
+                                // console.table(value) — render value as a Node-style table.
+                                if !arg_vals.is_empty() {
+                                    let func = extern_funcs.get("js_console_table")
+                                        .ok_or_else(|| anyhow!("js_console_table not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let v = ensure_f64(builder, arg_vals[0]);
+                                    builder.ins().call(func_ref, &[v]);
+                                }
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                            }
                             _ => {}
                         }
                     }

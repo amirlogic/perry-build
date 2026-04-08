@@ -69,6 +69,13 @@ impl Compiler {
             let func_id = self.module.declare_function("js_console_assert", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_console_assert"), func_id);
         }
+        // js_console_table(value: f64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_console_table", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_console_table"), func_id);
+        }
 
         // Declare js_console_error_number(f64) -> void
         {

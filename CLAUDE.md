@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.81
+**Current Version:** 0.4.83
 
 ## Workflow Requirements
 
@@ -141,6 +141,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.83
+- feat: `console.table` — new `js_console_table` runtime function in `builtins.rs` renders array-of-objects, array-of-arrays, and single-object inputs as Node-style box-drawing tables (`┌─┬─┐` chars, single-quoted string cells, left-aligned). Codegen dispatch added in `expr.rs` next to the existing `console.dir`/`console.time` cluster; runtime declared in `runtime_decls.rs`. The three table outputs in `test_gap_console_methods.ts` now match Node byte-for-byte (diff drops 62 → 41).
 
 ### v0.4.82
 - feat: tagged template literals — `tag\`Hello ${name},${42}!\`` now desugars to `tag(["Hello ", ",", "!"], name, 42)` for any user function (`String.raw` keeps its existing fast path). Unblocks `test_gap_class_advanced` (was COMPILE_ERROR, now 26 diffs). Implementation in `lower.rs:9244` walks `tpl.quasis` for cooked strings and `tpl.exprs` for interpolated values.
