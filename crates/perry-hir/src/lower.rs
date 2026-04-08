@@ -4330,11 +4330,6 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
                                             return Ok(Expr::ObjectEntries(Box::new(obj)));
                                         }
-                                        // Object.freeze(obj) is a no-op in Perry (we don't enforce immutability)
-                                        "freeze" | "seal" | "preventExtensions" | "create" => {
-                                            let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
-                                            return Ok(obj);
-                                        }
                                         // Object.assign(target, src1, src2, ...) - treat as object spread
                                         // Each non-object arg is spread; object literal args are inlined
                                         "assign" => {

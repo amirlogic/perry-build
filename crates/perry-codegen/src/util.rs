@@ -773,6 +773,7 @@ pub(crate) fn is_known_plain_array_expr(expr: &Expr, locals: &HashMap<LocalId, L
         Expr::ObjectKeys(_) |
         Expr::ObjectValues(_) |
         Expr::ObjectEntries(_) |
+        Expr::ObjectGetOwnPropertyNames(_) |
         Expr::ProcessArgv => true,
         _ => false,
     }

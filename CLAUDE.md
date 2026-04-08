@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.85
+**Current Version:** 0.4.86
 
 ## Workflow Requirements
 
@@ -141,6 +141,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.86
+- feat: real `Object.defineProperty` / `freeze` / `seal` / `preventExtensions` semantics — descriptor side table (`PROPERTY_DESCRIPTORS`) tracks per-property `writable`/`enumerable`/`configurable`; `js_object_set_field_by_name` enforces `writable: false` and the freeze/seal/no-extend `GcHeader._reserved` flags; `Object.keys` filters out non-enumerable keys; `getOwnPropertyDescriptor` returns the real attribute bits. Removed the no-op `freeze`/`seal`/`preventExtensions`/`create` early-return in `lower.rs` that was making every Object.* dispatch unreachable. Fixed `js_object_get_own_property_names` signature mismatch (was `i64→i64`, codegen declared `f64→f64`) so it now returns a real NaN-boxed array. `Expr::ObjectGetOwnPropertyNames` plus `ObjectKeys/Values/Entries` now mark their result locals as `is_array=true` in `stmt.rs`. `test_gap_object_methods` 76 → 36 diffs (-53%).
 
 ### v0.4.85
 - feat: Web Fetch API `Response` / `Headers` / `Request` constructors and methods — `new Response(body, { status, statusText, headers })`, `new Headers()`, `new Request(url, init)`, plus `r.text()`/`json()`/`status`/`statusText`/`ok`/`headers`/`clone()`/`arrayBuffer()`/`blob()`, headers `.set/get/has/delete/forEach`, request `.url/method/body`, and the `Response.json(value)` / `Response.redirect(url, status)` static factories. Implemented as opaque handle pools in `perry-stdlib/src/fetch.rs` (`HEADERS_REGISTRY`, `REQUEST_REGISTRY`, reusing existing `FETCH_RESPONSES`). New runtime functions wired through `runtime_decls.rs` and dispatched via three custom early-out paths in `expr.rs`: a Headers/Request handler before the generic dispatch table, a chained-call handler at the `Call(PropertyGet(NativeMethodCall, _))` site for `r.headers.get(...)`, and `Expr::New` codegen for the three constructors (extracts `{ status, statusText, headers }` from inline option object literals). Lower.rs detects `let r = new Response(...)` etc. in `destructuring.rs` and registers the local as a fetch native instance so subsequent property accesses promote to NativeMethodCall. `js_fetch_response_text/json` no longer remove the FETCH_RESPONSES entry so `r.headers.get()` still works after `await r.json()`. `test_gap_fetch_response.ts` now matches Node byte-for-byte (50 → 0 diff).

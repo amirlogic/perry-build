@@ -22,6 +22,89 @@ thread_local! {
     static OVERFLOW_FIELDS: RefCell<HashMap<usize, HashMap<usize, u64>>> = RefCell::new(HashMap::new());
 }
 
+/// Per-property attribute flags set by `Object.defineProperty` / `Object.freeze` / `Object.seal`.
+/// Tracks the JS PropertyDescriptor attributes (writable, enumerable, configurable) for keys
+/// that have been customized away from the default `{ writable: true, enumerable: true, configurable: true }`.
+/// Keyed by (obj_ptr as usize, key_string) -> attribute bitmask.
+///
+/// Bit layout: 0x01 = writable, 0x02 = enumerable, 0x04 = configurable.
+/// Default (no entry) is `0x07` (all true). An entry of `0x06` means non-writable but enumerable+configurable.
+#[derive(Clone, Copy)]
+pub(crate) struct PropertyAttrs {
+    pub bits: u8,
+}
+impl PropertyAttrs {
+    const WRITABLE: u8 = 0x01;
+    const ENUMERABLE: u8 = 0x02;
+    const CONFIGURABLE: u8 = 0x04;
+    pub const fn new(writable: bool, enumerable: bool, configurable: bool) -> Self {
+        let mut bits = 0u8;
+        if writable { bits |= Self::WRITABLE; }
+        if enumerable { bits |= Self::ENUMERABLE; }
+        if configurable { bits |= Self::CONFIGURABLE; }
+        Self { bits }
+    }
+    pub const fn writable(self) -> bool { (self.bits & Self::WRITABLE) != 0 }
+    pub const fn enumerable(self) -> bool { (self.bits & Self::ENUMERABLE) != 0 }
+    pub const fn configurable(self) -> bool { (self.bits & Self::CONFIGURABLE) != 0 }
+}
+
+thread_local! {
+    pub(crate) static PROPERTY_DESCRIPTORS: RefCell<HashMap<(usize, String), PropertyAttrs>> = RefCell::new(HashMap::new());
+}
+
+/// Look up the property descriptor for (obj, key). Returns None if no entry exists,
+/// in which case the JS default `{ writable: true, enumerable: true, configurable: true }` applies.
+pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs> {
+    PROPERTY_DESCRIPTORS.with(|m| m.borrow().get(&(obj, key.to_string())).copied())
+}
+
+/// Store a property descriptor for (obj, key).
+pub(crate) fn set_property_attrs(obj: usize, key: String, attrs: PropertyAttrs) {
+    PROPERTY_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), attrs); });
+}
+
+/// Walk the keys array of `obj` and apply the given attribute mask AND filter to every existing key.
+/// Used by `Object.freeze` (drops `writable` + `configurable`) and `Object.seal` (drops `configurable`).
+unsafe fn mark_all_keys(obj: *mut ObjectHeader, drop_writable: bool, _drop_enumerable: bool, drop_configurable: bool) {
+    let keys = (*obj).keys_array;
+    if keys.is_null() {
+        return;
+    }
+    let keys_ptr = keys as usize;
+    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+        return;
+    }
+    let key_count = crate::array::js_array_length(keys) as usize;
+    if key_count == 0 || key_count > 65536 {
+        return;
+    }
+    let obj_addr = obj as usize;
+    for i in 0..key_count {
+        let key_val = crate::array::js_array_get(keys, i as u32);
+        if !key_val.is_string() {
+            continue;
+        }
+        let stored_key = key_val.as_string_ptr();
+        if stored_key.is_null() {
+            continue;
+        }
+        let name_ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        let name_len = (*stored_key).length as usize;
+        let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+        let key_str = match std::str::from_utf8(name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => continue,
+        };
+        // Start from existing attrs (or default `{w:true, e:true, c:true}`) and clear bits.
+        let mut attrs = get_property_attrs(obj_addr, &key_str)
+            .unwrap_or(PropertyAttrs::new(true, true, true));
+        if drop_writable { attrs.bits &= !PropertyAttrs::WRITABLE; }
+        if drop_configurable { attrs.bits &= !PropertyAttrs::CONFIGURABLE; }
+        set_property_attrs(obj_addr, key_str, attrs);
+    }
+}
+
 /// Recursion depth guard for js_native_call_method to prevent stack overflow
 /// from circular module dependencies during initialization.
 thread_local! {
@@ -925,8 +1008,9 @@ pub extern "C" fn js_object_set_keys(obj: *mut ObjectHeader, keys_array: *mut Ar
     }
 }
 
-/// Get the keys of an object as an array of strings
-/// Returns the stored keys array, or an empty array if no keys were stored
+/// Get the keys of an object as an array of strings.
+/// If any key has a per-property descriptor with `enumerable: false`, that key is filtered out.
+/// Otherwise (the common case), this returns the stored keys array directly.
 #[no_mangle]
 pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
     if obj.is_null() {
@@ -935,11 +1019,39 @@ pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
     unsafe {
         let keys = (*obj).keys_array;
         if keys.is_null() {
-            // Return an empty array if no keys are stored
-            crate::array::js_array_alloc(0)
-        } else {
-            keys
+            return crate::array::js_array_alloc(0);
         }
+        // Fast path: if no descriptors are set for this object, return keys array directly.
+        let has_descriptors = PROPERTY_DESCRIPTORS.with(|m| {
+            m.borrow().keys().any(|(ptr, _)| *ptr == obj as usize)
+        });
+        if !has_descriptors {
+            return keys;
+        }
+        // Slow path: filter out non-enumerable keys.
+        let len = crate::array::js_array_length(keys) as usize;
+        let filtered = crate::array::js_array_alloc(len as u32);
+        for i in 0..len {
+            let key_val = crate::array::js_array_get(keys, i as u32);
+            if !key_val.is_string() { continue; }
+            let stored_key = key_val.as_string_ptr();
+            if stored_key.is_null() { continue; }
+            let name_ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let name_len = (*stored_key).length as usize;
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            let key_str = match std::str::from_utf8(name_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // If a descriptor explicitly marks this key non-enumerable, skip it.
+            if let Some(attrs) = get_property_attrs(obj as usize, key_str) {
+                if !attrs.enumerable() {
+                    continue;
+                }
+            }
+            crate::array::js_array_push_f64(filtered, f64::from_bits(key_val.bits()));
+        }
+        filtered
     }
 }
 
@@ -1342,6 +1454,14 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             return;
         }
 
+        // Extract the incoming key as a Rust string for descriptor lookup.
+        let incoming_key_str: Option<String> = if !key.is_null() {
+            let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let name_len = (*key).length as usize;
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
+        } else { None };
+
         // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
         let alloc_limit = std::cmp::max((*obj).field_count, 8) as usize;
@@ -1354,6 +1474,14 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                     // Found it - update the field (frozen objects reject writes)
                     if is_frozen {
                         return;
+                    }
+                    // Per-property writable check (set by Object.defineProperty / freeze).
+                    if let Some(ref k) = incoming_key_str {
+                        if let Some(attrs) = get_property_attrs(obj as usize, k) {
+                            if !attrs.writable() {
+                                return;
+                            }
+                        }
                     }
                     if i < alloc_limit {
                         js_object_set_field(obj, i as u32, JSValue::from_bits(value.to_bits()));
@@ -2815,9 +2943,13 @@ unsafe fn gc_header_for(obj: *const ObjectHeader) -> *mut crate::gc::GcHeader {
     (obj as *mut u8).sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader
 }
 
-/// Object.defineProperty(obj, key, descriptor) — set the value from descriptor.value on obj.
-/// Perry doesn't support writable/enumerable/configurable flags; this just sets the value.
+/// Object.defineProperty(obj, key, descriptor) — set the value AND record the
+/// `writable` / `enumerable` / `configurable` attribute flags in the side table.
 /// Returns the object (NaN-boxed pointer).
+///
+/// IMPORTANT: writes the value via `js_object_set_field_by_name` BEFORE recording
+/// the descriptor — otherwise a `writable: false` descriptor would block its own
+/// initial value from being stored.
 #[no_mangle]
 pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, descriptor_value: f64) -> f64 {
     unsafe {
@@ -2830,27 +2962,57 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
         if key_str.is_null() {
             return obj_value;
         }
+        // Extract the key as a Rust string for the descriptor side-table lookup.
+        let key_rust: Option<String> = {
+            let name_ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let name_len = (*key_str).length as usize;
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
+        };
         // Extract descriptor object
         let desc_ptr = extract_obj_ptr(descriptor_value);
         if desc_ptr.is_null() {
             return obj_value;
         }
-        // Look for "value" field in descriptor
+        // Look for "value" field in descriptor — store the data value first.
         let value_key = crate::string::js_string_from_bytes(b"value".as_ptr(), 5);
         let value_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, value_key);
         if !value_field.is_undefined() {
+            // Store via runtime path. Any existing descriptor attrs are NOT yet set,
+            // so writability defaults to true and the write goes through.
             js_object_set_field_by_name(obj, key_str, f64::from_bits(value_field.bits()));
+        }
+        // Read attribute flags from descriptor. JS defaults when omitted in
+        // `Object.defineProperty` are `false` (NOT `true` like for direct assignment).
+        let read_bool = |name: &[u8]| -> Option<bool> {
+            let k = crate::string::js_string_from_bytes(name.as_ptr(), name.len() as u32);
+            let v = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, k);
+            if v.is_undefined() {
+                None
+            } else {
+                Some(crate::value::js_is_truthy(f64::from_bits(v.bits())) != 0)
+            }
+        };
+        let writable = read_bool(b"writable").unwrap_or(false);
+        let enumerable = read_bool(b"enumerable").unwrap_or(false);
+        let configurable = read_bool(b"configurable").unwrap_or(false);
+
+        if let Some(k) = key_rust {
+            set_property_attrs(obj as usize, k, PropertyAttrs::new(writable, enumerable, configurable));
         }
         // Return the object
         obj_value
     }
 }
 
-/// Object.getOwnPropertyDescriptor(obj, key) — returns { value, writable: true, enumerable: true, configurable: true }
-/// or TAG_UNDEFINED if the property doesn't exist.
+/// Object.getOwnPropertyDescriptor(obj, key) — returns a data descriptor object
+/// `{ value, writable, enumerable, configurable }` reading the side-table attributes
+/// (defaulting to all-true for properties added via direct assignment), or
+/// TAG_UNDEFINED if the property doesn't exist.
 #[no_mangle]
 pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_value: f64) -> f64 {
     const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
     unsafe {
         let obj = extract_obj_ptr(obj_value);
         if obj.is_null() {
@@ -2861,13 +3023,26 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
         if key_str.is_null() {
             return f64::from_bits(crate::value::TAG_UNDEFINED);
         }
+        // Extract key as a Rust string for descriptor lookup.
+        let key_rust: Option<String> = {
+            let name_ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let name_len = (*key_str).length as usize;
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
+        };
         // Look up the property
         let value = js_object_get_field_by_name(obj, key_str);
         if value.is_undefined() {
             return f64::from_bits(crate::value::TAG_UNDEFINED);
         }
-        // Build descriptor: { value, writable: true, enumerable: true, configurable: true }
-        // packed_keys = "value\0writable\0enumerable\0configurable\0"
+        // Look up descriptor flags (default: all true).
+        let attrs = key_rust
+            .as_ref()
+            .and_then(|k| get_property_attrs(obj as usize, k))
+            .unwrap_or(PropertyAttrs::new(true, true, true));
+        let bool_to_f64 = |b: bool| f64::from_bits(if b { TAG_TRUE } else { TAG_FALSE });
+
+        // Build descriptor: { value, writable, enumerable, configurable }
         let packed = b"value\0writable\0enumerable\0configurable";
         let desc = js_object_alloc_with_shape(
             0x0D_E5_C0, // unique shape_id for property descriptors
@@ -2878,37 +3053,38 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
         // Set fields
         let header_size = std::mem::size_of::<ObjectHeader>();
         let fields = (desc as *mut u8).add(header_size) as *mut f64;
-        *fields = f64::from_bits(value.bits()); // value
-        *fields.add(1) = f64::from_bits(TAG_TRUE); // writable
-        *fields.add(2) = f64::from_bits(TAG_TRUE); // enumerable
-        *fields.add(3) = f64::from_bits(TAG_TRUE); // configurable
+        *fields = f64::from_bits(value.bits());                  // value
+        *fields.add(1) = bool_to_f64(attrs.writable());          // writable
+        *fields.add(2) = bool_to_f64(attrs.enumerable());        // enumerable
+        *fields.add(3) = bool_to_f64(attrs.configurable());      // configurable
         // Return NaN-boxed pointer
         f64::from_bits((desc as u64) | 0x7FFD_0000_0000_0000)
     }
 }
 
-/// Object.getOwnPropertyNames(obj) — returns all own property names (same as keys for now).
-/// Takes raw i64 pointer, returns raw i64 pointer to array.
+/// Object.getOwnPropertyNames(obj) — returns all own property names (including non-enumerable).
+/// Takes a NaN-boxed f64 object pointer, returns a NaN-boxed f64 array pointer.
 #[no_mangle]
-pub extern "C" fn js_object_get_own_property_names(obj_ptr: i64) -> i64 {
-    // Perry doesn't distinguish enumerable/non-enumerable — return all keys
-    if obj_ptr == 0 || (obj_ptr as usize) < 0x10000 {
-        return crate::array::js_array_alloc(0) as i64;
-    }
-    let obj = obj_ptr as *const ObjectHeader;
+pub extern "C" fn js_object_get_own_property_names(obj_value: f64) -> f64 {
     unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() {
+            let empty = crate::array::js_array_alloc(0);
+            return f64::from_bits((empty as u64) | 0x7FFD_0000_0000_0000);
+        }
         let keys = (*obj).keys_array;
         if keys.is_null() {
-            return crate::array::js_array_alloc(0) as i64;
+            let empty = crate::array::js_array_alloc(0);
+            return f64::from_bits((empty as u64) | 0x7FFD_0000_0000_0000);
         }
-        // Clone the keys array
+        // Clone the keys array — Object.getOwnPropertyNames includes ALL keys (even non-enumerable).
         let len = crate::array::js_array_length(keys) as usize;
         let result = crate::array::js_array_alloc(len as u32);
         for i in 0..len {
             let key_val = crate::array::js_array_get(keys, i as u32);
             crate::array::js_array_push_f64(result, f64::from_bits(key_val.bits()));
         }
-        result as i64
+        f64::from_bits((result as u64) | 0x7FFD_0000_0000_0000)
     }
 }
 

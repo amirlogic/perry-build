@@ -853,6 +853,10 @@ pub(crate) fn compile_stmt(
                         }
                     }
                     Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false, false),
+                    // Object.keys / values / entries / getOwnPropertyNames return freshly-allocated string/value arrays
+                    Some(Expr::ObjectKeys(_)) | Some(Expr::ObjectValues(_)) |
+                    Some(Expr::ObjectEntries(_)) | Some(Expr::ObjectGetOwnPropertyNames(_)) =>
+                        (None, true, true, false, false, false, false, false, false, false),
                     // Object literals return object pointers
                     Some(Expr::Object(_)) | Some(Expr::ObjectSpread { .. }) => (None, true, false, false, false, false, false, false, false, false),
                     // ArrayMap, ArrayFilter, ArraySort, ArraySlice, ArraySplice and immutable array methods return arrays
