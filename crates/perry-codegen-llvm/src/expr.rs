@@ -3303,6 +3303,88 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         //      runtime class_id: each override gets its own case
         //      calling its concrete method, default falls through to
         //      the static fallback.
+        // Interface / dynamic dispatch fallback: when the static
+        // class is unknown but the property name corresponds to a
+        // method defined on at least one class in the registry,
+        // emit a switch on class_id over all classes that have that
+        // method. This handles `(f: Formatter).format(...)` where
+        // Formatter is an interface and `f` could be any concrete
+        // implementor.
+        if receiver_class_name(ctx, object).is_none() {
+            // Find all (class, method_name → fn_name) where the
+            // method is defined directly on a class.
+            let mut implementors: Vec<(u32, String)> = Vec::new();
+            for ((cls, mname), fname) in ctx.methods.iter() {
+                if mname != property {
+                    continue;
+                }
+                if let Some(cid) = ctx.class_ids.get(cls).copied() {
+                    implementors.push((cid, fname.clone()));
+                }
+            }
+            if !implementors.is_empty() {
+                let recv_box = lower_expr(ctx, object)?;
+                let mut lowered_args: Vec<String> = Vec::with_capacity(args.len() + 1);
+                lowered_args.push(recv_box.clone());
+                for a in args {
+                    lowered_args.push(lower_expr(ctx, a)?);
+                }
+                let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                    lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
+
+                let blk = ctx.block();
+                let recv_handle = unbox_to_i64(blk, &recv_box);
+                let cid = blk.call(I32, "js_object_get_class_id", &[(I64, &recv_handle)]);
+
+                // Tower of icmp+br: each implementor's case calls
+                // its concrete method, default returns 0.0 (the
+                // closure-call fallback would also handle this but
+                // returning a sentinel is cheaper).
+                let mut case_idxs: Vec<usize> = Vec::with_capacity(implementors.len());
+                for (i, _) in implementors.iter().enumerate() {
+                    case_idxs.push(ctx.new_block(&format!("idispatch.case{}", i)));
+                }
+                let default_idx = ctx.new_block("idispatch.default");
+                let merge_idx = ctx.new_block("idispatch.merge");
+                let merge_label = ctx.block_label(merge_idx);
+
+                for (i, (case_cid, _)) in implementors.iter().enumerate() {
+                    let case_label = ctx.block_label(case_idxs[i]);
+                    let cmp = ctx.block().icmp_eq(I32, &cid, &case_cid.to_string());
+                    if i + 1 < implementors.len() {
+                        let next_idx = ctx.new_block(&format!("idispatch.test{}", i + 1));
+                        let next_lbl = ctx.block_label(next_idx);
+                        ctx.block().cond_br(&cmp, &case_label, &next_lbl);
+                        ctx.current_block = next_idx;
+                    } else {
+                        let default_label = ctx.block_label(default_idx);
+                        ctx.block().cond_br(&cmp, &case_label, &default_label);
+                    }
+                }
+
+                let mut phi_inputs: Vec<(String, String)> = Vec::new();
+                for ((_, fname), &case_idx) in implementors.iter().zip(case_idxs.iter()) {
+                    ctx.current_block = case_idx;
+                    let v = ctx.block().call(DOUBLE, fname, &arg_slices);
+                    let after_label = ctx.block().label.clone();
+                    if !ctx.block().is_terminated() {
+                        ctx.block().br(&merge_label);
+                    }
+                    phi_inputs.push((v, after_label));
+                }
+                ctx.current_block = default_idx;
+                let v_def = double_literal(0.0);
+                let def_label = ctx.block().label.clone();
+                ctx.block().br(&merge_label);
+                phi_inputs.push((v_def, def_label));
+
+                ctx.current_block = merge_idx;
+                let phi_args: Vec<(&str, &str)> =
+                    phi_inputs.iter().map(|(v, l)| (v.as_str(), l.as_str())).collect();
+                return Ok(ctx.block().phi(DOUBLE, &phi_args));
+            }
+        }
+
         if let Some(class_name) = receiver_class_name(ctx, object) {
             // Step 1: walk parent chain for the static method name.
             let mut static_fn: Option<String> = None;
