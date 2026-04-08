@@ -39,4 +39,12 @@ pub fn declare_phase1(module: &mut LlModule) {
 
     // Type checks.
     module.declare_function("js_is_truthy", I32, &[DOUBLE]);
+
+    // Phase 2.1: timing primitives.
+    declare_phase2_1(module);
+}
+
+/// Phase 2.1 additions: just `js_date_now()` for in-program timing harnesses.
+pub fn declare_phase2_1(module: &mut LlModule) {
+    module.declare_function("js_date_now", DOUBLE, &[]);
 }

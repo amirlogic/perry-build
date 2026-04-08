@@ -9,7 +9,7 @@
 //! one-line explanation instead of a silent broken binary.
 
 use anyhow::{anyhow, bail, Result};
-use perry_hir::{BinaryOp, CompareOp, Expr};
+use perry_hir::{BinaryOp, CompareOp, Expr, UpdateOp};
 
 use crate::block::LlBlock;
 use crate::function::LlFunction;
@@ -73,6 +73,45 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 .clone();
             Ok(ctx.block().load(DOUBLE, &slot))
         }
+
+        // `total = expr` — store the new value into the local's alloca slot
+        // and return it (matches JS semantics: assignment is an expression
+        // whose value is the assigned value).
+        Expr::LocalSet(id, value) => {
+            let v = lower_expr(ctx, value)?;
+            let slot = ctx
+                .locals
+                .get(id)
+                .ok_or_else(|| anyhow!("LocalSet({}): local not in scope", id))?
+                .clone();
+            ctx.block().store(DOUBLE, &v, &slot);
+            Ok(v)
+        }
+
+        // `i++` / `++i` / `i--` / `--i`. Postfix returns the OLD value,
+        // prefix returns the NEW value. Inside a for-loop update slot the
+        // result is discarded, but we honor JS semantics in case it's used
+        // somewhere like `let x = i++`.
+        Expr::Update { id, op, prefix } => {
+            let slot = ctx
+                .locals
+                .get(id)
+                .ok_or_else(|| anyhow!("Update({}): local not in scope", id))?
+                .clone();
+            let blk = ctx.block();
+            let old = blk.load(DOUBLE, &slot);
+            let new = match op {
+                UpdateOp::Increment => blk.fadd(&old, "1.0"),
+                UpdateOp::Decrement => blk.fsub(&old, "1.0"),
+            };
+            blk.store(DOUBLE, &new, &slot);
+            Ok(if *prefix { new } else { old })
+        }
+
+        // `Date.now()` — special HIR variant that lowers to a single FFI
+        // call returning a `double` (milliseconds since UNIX epoch as
+        // produced by `js_date_now` in `perry-runtime/src/date.rs`).
+        Expr::DateNow => Ok(ctx.block().call(DOUBLE, "js_date_now", &[])),
 
         // -------- Arithmetic --------
         Expr::Binary { op, left, right } => {

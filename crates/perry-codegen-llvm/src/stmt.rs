@@ -66,11 +66,101 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             else_branch,
         } => lower_if(ctx, condition, then_branch, else_branch.as_deref()),
 
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => lower_for(ctx, init.as_deref(), condition.as_ref(), update.as_ref(), body),
+
         other => bail!(
             "perry-codegen-llvm Phase 2: Stmt {} not yet supported",
             stmt_variant_name(other)
         ),
     }
+}
+
+/// For-loop lowering: classic init / cond / body / update / exit CFG.
+///
+/// ```text
+///   <current>:
+///     <init>
+///     br cond
+///   for.cond:
+///     <condition>          ; if missing, treat as `true` (infinite loop)
+///     fcmp one cond, 0.0
+///     br i1, body, exit
+///   for.body:
+///     <body>
+///     br update            ; if not already terminated
+///   for.update:
+///     <update>
+///     br cond              ; if not already terminated
+///   for.exit:
+///     <continues here>
+/// ```
+///
+/// Phase 2.1 does not support `break` / `continue`. The body must fall
+/// through to update; otherwise codegen produces dead code that LLVM will
+/// reject. We don't yet pass the loop's break/continue targets through
+/// FnCtx — that lands when we need it.
+fn lower_for(
+    ctx: &mut FnCtx<'_>,
+    init: Option<&Stmt>,
+    condition: Option<&perry_hir::Expr>,
+    update: Option<&perry_hir::Expr>,
+    body: &[Stmt],
+) -> Result<()> {
+    // Init runs once in the current block. A `let i = 0` here adds `i` to
+    // ctx.locals, which the body can then load via LocalGet.
+    if let Some(init_stmt) = init {
+        lower_stmt(ctx, init_stmt)?;
+    }
+
+    let cond_idx = ctx.new_block("for.cond");
+    let body_idx = ctx.new_block("for.body");
+    let update_idx = ctx.new_block("for.update");
+    let exit_idx = ctx.new_block("for.exit");
+
+    let cond_label = ctx.block_label(cond_idx);
+    let body_label = ctx.block_label(body_idx);
+    let update_label = ctx.block_label(update_idx);
+    let exit_label = ctx.block_label(exit_idx);
+
+    // Branch from the block holding the init into the cond block.
+    ctx.block().br(&cond_label);
+
+    // Cond block.
+    ctx.current_block = cond_idx;
+    if let Some(cond_expr) = condition {
+        let cv = lower_expr(ctx, cond_expr)?;
+        let i1 = ctx.block().fcmp("one", &cv, "0.0");
+        ctx.block().cond_br(&i1, &body_label, &exit_label);
+    } else {
+        // `for (;;)` — unconditional jump into the body. Without break
+        // support this is an infinite loop, but the verifier accepts it.
+        ctx.block().br(&body_label);
+    }
+
+    // Body block.
+    ctx.current_block = body_idx;
+    lower_stmts(ctx, body)?;
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&update_label);
+    }
+
+    // Update block.
+    ctx.current_block = update_idx;
+    if let Some(update_expr) = update {
+        let _ = lower_expr(ctx, update_expr)?;
+    }
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&cond_label);
+    }
+
+    // Exit block — subsequent statements continue here.
+    ctx.current_block = exit_idx;
+    Ok(())
 }
 
 /// If-else lowering using explicit then/else/merge blocks.
