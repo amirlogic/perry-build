@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.87
+**Current Version:** 0.4.88
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.88 (llvm-backend)
+- feat: LLVM backend Phase E.32–E.35 — high-leverage parity sweep moved match count from 60 → 67/142. Bool-returning runtime calls (`regex.test`, `string.includes/startsWith/endsWith`, `fs.existsSync`, `Set.has`, etc.) wrapped in `i32_bool_to_nanbox` so `console.log(...)` prints `true`/`false` not `0`/`1`. FuncRef-as-value generates `__perry_wrap_<name>` thunks so `apply(add, 3, 4)` can route through `js_closure_call2`. Multi-arg `console.log` bundles into an array and calls `js_console_log_spread` (Node-style util.inspect). `console.table` dispatches to `js_console_table`. Switch on strings now uses `icmp_eq` on i64 bits (fcmp on NaN-tagged is always false). `process.env.X` wired to `js_getenv`. `readonly T` HIR type lowered to inner T (was `Any`). Generic class instances `new L<number>()` strip type args in `receiver_class_name` so `l.size()` finds the method. `is_string_expr` recognizes `arr[i]` on `Array<string>`, enum string members, and chained string-method calls. `Stmt::Try` lowers `try { throw V } catch(e) { ... }` as `bind e=V; run catch`. New string-comparison fast path via `js_string_compare` for `<`/`<=`/`>`/`>=`. Real `js_array_sort_default`/`reverse`/`flat`/`flatMap` dispatch (were stubs). `(255).toString(16)` via `js_jsvalue_to_string_radix`. `Math.random()` now real. Tests confirmed flipped to MATCH: `test_regex`, `test_try_catch`, `test_edge_classes`, `test_edge_class_advanced`, plus 3 others. (See commits 0cfb308, 80454c3, 2a7b51c, fcb5779.)
 
 ### v0.4.87
 - feat: `AbortController` / `AbortSignal` extensions — `controller.abort(reason)` records the reason; `signal.addEventListener("abort", cb)` registers a listener fired on abort; `AbortSignal.timeout(ms)` returns a signal that auto-aborts after the timeout. New runtime functions `js_abort_controller_abort_reason`, `js_abort_signal_add_listener`, `js_abort_signal_timeout` in `perry-runtime/src/url.rs`. Codegen detects `controller.signal.addEventListener(...)` as a fast path in expr.rs and routes through `js_abort_controller_signal` + the listener registration. `AbortSignal.timeout(ms)` lowered as a `StaticMethodCall` in lower.rs. (WIP from earlier session — committed for clean repo state.)
