@@ -575,6 +575,31 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // round-trips through numeric contexts as 1.0 and "false" as 0.0,
         // which is what Perry's runtime expects from typed boolean returns.
         Expr::Compare { op, left, right } => {
+            // Boolean equality fast path: NaN-tagged TAG_TRUE/FALSE
+            // bits don't compare correctly with fcmp. For
+            // ===/!== where both sides are boolean, compare the
+            // raw i64 bits via icmp.
+            let both_bool = is_bool_expr(ctx, left) && is_bool_expr(ctx, right);
+            if both_bool && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_bits = blk.bitcast_double_to_i64(&l);
+                let r_bits = blk.bitcast_double_to_i64(&r);
+                let bit = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
+                    blk.icmp_ne(I64, &l_bits, &r_bits)
+                } else {
+                    blk.icmp_eq(I64, &l_bits, &r_bits)
+                };
+                let tagged = blk.select(
+                    crate::types::I1,
+                    &bit,
+                    I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged));
+            }
             // String equality fast path: fcmp doesn't work on
             // NaN-tagged string pointers (NaN comparisons are
             // unordered → always false). When both operands are
@@ -3370,6 +3395,25 @@ pub(crate) fn lower_truthy(ctx: &mut FnCtx<'_>, cond_val: &str, cond_expr: &Expr
 /// - literal strings (`"foo"`)
 /// - LocalGet of string-typed locals (params with `: string`, `let x = "a"`)
 /// - recursive Add of strings (`"a" + "b" + s`)
+fn is_bool_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::Bool(_) => true,
+        Expr::Compare { .. } => true,
+        Expr::Logical { left, right, .. } => {
+            is_bool_expr(ctx, left) && is_bool_expr(ctx, right)
+        }
+        Expr::Unary { op: UnaryOp::Not, .. } => true,
+        Expr::BooleanCoerce(_) => true,
+        Expr::IsFinite(_) | Expr::IsNaN(_) | Expr::NumberIsNaN(_) | Expr::NumberIsFinite(_)
+        | Expr::NumberIsInteger(_) | Expr::IsUndefinedOrBareNan(_) => true,
+        Expr::SetHas { .. } | Expr::SetDelete { .. } | Expr::MapHas { .. }
+        | Expr::MapDelete { .. } => true,
+        Expr::ArrayIncludes { .. } => true,
+        Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::Boolean)),
+        _ => false,
+    }
+}
+
 fn is_set_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::SetNew | Expr::SetNewFromArray(_) => true,
