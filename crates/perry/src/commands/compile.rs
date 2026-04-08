@@ -4031,7 +4031,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 };
                 let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
                     .map_err(|e| format!(
-                        "Error compiling module '{}' ({}) with --backend llvm: {}",
+                        "Error compiling module '{}' ({}) with --backend llvm: {:#}",
                         hir_module.name, path.display(), e
                     ))?;
                 let obj_name = hir_module.name

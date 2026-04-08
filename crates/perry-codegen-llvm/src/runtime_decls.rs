@@ -97,6 +97,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_index_of_from", I32, &[I64, I64, I32]);
     module.declare_function("js_string_slice", I64, &[I64, I32, I32]);
     module.declare_function("js_string_substring", I64, &[I64, I32, I32]);
+    module.declare_function("js_string_split", I64, &[I64, I64]);
+    module.declare_function("js_math_pow", DOUBLE, &[DOUBLE, DOUBLE]);
     // typeof: returns a string handle ("number"/"string"/"boolean"/"undefined"/"object"/"function")
     module.declare_function("js_value_typeof", I64, &[DOUBLE]);
     module.declare_function("js_string_starts_with", I32, &[I64, I64]);

@@ -9,7 +9,7 @@
 //! one-line explanation instead of a silent broken binary.
 
 use anyhow::{anyhow, bail, Result};
-use perry_hir::{BinaryOp, CompareOp, Expr, LogicalOp, UpdateOp};
+use perry_hir::{BinaryOp, CompareOp, Expr, LogicalOp, UnaryOp, UpdateOp};
 use perry_types::Type as HirType;
 
 use crate::block::LlBlock;
@@ -80,6 +80,11 @@ pub(crate) struct FnCtx<'a> {
     /// Stack of `this` slot pointers — set when lowering inside a class
     /// constructor body. `Expr::This` loads from the top entry.
     pub this_stack: Vec<String>,
+    /// Stack of class names currently being lowered. Pushed when entering
+    /// a constructor body. `Expr::SuperCall` looks at the top entry to
+    /// find the parent class's constructor to inline. Same depth as
+    /// `this_stack` (one entry per nested `new`).
+    pub class_stack: Vec<String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -257,12 +262,71 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 BinaryOp::Mul => blk.fmul(&l, &r),
                 BinaryOp::Div => blk.fdiv(&l, &r),
                 BinaryOp::Mod => blk.frem(&l, &r),
-                other => bail!(
-                    "perry-codegen-llvm Phase A: BinaryOp::{:?} not yet supported",
-                    other
-                ),
+                BinaryOp::Pow => {
+                    blk.call(DOUBLE, "js_math_pow", &[(DOUBLE, &l), (DOUBLE, &r)])
+                }
+                BinaryOp::BitAnd => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.and(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::BitOr => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.or(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::BitXor => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.xor(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::Shl => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.shl(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::Shr => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.ashr(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
+                BinaryOp::UShr => {
+                    let li = blk.fptosi(DOUBLE, &l, I32);
+                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let v = blk.lshr(I32, &li, &ri);
+                    blk.sitofp(I32, &v, DOUBLE)
+                }
             };
             Ok(v)
+        }
+
+        // -------- Unary operators --------
+        Expr::Unary { op, operand } => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            match op {
+                UnaryOp::Neg => Ok(blk.fneg(&v)),
+                UnaryOp::Pos => Ok(v), // unary + is a no-op for numbers
+                UnaryOp::Not => {
+                    // !x: truthiness inverted. Use lower_truthy then xor with 1.
+                    let bit = lower_truthy(ctx, &v, operand);
+                    let blk = ctx.block();
+                    let inv = blk.xor(crate::types::I1, &bit, "true");
+                    let as_i64 = blk.zext(crate::types::I1, &inv, I64);
+                    Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+                }
+                UnaryOp::BitNot => {
+                    // ~x: bitwise NOT after fptosi to i32, then sitofp back.
+                    let i32_v = blk.fptosi(DOUBLE, &v, I32);
+                    let inv = blk.xor(I32, &i32_v, "-1");
+                    Ok(blk.sitofp(I32, &inv, DOUBLE))
+                }
+            }
         }
 
         // -------- Comparison --------
@@ -509,6 +573,78 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().load(DOUBLE, &slot))
         }
 
+        // `super(args…)` — Phase C.2 inheritance. Look up the current
+        // class's parent and inline the parent's constructor body
+        // with the SAME `this` (so parent fields end up on the same
+        // object). Parent's parameters get fresh slots populated with
+        // the lowered super-call args.
+        //
+        // The current class is the topmost entry in `class_stack`. The
+        // parent is `current_class.extends_name` (Perry uses the string
+        // form for cross-module/late-resolved cases) or
+        // `current_class.extends.and_then(class_id_to_name)`. For Phase
+        // C.2 we use `extends_name` which is always populated when
+        // there's a parent.
+        Expr::SuperCall(super_args) => {
+            let current_class_name = ctx
+                .class_stack
+                .last()
+                .cloned()
+                .ok_or_else(|| anyhow!("super() used outside any constructor body"))?;
+            let current_class = ctx
+                .classes
+                .get(&current_class_name)
+                .copied()
+                .ok_or_else(|| anyhow!("super(): current class '{}' not found", current_class_name))?;
+            let parent_name = current_class
+                .extends_name
+                .as_deref()
+                .ok_or_else(|| anyhow!(
+                    "super() called in class '{}' which has no parent",
+                    current_class_name
+                ))?
+                .to_string();
+            let parent_class = ctx
+                .classes
+                .get(&parent_name)
+                .copied()
+                .ok_or_else(|| anyhow!(
+                    "super(): parent class '{}' of '{}' not found in module",
+                    parent_name,
+                    current_class_name
+                ))?;
+
+            // Lower the super-call args.
+            let mut lowered_args: Vec<String> = Vec::with_capacity(super_args.len());
+            for a in super_args {
+                lowered_args.push(lower_expr(ctx, a)?);
+            }
+
+            // Inline the parent constructor with the SAME this and a
+            // fresh param scope for the parent's params.
+            if let Some(parent_ctor) = &parent_class.constructor {
+                let saved_locals = ctx.locals.clone();
+                let saved_local_types = ctx.local_types.clone();
+
+                for (param, arg_val) in parent_ctor.params.iter().zip(lowered_args.iter()) {
+                    let slot = ctx.block().alloca(DOUBLE);
+                    ctx.block().store(DOUBLE, arg_val, &slot);
+                    ctx.locals.insert(param.id, slot);
+                    ctx.local_types.insert(param.id, param.ty.clone());
+                }
+
+                ctx.class_stack.push(parent_name);
+                crate::stmt::lower_stmts(ctx, &parent_ctor.body)?;
+                ctx.class_stack.pop();
+
+                ctx.locals = saved_locals;
+                ctx.local_types = saved_local_types;
+            }
+
+            // super() evaluates to undefined in JS.
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+
         // -------- Logical operators (Phase B.6) --------
         // `a && b` and `a || b` short-circuit. We compile `a` first, branch
         // on its truthiness (treating 0.0 as false / non-zero as true),
@@ -714,9 +850,22 @@ fn lower_new(
         lowered_args.push(lower_expr(ctx, a)?);
     }
 
+    // Compute total field count including inherited parent fields.
+    // The runtime allocates at least 8 inline slots regardless, so this
+    // mostly matters for shapes >8 fields.
+    let mut field_count = class.fields.len() as u32;
+    let mut parent = class.extends_name.as_deref();
+    while let Some(parent_name) = parent {
+        if let Some(p) = ctx.classes.get(parent_name).copied() {
+            field_count += p.fields.len() as u32;
+            parent = p.extends_name.as_deref();
+        } else {
+            break;
+        }
+    }
+
     // Allocate the object. class_id = 0 (anonymous; we don't have proper
-    // class IDs in the LLVM backend yet — Phase C.2 adds the registry).
-    let field_count = class.fields.len() as u32;
+    // class IDs in the LLVM backend yet — Phase C.3 adds the registry).
     let zero = "0".to_string();
     let n_str = field_count.to_string();
     let obj_handle = ctx
@@ -728,6 +877,7 @@ fn lower_new(
     let this_slot = ctx.block().alloca(DOUBLE);
     ctx.block().store(DOUBLE, &obj_box, &this_slot);
     ctx.this_stack.push(this_slot);
+    ctx.class_stack.push(class_name.to_string());
 
     // If there's a constructor, inline its body. We allocate slots for
     // each constructor parameter and pre-populate them with the lowered
@@ -754,6 +904,7 @@ fn lower_new(
     }
 
     ctx.this_stack.pop();
+    ctx.class_stack.pop();
     Ok(obj_box)
 }
 
@@ -907,6 +1058,22 @@ fn lower_string_method(
                 &[(I64, &recv_handle), (I32, &start_i32), (I32, &end_i32)],
             );
             Ok(nanbox_string_inline(blk, &result_handle))
+        }
+        "split" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: String.split expects 1 arg (delimiter), got {}", args.len());
+            }
+            let delim_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let delim_handle = unbox_to_i64(blk, &delim_box);
+            let result_arr = blk.call(
+                I64,
+                "js_string_split",
+                &[(I64, &recv_handle), (I64, &delim_handle)],
+            );
+            // Returns an array pointer (ArrayHeader*) — NaN-box with POINTER_TAG.
+            Ok(nanbox_pointer_inline(blk, &result_arr))
         }
         "startsWith" | "endsWith" => {
             if args.len() != 1 {
@@ -1426,34 +1593,17 @@ fn lower_string_concat(ctx: &mut FnCtx<'_>, left: &Expr, right: &Expr) -> Result
     Ok(nanbox_string_inline(blk, &result_handle))
 }
 
-pub(crate) fn variant_name(e: &Expr) -> &'static str {
-    match e {
-        Expr::Undefined => "Undefined",
-        Expr::Null => "Null",
-        Expr::Bool(_) => "Bool",
-        Expr::Number(_) => "Number",
-        Expr::Integer(_) => "Integer",
-        Expr::BigInt(_) => "BigInt",
-        Expr::String(_) => "String",
-        Expr::I18nString { .. } => "I18nString",
-        Expr::LocalGet(_) => "LocalGet",
-        Expr::LocalSet(_, _) => "LocalSet",
-        Expr::GlobalGet(_) => "GlobalGet",
-        Expr::GlobalSet(_, _) => "GlobalSet",
-        Expr::Update { .. } => "Update",
-        Expr::Binary { .. } => "Binary",
-        Expr::Unary { .. } => "Unary",
-        Expr::Compare { .. } => "Compare",
-        Expr::Logical { .. } => "Logical",
-        Expr::Call { .. } => "Call",
-        Expr::CallSpread { .. } => "CallSpread",
-        Expr::FuncRef(_) => "FuncRef",
-        Expr::ExternFuncRef { .. } => "ExternFuncRef",
-        Expr::NativeModuleRef(_) => "NativeModuleRef",
-        Expr::NativeMethodCall { .. } => "NativeMethodCall",
-        Expr::PropertyGet { .. } => "PropertyGet",
-        Expr::PropertySet { .. } => "PropertySet",
-        Expr::PropertyUpdate { .. } => "PropertyUpdate",
-        _ => "<other>",
-    }
+/// Return the HIR enum variant name for an expression. Uses Debug
+/// formatting and extracts the leading identifier so we get the actual
+/// variant name (e.g. `"ArrayMap"`, `"BufferAlloc"`, `"RegExpExec"`)
+/// without having to maintain an exhaustive match against ~200 HIR
+/// variants. The result is used in "X not yet supported" error messages
+/// to tell the user exactly which HIR variant the LLVM backend is
+/// missing — critical for prioritizing the next slice.
+pub(crate) fn variant_name(e: &Expr) -> String {
+    let dbg = format!("{:?}", e);
+    let end = dbg
+        .find(|c: char| c == ' ' || c == '(' || c == '{')
+        .unwrap_or(dbg.len());
+    dbg[..end].to_string()
 }
