@@ -16,7 +16,7 @@ use crate::block::LlBlock;
 use crate::function::LlFunction;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::strings::StringPool;
-use crate::types::{DOUBLE, I64};
+use crate::types::{DOUBLE, I32, I64};
 
 /// Per-function codegen context. Held briefly during lowering, never stored.
 pub(crate) struct FnCtx<'a> {
@@ -193,6 +193,52 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(crate::types::I64, &as_i64, DOUBLE))
         }
 
+        // -------- Arrays (Phase B.3) --------
+        // `[a, b, c]` literal: allocate via js_array_alloc(N), then
+        // sequentially push each element. js_array_push_f64 may return a
+        // new pointer if it had to realloc, so we thread the pointer
+        // through each push. Final pointer is NaN-boxed via js_nanbox_pointer
+        // (POINTER_TAG, not STRING_TAG).
+        Expr::Array(elements) => lower_array_literal(ctx, elements),
+
+        // `arr[i]` index access. Currently number-typed only — assumes the
+        // receiver is an array of numbers and the result is a raw f64.
+        Expr::IndexGet { object, index } => {
+            if !is_array_expr(ctx, object) {
+                bail!(
+                    "perry-codegen-llvm Phase B.3: IndexGet receiver must be a known array (got {})",
+                    variant_name(object)
+                );
+            }
+            let arr_box = lower_expr(ctx, object)?;
+            let idx_double = lower_expr(ctx, index)?;
+            let blk = ctx.block();
+            // Unbox the array pointer: bitcast double → i64, mask off the
+            // POINTER_TAG bits with POINTER_MASK_I64.
+            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+            // Index is a double in our value model; convert to i32 for the
+            // runtime ABI.
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+            Ok(blk.call(
+                DOUBLE,
+                "js_array_get_f64",
+                &[(I64, &arr_handle), (I32, &idx_i32)],
+            ))
+        }
+
+        // `arr.length` — for arrays specifically. Strings, objects, and
+        // other receivers fall through to the unsupported error.
+        Expr::PropertyGet { object, property } if property == "length" && is_array_expr(ctx, object) => {
+            let arr_box = lower_expr(ctx, object)?;
+            let blk = ctx.block();
+            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+            let len_i32 = blk.call(I32, "js_array_length", &[(I64, &arr_handle)]);
+            // Convert i32 → double for our number ABI.
+            Ok(blk.sitofp(I32, &len_i32, DOUBLE))
+        }
+
         // -------- Calls --------
         Expr::Call { callee, args, .. } => lower_call(ctx, callee, args),
 
@@ -288,6 +334,59 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Statically determine whether an expression is an array. Used for
+/// dispatch on `arr.length` and `arr[i]`.
+fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::Array(_) => true,
+        Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::Array(_))),
+        _ => false,
+    }
+}
+
+/// Lower an array literal `[a, b, c, …]`.
+///
+/// Pattern:
+/// ```llvm
+/// %arr0 = call i64 @js_array_alloc(i32 N)        ; pre-sized
+/// %arr1 = call i64 @js_array_push_f64(i64 %arr0, double <a>)
+/// %arr2 = call i64 @js_array_push_f64(i64 %arr1, double <b>)
+/// %arr3 = call i64 @js_array_push_f64(i64 %arr2, double <c>)
+/// %boxed = call double @js_nanbox_pointer(i64 %arr3)
+/// ```
+///
+/// Each `push_f64` returns a possibly-realloc'd pointer that the next push
+/// must use. Since we pre-size with `js_array_alloc(N)`, the pushes
+/// shouldn't actually realloc, but we honor the ABI to stay correct if the
+/// runtime grows the array for any reason.
+///
+/// All elements are lowered to raw `double` first; the array stores them
+/// as f64 (the typed-Number array layout). Mixed-type arrays come in a
+/// later Phase B slice.
+fn lower_array_literal(ctx: &mut FnCtx<'_>, elements: &[Expr]) -> Result<String> {
+    let n = elements.len() as u32;
+    let cap_str = n.to_string();
+
+    // Allocate. The result is a raw i64 array pointer (NOT NaN-boxed).
+    let mut current_arr = ctx
+        .block()
+        .call(I64, "js_array_alloc", &[(I32, &cap_str)]);
+
+    for value_expr in elements {
+        let v = lower_expr(ctx, value_expr)?;
+        current_arr = ctx.block().call(
+            I64,
+            "js_array_push_f64",
+            &[(I64, &current_arr), (DOUBLE, &v)],
+        );
+    }
+
+    // NaN-box the final pointer with POINTER_TAG via js_nanbox_pointer.
+    Ok(ctx
+        .block()
+        .call(DOUBLE, "js_nanbox_pointer", &[(I64, &current_arr)]))
 }
 
 /// Lower a static `s1 + s2` string concatenation. Both operands must

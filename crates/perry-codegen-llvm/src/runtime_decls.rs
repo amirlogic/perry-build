@@ -73,4 +73,26 @@ pub fn declare_phase_a_strings(module: &mut LlModule) {
 /// result with `js_nanbox_string`.
 pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_concat", I64, &[I64, I64]);
+
+    declare_phase_b_arrays(module);
+}
+
+/// Phase B array operations (number-typed arrays for the first slice).
+///
+/// All arrays are stored as raw i64 pointers at the runtime level. The
+/// codegen NaN-boxes them with `POINTER_TAG` for storage in locals/params,
+/// and unboxes back to raw i64 (`bitcast` + `and POINTER_MASK`) before
+/// passing to runtime functions.
+///
+/// - `js_array_alloc(u32) -> *mut ArrayHeader` — allocate with capacity
+/// - `js_array_push_f64(arr, value) -> arr*` — push element, may realloc
+///   and return a NEW pointer that the caller must use going forward
+/// - `js_array_get_f64(arr, index) -> f64` — read typed-number element
+/// - `js_array_length(arr) -> u32` — length (u32, sitofp'd to double for
+///   our number ABI)
+pub fn declare_phase_b_arrays(module: &mut LlModule) {
+    module.declare_function("js_array_alloc", I64, &[I32]);
+    module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
+    module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
+    module.declare_function("js_array_length", I32, &[I64]);
 }
