@@ -66,30 +66,31 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ty.clone()
             };
 
-            // If the local id is registered as a module-level global
-            // (pre-walked by compile_module from hir.init top-level lets),
-            // store the init value directly into the global instead of
-            // allocating a fresh stack slot. This is what makes
-            // `let counter = 0; function bump() { counter++; }` work —
-            // both main's Let and bump's Update target the same storage.
+            // CRITICAL: register the local's storage BEFORE lowering
+            // the init expression. Self-recursive closures (`let f = (n)
+            // => f(n-1) ...`) reference the let-bound name from inside
+            // their own body, and the closure's auto-capture pass needs
+            // to find the slot or global. Lowering the init first means
+            // the body sees `LocalGet(7)` with no entry in ctx.locals.
+            //
+            // For module globals we register first, then lower init,
+            // then store. Same for stack-local lets.
             if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                ctx.local_types.insert(*id, refined_ty);
                 if let Some(init_expr) = init {
                     let v = lower_expr(ctx, init_expr)?;
                     let g_ref = format!("@{}", global_name);
                     ctx.block().store(DOUBLE, &v, &g_ref);
                 }
-                ctx.local_types.insert(*id, refined_ty);
                 return Ok(());
             }
-            // Otherwise: regular function-local. Allocate a stack slot,
-            // store the initializer if present.
             let slot = ctx.block().alloca(DOUBLE);
+            ctx.locals.insert(*id, slot.clone());
+            ctx.local_types.insert(*id, refined_ty);
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
             }
-            ctx.locals.insert(*id, slot);
-            ctx.local_types.insert(*id, refined_ty);
             Ok(())
         }
 
@@ -171,6 +172,26 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         // source order) — falling-through into the default case from the
         // preceding case is valid JS.
         Stmt::Switch { discriminant, cases } => lower_switch(ctx, discriminant, cases),
+
+        // Phase G stubs: real exception handling lives in a future
+        // phase. For now we lower throw as a process abort and try
+        // as just the body block (no catch, no finally). This is
+        // wrong but unblocks compilation of programs that have a
+        // try/catch but never actually throw at runtime.
+        Stmt::Throw(_expr) => {
+            // Emit `unreachable` so subsequent code in the same block
+            // is dead. The program will trap at runtime if this is
+            // reached, which is closer to "abort" than "ignore".
+            ctx.block().unreachable();
+            Ok(())
+        }
+        Stmt::Try { body, catch: _, finally } => {
+            lower_stmts(ctx, body)?;
+            if let Some(f) = finally {
+                lower_stmts(ctx, f)?;
+            }
+            Ok(())
+        }
 
         other => bail!(
             "perry-codegen-llvm Phase B.12: Stmt {} not yet supported",

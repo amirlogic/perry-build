@@ -143,38 +143,55 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     //      as cheap stack alloca (preserves perf for the bench
     //      benchmarks that don't share state with helper functions).
     let mut referenced_from_fn: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for f in &hir.functions {
-        let mut local_defs: std::collections::HashSet<u32> = f.params.iter().map(|p| p.id).collect();
-        collect_let_ids(&f.body, &mut local_defs);
+    // Helper that handles "params + lets define a scope, refs minus
+    // defines flow out". Used for every function/method/closure body.
+    let scan_body = |params: &[perry_hir::Param],
+                     body: &[perry_hir::Stmt],
+                     out: &mut std::collections::HashSet<u32>| {
+        let mut local_defs: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
+        collect_let_ids(body, &mut local_defs);
         let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        collect_ref_ids_in_stmts(&f.body, &mut refs);
+        collect_ref_ids_in_stmts(body, &mut refs);
         for r in refs {
             if !local_defs.contains(&r) {
-                referenced_from_fn.insert(r);
+                out.insert(r);
             }
         }
+    };
+    for f in &hir.functions {
+        scan_body(&f.params, &f.body, &mut referenced_from_fn);
     }
     for c in &hir.classes {
         for m in &c.methods {
-            let mut local_defs: std::collections::HashSet<u32> = m.params.iter().map(|p| p.id).collect();
-            collect_let_ids(&m.body, &mut local_defs);
-            let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            collect_ref_ids_in_stmts(&m.body, &mut refs);
-            for r in refs {
-                if !local_defs.contains(&r) {
-                    referenced_from_fn.insert(r);
-                }
-            }
+            scan_body(&m.params, &m.body, &mut referenced_from_fn);
         }
         if let Some(ctor) = &c.constructor {
-            let mut local_defs: std::collections::HashSet<u32> = ctor.params.iter().map(|p| p.id).collect();
-            collect_let_ids(&ctor.body, &mut local_defs);
-            let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            collect_ref_ids_in_stmts(&ctor.body, &mut refs);
-            for r in refs {
-                if !local_defs.contains(&r) {
-                    referenced_from_fn.insert(r);
-                }
+            scan_body(&ctor.params, &ctor.body, &mut referenced_from_fn);
+        }
+    }
+    // Also walk every closure body. A self-referencing recursive
+    // closure (`let f = (n) => f(n-1)`) needs `f` to be globalized
+    // so the closure body can see the live storage instead of a
+    // stale snapshot. Without this, the closure auto-capture sees
+    // `f` is not yet declared and bails with "local not in scope".
+    {
+        let mut closures: Vec<(perry_types::FuncId, perry_hir::Expr)> = Vec::new();
+        let mut seen: std::collections::HashSet<perry_types::FuncId> = std::collections::HashSet::new();
+        for f in &hir.functions {
+            collect_closures_in_stmts(&f.body, &mut seen, &mut closures);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
+            }
+        }
+        collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
+        for (_, closure_expr) in &closures {
+            if let perry_hir::Expr::Closure { params, body, .. } = closure_expr {
+                scan_body(params, body, &mut referenced_from_fn);
             }
         }
     }
@@ -452,8 +469,15 @@ fn compile_closure(
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
-    let (params, body, captures) = match closure_expr {
-        perry_hir::Expr::Closure { params, body, captures, .. } => (params, body, captures),
+    let (params, body, captures, captures_this, enclosing_class) = match closure_expr {
+        perry_hir::Expr::Closure {
+            params,
+            body,
+            captures,
+            captures_this,
+            enclosing_class,
+            ..
+        } => (params, body, captures, *captures_this, enclosing_class.clone()),
         _ => return Err(anyhow!("compile_closure: expected Expr::Closure")),
     };
 
@@ -520,6 +544,31 @@ fn compile_closure(
         .map(|(i, id)| (*id, i as u32))
         .collect();
 
+    // Arrow-function `this` capture: `enclosing_class` tells us the
+    // class the closure was lexically nested in. We allocate a slot
+    // and store an undefined sentinel — the closure can't actually
+    // call methods on it (we'd need to thread the real `this` through
+    // captures), but `console.log(this)` and similar reads at least
+    // produce a non-crashing value. Full support lives in a later
+    // phase that adds a synthetic capture for the outer `this`.
+    let this_stack = if captures_this || enclosing_class.is_some() {
+        let blk = lf.block_mut(0).unwrap();
+        let slot = blk.alloca(DOUBLE);
+        // Initialize with a sentinel double — `this` reads from a
+        // closure that doesn't actually capture `this` will return
+        // garbage, but won't crash. Real `this` capture support
+        // (synthetic capture slot for the outer this) lives in a
+        // future phase.
+        blk.store(DOUBLE, "0.0", &slot);
+        vec![slot]
+    } else {
+        Vec::new()
+    };
+    let class_stack = match enclosing_class.clone() {
+        Some(c) => vec![c],
+        None => Vec::new(),
+    };
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -529,8 +578,8 @@ fn compile_closure(
         strings,
         loop_targets: Vec::new(),
         classes,
-        this_stack: Vec::new(),
-        class_stack: Vec::new(),
+        this_stack,
+        class_stack,
         methods,
         module_globals,
         import_function_prefixes,
