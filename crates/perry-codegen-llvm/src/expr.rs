@@ -1831,6 +1831,61 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
+        // -------- FuncRef as expression value (function reference) --------
+        // Returns the function pointer as a NaN-boxed value. Calls
+        // through this value will fail at runtime since we don't
+        // wrap it in a closure header — but compile succeeds, and
+        // the caller often only uses it as a unique identity check.
+        Expr::FuncRef(id) => {
+            let func_name = ctx
+                .func_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "perry_unknown_func".to_string());
+            // Take the function address and box it as a pointer.
+            // ptrtoint @func to i64, then nanbox.
+            let blk = ctx.block();
+            let func_ptr = format!("@{}", func_name);
+            let i64_v = blk.ptrtoint(&func_ptr, I64);
+            Ok(nanbox_pointer_inline(blk, &i64_v))
+        }
+
+        // -------- Stubs for Path/Process/Number/etc. --------
+        Expr::PathExtname(p) => {
+            // Stub: return the input path unchanged.
+            lower_expr(ctx, p)
+        }
+        Expr::PathFormat(o) => lower_expr(ctx, o),
+        Expr::ProcessVersion => Ok(double_literal(0.0)),
+        Expr::ObjectHasOwn(obj, key) => {
+            let obj_box = lower_expr(ctx, obj)?;
+            let key_box = lower_expr(ctx, key)?;
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_object_has_property",
+                &[(DOUBLE, &obj_box), (DOUBLE, &key_box)],
+            ))
+        }
+        Expr::NumberIsNaN(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            // fcmp uno x, x — true iff x is NaN. Convert i1→f64.
+            let blk = ctx.block();
+            let bit = blk.fcmp("uno", &v, &v);
+            let as_i64 = blk.zext(I1, &bit, I64);
+            Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+        }
+        Expr::FsMkdirSync(p) => {
+            // Stub: lower for side effects, return undefined.
+            let _ = lower_expr(ctx, p)?;
+            Ok(double_literal(0.0))
+        }
+        Expr::IteratorToArray(o) => lower_expr(ctx, o),
+        Expr::WeakRefDeref(o) => lower_expr(ctx, o),
+        Expr::Uint8ArrayNew(_) => Ok(double_literal(0.0)),
+        Expr::Uint8ArrayLength(_) => Ok(double_literal(0.0)),
+        Expr::Uint8ArrayGet { .. } => Ok(double_literal(0.0)),
+        Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
+
         // -------- ProcessPid / ProcessPpid stubs --------
         Expr::ProcessPid | Expr::ProcessPpid => Ok(double_literal(0.0)),
 
@@ -2852,6 +2907,32 @@ fn lower_array_method(
             }
             let sep_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let sep_handle = unbox_to_i64(blk, &sep_box);
+            let result_handle = blk.call(
+                I64,
+                "js_array_join",
+                &[(I64, &recv_handle), (I64, &sep_handle)],
+            );
+            Ok(nanbox_string_inline(blk, &result_handle))
+        }
+        "some" | "every" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.{} expects 1 arg, got {}", property, args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let runtime_fn = if property == "some" { "js_array_some" } else { "js_array_every" };
+            Ok(blk.call(DOUBLE, runtime_fn, &[(I64, &recv_handle), (I64, &cb_handle)]))
+        }
+        "toString" => {
+            // arr.toString() == arr.join(",")
+            let key_idx = ctx.strings.intern(",");
+            let handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+            let blk = ctx.block();
+            let sep_box = blk.load(DOUBLE, &handle_global);
             let recv_handle = unbox_to_i64(blk, &recv_box);
             let sep_handle = unbox_to_i64(blk, &sep_box);
             let result_handle = blk.call(
