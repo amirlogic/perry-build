@@ -4277,7 +4277,24 @@ fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
             let cls = ctx.class_stack.last()?.clone();
             Some(HirType::Named(cls))
         }
-        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } => {
+        Expr::ArrayMap { .. }
+        | Expr::ArrayFilter { .. }
+        | Expr::ArraySpread(_)
+        | Expr::ArraySlice { .. }
+        | Expr::ArrayToReversed { .. }
+        | Expr::ArrayToSorted { .. }
+        | Expr::ArrayToSpliced { .. }
+        | Expr::ArrayWith { .. }
+        | Expr::ArrayFlat { .. }
+        | Expr::ArrayFlatMap { .. }
+        | Expr::ArrayFromMapped { .. }
+        | Expr::ArrayFrom(_)
+        | Expr::ArrayEntries(_)
+        | Expr::ArrayKeys(_)
+        | Expr::ArrayValues(_)
+        | Expr::ObjectKeys(_)
+        | Expr::ObjectValues(_)
+        | Expr::ObjectEntries(_) => {
             Some(HirType::Array(Box::new(HirType::Any)))
         }
         _ => None,
