@@ -897,6 +897,27 @@ fn collect_closures_in_stmts(
                 }
                 collect_closures_in_stmts(body, seen, out);
             }
+            perry_hir::Stmt::Switch { discriminant, cases } => {
+                collect_closures_in_expr(discriminant, seen, out);
+                for case in cases {
+                    if let Some(test) = &case.test {
+                        collect_closures_in_expr(test, seen, out);
+                    }
+                    collect_closures_in_stmts(&case.body, seen, out);
+                }
+            }
+            perry_hir::Stmt::Try { body, catch, finally } => {
+                collect_closures_in_stmts(body, seen, out);
+                if let Some(c) = catch {
+                    collect_closures_in_stmts(&c.body, seen, out);
+                }
+                if let Some(f) = finally {
+                    collect_closures_in_stmts(f, seen, out);
+                }
+            }
+            perry_hir::Stmt::Labeled { body, .. } => {
+                collect_closures_in_stmts(std::slice::from_ref(body.as_ref()), seen, out);
+            }
             _ => {}
         }
     }
@@ -1011,8 +1032,77 @@ fn collect_closures_in_expr(
             walk(array, seen, out);
             walk(comparator, seen, out);
         }
+        Expr::ArrayFlatMap { array, callback } => {
+            walk(array, seen, out);
+            walk(callback, seen, out);
+        }
+        Expr::ArrayFlat { array } => walk(array, seen, out),
+        Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFindLast { array, callback }
+        | Expr::ArrayFindLastIndex { array, callback }
+        | Expr::ArrayForEach { array, callback } => {
+            walk(array, seen, out);
+            walk(callback, seen, out);
+        }
+        Expr::ArrayUnshift { value, .. } => walk(value, seen, out),
+        Expr::ArrayIncludes { array, value } => {
+            walk(array, seen, out);
+            walk(value, seen, out);
+        }
+        Expr::ArrayIndexOf { array, value } => {
+            walk(array, seen, out);
+            walk(value, seen, out);
+        }
+        Expr::ArraySplice { start, delete_count, items, .. } => {
+            walk(start, seen, out);
+            if let Some(d) = delete_count {
+                walk(d, seen, out);
+            }
+            for it in items {
+                walk(it, seen, out);
+            }
+        }
+        Expr::ArrayEntries(o) | Expr::ArrayKeys(o) | Expr::ArrayValues(o) => {
+            walk(o, seen, out);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            walk(array, seen, out);
+            if let Some(c) = comparator {
+                walk(c, seen, out);
+            }
+        }
+        Expr::ArrayToReversed { array } | Expr::ArrayFlat { array } => walk(array, seen, out),
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            walk(array, seen, out);
+            walk(start, seen, out);
+            walk(delete_count, seen, out);
+            for it in items {
+                walk(it, seen, out);
+            }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            walk(array, seen, out);
+            walk(index, seen, out);
+            walk(value, seen, out);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            walk(target, seen, out);
+            walk(start, seen, out);
+            if let Some(e) = end {
+                walk(e, seen, out);
+            }
+        }
+        Expr::ArrayAt { array, index } => {
+            walk(array, seen, out);
+            walk(index, seen, out);
+        }
         Expr::QueueMicrotask(cb) | Expr::ProcessNextTick(cb) => {
             walk(cb, seen, out);
+        }
+        Expr::ProcessOn { event, handler } => {
+            walk(event, seen, out);
+            walk(handler, seen, out);
         }
         Expr::Sequence(es) => {
             for e in es {
