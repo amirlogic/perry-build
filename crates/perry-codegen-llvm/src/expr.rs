@@ -1886,6 +1886,126 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::Uint8ArrayGet { .. } => Ok(double_literal(0.0)),
         Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
 
+        // -------- arr.unshift(value) --------
+        Expr::ArrayUnshift { array_id, value } => {
+            let v = lower_expr(ctx, value)?;
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let new_handle = blk.call(
+                I64,
+                "js_array_unshift_f64",
+                &[(I64, &arr_handle), (DOUBLE, &v)],
+            );
+            let new_box = nanbox_pointer_inline(blk, &new_handle);
+            // Write back to the local's storage.
+            if let Some(&capture_idx) = ctx.closure_captures.get(array_id) {
+                let closure_ptr = ctx
+                    .current_closure_ptr
+                    .clone()
+                    .ok_or_else(|| anyhow!("ArrayUnshift captured but no current_closure_ptr"))?;
+                let idx_str = capture_idx.to_string();
+                ctx.block().call_void(
+                    "js_closure_set_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &new_box)],
+                );
+            } else if let Some(slot) = ctx.locals.get(array_id).cloned() {
+                ctx.block().store(DOUBLE, &new_box, &slot);
+            } else if let Some(global_name) = ctx.module_globals.get(array_id).cloned() {
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &new_box, &g_ref);
+            }
+            Ok(new_box)
+        }
+
+        // -------- arr.entries() / .keys() / .values() (eager) --------
+        Expr::ArrayEntries(arr) => {
+            let arr_box = lower_expr(ctx, arr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(I64, "js_array_entries", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        Expr::ArrayKeys(arr) => {
+            let arr_box = lower_expr(ctx, arr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(I64, "js_array_keys", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        Expr::ArrayValues(arr) => {
+            let arr_box = lower_expr(ctx, arr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let result = blk.call(I64, "js_array_values", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- ClassRef stub (returns class id 0 as a sentinel) --------
+        Expr::ClassRef(_) => Ok(double_literal(0.0)),
+
+        // -------- CallSpread: lower callee + args, ignore spread semantics --------
+        Expr::CallSpread { callee, args, .. } => {
+            use perry_hir::CallArg;
+            let _ = lower_expr(ctx, callee)?;
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => {
+                        let _ = lower_expr(ctx, e)?;
+                    }
+                }
+            }
+            Ok(double_literal(0.0))
+        }
+
+        // -------- Math.fround stub (returns input unchanged) --------
+        Expr::MathFround(operand) => lower_expr(ctx, operand),
+
+        // -------- new Map([[k,v], ...]) — alloc empty map, ignore source --------
+        Expr::MapNewFromArray(_) => {
+            let cap = "8".to_string();
+            let handle = ctx.block().call(I64, "js_map_alloc", &[(I32, &cap)]);
+            Ok(nanbox_pointer_inline(ctx.block(), &handle))
+        }
+
+        // -------- DateGetTime / DateUtc / DateGetTimezoneOffset stubs --------
+        Expr::DateGetTime(_) | Expr::DateGetTimezoneOffset(_) | Expr::DateUtc(_) => {
+            Ok(double_literal(0.0))
+        }
+
+        // -------- Object.defineProperty stub --------
+        Expr::ObjectDefineProperty(obj, key, value) => {
+            // Lower for side effects (the value may contain closures), return obj.
+            let _ = lower_expr(ctx, key)?;
+            let _ = lower_expr(ctx, value)?;
+            lower_expr(ctx, obj)
+        }
+
+        // -------- path.isAbsolute(p) -> boolean stub --------
+        Expr::PathIsAbsolute(p) => {
+            let _ = lower_expr(ctx, p)?;
+            Ok(double_literal(0.0))
+        }
+
+        // -------- ProcessHrtimeBigint stub --------
+        Expr::ProcessHrtimeBigint => Ok(double_literal(0.0)),
+
+        // -------- RegExpExecIndex stub (returns -1) --------
+        Expr::RegExpExecIndex => Ok(double_literal(-1.0)),
+
+        // -------- Crypto.* stubs --------
+        Expr::CryptoRandomUUID => Ok(double_literal(0.0)),
+        Expr::CryptoRandomBytes(operand) => {
+            let _ = lower_expr(ctx, operand)?;
+            Ok(double_literal(0.0))
+        }
+
+        // -------- BufferConcat stub --------
+        Expr::BufferConcat(operand) => lower_expr(ctx, operand),
+
+        // -------- StaticPluginResolve stub --------
+        Expr::StaticPluginResolve(_) => Ok(double_literal(0.0)),
+
         // -------- More cheap stubs --------
         Expr::PathResolve(p) | Expr::PathNormalize(p) => lower_expr(ctx, p),
         Expr::ObjectCreate(p) => lower_expr(ctx, p),

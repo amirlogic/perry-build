@@ -214,6 +214,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_find_last_index", I32, &[I64, I64]);
     module.declare_function("js_array_some", DOUBLE, &[I64, I64]);
     module.declare_function("js_array_every", DOUBLE, &[I64, I64]);
+    module.declare_function("js_array_unshift_f64", I64, &[I64, DOUBLE]);
+    module.declare_function("js_array_entries", I64, &[I64]);
+    module.declare_function("js_array_keys", I64, &[I64]);
+    module.declare_function("js_array_values", I64, &[I64]);
 
     declare_phase_b_arrays(module);
 }
