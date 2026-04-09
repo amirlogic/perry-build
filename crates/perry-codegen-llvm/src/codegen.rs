@@ -442,9 +442,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
     }
 
+    // Build closure rest param index: for each closure that has a rest
+    // parameter, record its func_id → rest param position. Used by
+    // the closure call site in `lower_call` to bundle trailing args.
+    let closure_rest_params: HashMap<u32, usize> = closures
+        .iter()
+        .filter_map(|(fid, expr)| {
+            if let perry_hir::Expr::Closure { params, .. } = expr {
+                params.iter().position(|p| p.is_rest).map(|idx| (*fid, idx))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -467,6 +481,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &module_prefix,
             &module_boxed_vars,
             &module_local_types,
+            &closure_rest_params,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
     }
@@ -477,7 +492,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
         // Getters and setters are also methods, just registered under
@@ -486,13 +501,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, getter_fn) in &class.getters {
             let mut renamed = getter_fn.clone();
             renamed.name = format!("__get_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
                 .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
         }
         for (prop, setter_fn) in &class.setters {
             let mut renamed = setter_fn.clone();
             renamed.name = format!("__set_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
         }
         // Static methods compile as plain functions named
@@ -515,6 +530,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 &func_signatures,
                 &module_prefix,
                 &module_boxed_vars,
+                &closure_rest_params,
             )
             .with_context(|| format!("lowering static method '{}::{}'", class.name, sm.name))?;
         }
@@ -576,6 +592,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         opts.is_entry_module,
         &opts.non_entry_module_prefixes,
         &module_boxed_vars,
+        &closure_rest_params,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -615,6 +632,7 @@ fn compile_function(
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -686,6 +704,8 @@ fn compile_function(
         class_ids,
         func_signatures,
         boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -739,6 +759,7 @@ fn compile_closure(
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
     module_local_types: &HashMap<u32, perry_types::Type>,
+    closure_rest_params: &HashMap<u32, usize>,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
@@ -884,6 +905,8 @@ fn compile_closure(
         class_ids,
         func_signatures,
         boxed_vars: closure_boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -915,6 +938,7 @@ fn compile_method(
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -984,6 +1008,8 @@ fn compile_method(
         class_ids,
         func_signatures,
         boxed_vars: method_boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1028,6 +1054,7 @@ fn compile_module_entry(
     is_entry: bool,
     non_entry_module_prefixes: &[String],
     module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
 
@@ -1080,6 +1107,8 @@ fn compile_module_entry(
             class_ids,
             func_signatures,
             boxed_vars: main_boxed_vars,
+            closure_rest_params: &closure_rest_params,
+            local_closure_func_ids: HashMap::new(),
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1129,6 +1158,8 @@ fn compile_module_entry(
             class_ids,
             func_signatures,
             boxed_vars: init_boxed_vars,
+            closure_rest_params: &closure_rest_params,
+            local_closure_func_ids: HashMap::new(),
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1202,6 +1233,7 @@ fn compile_static_method(
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
 ) -> Result<()> {
     let llvm_name = format!("perry_static_{}__{}__{}", module_prefix, class_name, f.name);
 
@@ -1259,6 +1291,8 @@ fn compile_static_method(
         class_ids,
         func_signatures,
         boxed_vars: module_boxed_vars.clone(),
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

@@ -173,6 +173,17 @@ pub(crate) struct FnCtx<'a> {
     /// - Closure creation captures the box pointer directly so
     ///   the closure body sees the same storage.
     pub boxed_vars: std::collections::HashSet<u32>,
+    /// Closure rest param index: closure `FuncId` → index of the rest
+    /// parameter. Built once in `compile_module` from the collected
+    /// closures. Used by the closure call site in `lower_call` to
+    /// bundle trailing arguments into an array before calling
+    /// `js_closure_callN`.
+    pub closure_rest_params: &'a std::collections::HashMap<u32, usize>,
+    /// LocalId → closure FuncId mapping. Populated in `Stmt::Let`
+    /// when the init expression is `Expr::Closure { func_id, .. }`.
+    /// Used by the closure call site in `lower_call` to look up the
+    /// callee's rest param info from `closure_rest_params`.
+    pub local_closure_func_ids: std::collections::HashMap<u32, u32>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -2582,6 +2593,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let m_handle = unbox_to_i64(blk, &m_box);
             blk.call_void("js_map_clear", &[(I64, &m_handle)]);
             Ok(double_literal(0.0))
+        }
+
+        // -------- Map.entries / Map.keys / Map.values --------
+        // All three take a map pointer and return an array pointer.
+        // Used by for...of desugaring on Maps.
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
+            let m_box = lower_expr(ctx, map)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            let func_name = match expr {
+                Expr::MapEntries(_) => "js_map_entries",
+                Expr::MapKeys(_) => "js_map_keys",
+                Expr::MapValues(_) => "js_map_values",
+                _ => unreachable!(),
+            };
+            let result = blk.call(I64, func_name, &[(I64, &m_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- Set.values (set → array conversion for iteration) --------
+        Expr::SetValues(set) => {
+            let s_box = lower_expr(ctx, set)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let result = blk.call(I64, "js_set_to_array", &[(I64, &s_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
         }
 
         // -------- Object.isFrozen / isSealed / isExtensible stubs (return false) --------

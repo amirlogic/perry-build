@@ -86,6 +86,12 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ty.clone()
             };
 
+            // Track closure func_id → local_id mapping so the closure
+            // call site in lower_call can look up rest param info.
+            if let Some(perry_hir::Expr::Closure { func_id: cfid, .. }) = init.as_ref() {
+                ctx.local_closure_func_ids.insert(*id, *cfid);
+            }
+
             // CRITICAL: register the local's storage BEFORE lowering
             // the init expression. Self-recursive closures (`let f = (n)
             // => f(n-1) ...`) reference the let-bound name from inside

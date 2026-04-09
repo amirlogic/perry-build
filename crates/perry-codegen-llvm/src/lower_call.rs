@@ -10,7 +10,7 @@ use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox
 use crate::lower_array_method::lower_array_method;
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
-use crate::type_analysis::{is_array_expr, is_string_expr, receiver_class_name};
+use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
 use crate::types::{DOUBLE, I32, I64};
 
 /// Lower a `Call` expression. Two shapes are supported:
@@ -30,18 +30,57 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             for a in args {
                 lowered_args.push(lower_expr(ctx, a)?);
             }
-            if args.len() > 5 {
+
+            // Check if this closure has rest params — if so, bundle
+            // trailing args into an array (same pattern as FuncRef).
+            let rest_idx = ctx
+                .local_closure_func_ids
+                .get(id)
+                .and_then(|cfid| ctx.closure_rest_params.get(cfid))
+                .copied();
+
+            let effective_args: Vec<String> = if let Some(ri) = rest_idx {
+                let fixed_count = ri;
+                let mut result: Vec<String> =
+                    lowered_args[..fixed_count.min(lowered_args.len())].to_vec();
+                // Materialize the rest array from trailing args.
+                let rest_slice = if fixed_count < lowered_args.len() {
+                    &lowered_args[fixed_count..]
+                } else {
+                    &[]
+                };
+                let rest_count = rest_slice.len() as u32;
+                let cap = rest_count.to_string();
+                let mut arr = ctx
+                    .block()
+                    .call(I64, "js_array_alloc", &[(I32, &cap)]);
+                for v in rest_slice {
+                    let blk = ctx.block();
+                    arr = blk.call(
+                        I64,
+                        "js_array_push_f64",
+                        &[(I64, &arr), (DOUBLE, v)],
+                    );
+                }
+                let rest_box = nanbox_pointer_inline(ctx.block(), &arr);
+                result.push(rest_box);
+                result
+            } else {
+                lowered_args
+            };
+
+            if effective_args.len() > 5 {
                 bail!(
                     "perry-codegen-llvm Phase D.1: closure call with {} args (max 5)",
-                    args.len()
+                    effective_args.len()
                 );
             }
             let blk = ctx.block();
             let closure_handle = unbox_to_i64(blk, &recv_box);
-            let runtime_fn = format!("js_closure_call{}", args.len());
+            let runtime_fn = format!("js_closure_call{}", effective_args.len());
             let mut call_args: Vec<(crate::types::LlvmType, &str)> =
                 vec![(I64, &closure_handle)];
-            for v in &lowered_args {
+            for v in &effective_args {
                 call_args.push((DOUBLE, v.as_str()));
             }
             return Ok(blk.call(DOUBLE, &runtime_fn, &call_args));
@@ -254,6 +293,118 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         if is_array_expr(ctx, object) {
             return lower_array_method(ctx, object, property, args);
         }
+
+        // -------- Promise.then / .catch / .finally --------
+        // Promise pointers are NaN-boxed with POINTER_TAG. We unbox
+        // to get the raw i64 promise handle, then call the runtime
+        // `js_promise_then(promise, on_fulfilled, on_rejected)` which
+        // returns a new promise handle that we re-box with POINTER_TAG.
+        //
+        // `.catch(cb)` is sugar for `.then(undefined, cb)`.
+        if matches!(property.as_str(), "then" | "catch" | "finally")
+            && is_promise_expr(ctx, object)
+        {
+            match property.as_str() {
+                "then" => {
+                    if !args.is_empty() {
+                        let promise_box = lower_expr(ctx, object)?;
+                        let on_fulfilled_box = lower_expr(ctx, &args[0])?;
+                        let on_rejected_box = if args.len() >= 2 {
+                            lower_expr(ctx, &args[1])?
+                        } else {
+                            "0".to_string() // null → no rejection handler
+                        };
+                        let blk = ctx.block();
+                        let promise_handle = unbox_to_i64(blk, &promise_box);
+                        let on_fulfilled_handle = unbox_to_i64(blk, &on_fulfilled_box);
+                        let on_rejected_i64 = if args.len() >= 2 {
+                            unbox_to_i64(blk, &on_rejected_box)
+                        } else {
+                            "0".to_string() // null i64
+                        };
+                        let new_promise = blk.call(
+                            I64,
+                            "js_promise_then",
+                            &[
+                                (I64, &promise_handle),
+                                (I64, &on_fulfilled_handle),
+                                (I64, &on_rejected_i64),
+                            ],
+                        );
+                        return Ok(nanbox_pointer_inline(blk, &new_promise));
+                    }
+                }
+                "catch" => {
+                    if !args.is_empty() {
+                        let promise_box = lower_expr(ctx, object)?;
+                        let on_rejected_box = lower_expr(ctx, &args[0])?;
+                        let blk = ctx.block();
+                        let promise_handle = unbox_to_i64(blk, &promise_box);
+                        let on_rejected_handle = unbox_to_i64(blk, &on_rejected_box);
+                        let null_i64 = "0".to_string();
+                        let new_promise = blk.call(
+                            I64,
+                            "js_promise_then",
+                            &[
+                                (I64, &promise_handle),
+                                (I64, &null_i64),
+                                (I64, &on_rejected_handle),
+                            ],
+                        );
+                        return Ok(nanbox_pointer_inline(blk, &new_promise));
+                    }
+                }
+                "finally" => {
+                    // .finally(cb) — the callback takes no args and its
+                    // return value is ignored. We pass it as on_fulfilled
+                    // and on_rejected both set to the same closure; the
+                    // runtime handles the "ignore return" semantics.
+                    if !args.is_empty() {
+                        let promise_box = lower_expr(ctx, object)?;
+                        let on_finally_box = lower_expr(ctx, &args[0])?;
+                        let blk = ctx.block();
+                        let promise_handle = unbox_to_i64(blk, &promise_box);
+                        let on_finally_handle = unbox_to_i64(blk, &on_finally_box);
+                        let new_promise = blk.call(
+                            I64,
+                            "js_promise_then",
+                            &[
+                                (I64, &promise_handle),
+                                (I64, &on_finally_handle),
+                                (I64, &on_finally_handle),
+                            ],
+                        );
+                        return Ok(nanbox_pointer_inline(blk, &new_promise));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // -------- Map.forEach / Set.forEach --------
+        // The HIR emits these as generic Call { callee: PropertyGet }
+        // because it skips ArrayForEach when the receiver is Map/Set.
+        // Route to the runtime forEach implementations which iterate
+        // entries and call the callback via js_closure_call2.
+        if property == "forEach" && args.len() >= 1 {
+            if is_map_expr(ctx, object) {
+                let m_box = lower_expr(ctx, object)?;
+                let cb_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let m_handle = unbox_to_i64(blk, &m_box);
+                blk.call_void("js_map_foreach", &[(I64, &m_handle), (DOUBLE, &cb_box)]);
+                return Ok(double_literal(0.0));
+            }
+            if is_set_expr(ctx, object) {
+                let s_box = lower_expr(ctx, object)?;
+                let cb_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let s_handle = unbox_to_i64(blk, &s_box);
+                blk.call_void("js_set_foreach", &[(I64, &s_handle), (DOUBLE, &cb_box)]);
+                return Ok(double_literal(0.0));
+            }
+        }
+
         // Class instance method call. The receiver's static type is
         // `Type::Named(<class>)` for typed instances.
         //

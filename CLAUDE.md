@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.94
+**Current Version:** 0.4.96
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.96 (llvm-backend)
+- feat: `Promise.then()` / `.catch()` / `.finally()` chaining — `Promise.resolve(10).then(x => x * 2).then(x => x + 5)` now produces 25. Added `is_promise_expr` type detection in `type_analysis.rs` and dispatch in `lower_call.rs` that routes through `js_promise_then(promise, on_fulfilled, on_rejected)`. `refine_type_from_init` recognizes promise-returning expressions so chained locals get typed as `Promise(Any)`. `test_edge_promises` now passes all 24 assertions.
+
+### v0.4.95 (llvm-backend)
+- fix: arrow function rest parameters (`const sum = (...nums) => {}; sum(1,2,3)`) now bundle trailing args into an array at closure call sites via `js_closure_callN`, matching FuncRef rest-param handling. Built `closure_rest_params` map + `local_closure_func_ids` tracking so the call site knows which closures have rest params.
 
 ### v0.4.94 (llvm-backend)
 - fix: self-recursive nested functions now get their LocalId defined before body lowering, so the LLVM backend's boxed-var analysis sees the same LocalId at declaration and self-reference sites.

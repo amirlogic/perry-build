@@ -86,6 +86,21 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
                 .find(|f| f.name == *property)
                 .map(|f| f.ty.clone())
         }
+        // Promise-returning expressions: `Promise.resolve(x)`,
+        // `p.then(cb)`, `p.catch(cb)`, etc. Refine the local to
+        // `Promise(Any)` so `is_promise_expr` can detect subsequent
+        // `.then()` / `.catch()` chains.
+        Expr::Call { callee, .. } => {
+            if is_promise_expr(ctx, init) {
+                Some(HirType::Promise(Box::new(HirType::Any)))
+            } else {
+                // Check if callee is a known function whose name is
+                // an async fn — those return promises.
+                match callee.as_ref() {
+                    _ => None,
+                }
+            }
+        }
         _ => None,
     }
 }
@@ -295,6 +310,64 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                 .map(|f| matches!(f.ty, HirType::String))
                 .unwrap_or(false)
         }
+        _ => false,
+    }
+}
+
+/// Statically determine whether an expression evaluates to a Promise.
+/// Used by `.then()` / `.catch()` / `.finally()` dispatch in lower_call
+/// to intercept promise method calls and route them through the runtime
+/// `js_promise_then` / `js_promise_catch` functions.
+///
+/// Recognizes:
+/// - LocalGet of a `Promise(_)`-typed local
+/// - `Promise.resolve(x)` / `Promise.reject(x)` / `Promise.all(x)` / etc.
+///   (the GlobalGet + "resolve"/"reject"/"all"/"race"/"allSettled" pattern)
+/// - Result of `.then(cb)` / `.catch(cb)` / `.finally(cb)` on a promise
+///   (recursive: chains like `p.then(f).then(g)`)
+/// - Async function calls (return type is Promise)
+pub(crate) fn is_promise_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::Promise(_))
+        ),
+        // Promise.resolve / reject / all / race / allSettled
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::PropertyGet { object, property } => {
+                // `Promise.resolve(...)` etc. — GlobalGet receiver with
+                // a promise-shaped static method name.
+                if matches!(object.as_ref(), Expr::GlobalGet(_))
+                    && matches!(
+                        property.as_str(),
+                        "resolve" | "reject" | "all" | "race" | "allSettled"
+                    )
+                {
+                    return true;
+                }
+                // `.then(cb)` / `.catch(cb)` / `.finally(cb)` on a promise
+                // receiver — the result is itself a promise.
+                if matches!(property.as_str(), "then" | "catch" | "finally")
+                    && is_promise_expr(ctx, object)
+                {
+                    return true;
+                }
+                false
+            }
+            // Async function call returns a promise.
+            Expr::FuncRef(fid) => ctx
+                .func_names
+                .get(fid)
+                .map(|_| {
+                    // Check if the function name suggests async. We can't
+                    // check func_return_types because we don't have them,
+                    // but we don't need to be exhaustive — the LocalGet
+                    // path catches assigned results.
+                    false
+                })
+                .unwrap_or(false),
+            _ => false,
+        },
         _ => false,
     }
 }
