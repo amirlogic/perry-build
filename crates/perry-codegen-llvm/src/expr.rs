@@ -635,8 +635,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // any other NaN-tagged value (string ptr, object ptr) when
             // the bool literal is on one side — TAG_TRUE bits never
             // match a string/pointer, so the result is correctly false.
+            // STRICT only: for LooseEq/LooseNe, booleans need coercion
+            // (false == "" → true) which the later js_loose_eq handles.
             let either_bool = is_bool_expr(ctx, left) || is_bool_expr(ctx, right);
-            if either_bool && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
+            if either_bool && matches!(op, CompareOp::Eq | CompareOp::Ne) {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
@@ -727,11 +729,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
-                // js_eq has u64 ABI for both args + return (JSValue
-                // is #[repr(transparent)] u64). Bitcast both ways.
+                // Use js_loose_eq for == / != (handles null==undefined,
+                // cross-type coercion). Use js_eq for === / !==.
+                let eq_fn = if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) {
+                    "js_loose_eq"
+                } else {
+                    "js_eq"
+                };
                 let l_bits = blk.bitcast_double_to_i64(&l);
                 let r_bits = blk.bitcast_double_to_i64(&r);
-                let result_bits = blk.call(I64, "js_eq", &[(I64, &l_bits), (I64, &r_bits)]);
+                let result_bits = blk.call(I64, eq_fn, &[(I64, &l_bits), (I64, &r_bits)]);
                 let result = blk.bitcast_i64_to_double(&result_bits);
                 if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
                     let cmp = blk.icmp_eq(I64, &result_bits, crate::nanbox::TAG_TRUE_I64);
@@ -808,21 +815,46 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 return Ok(blk.bitcast_i64_to_double(&tagged_i64));
             }
 
+            // Loose equality (==, !=): dispatch through js_loose_eq
+            // which handles cross-type coercion (null==undefined,
+            // "1"==1, false==0, etc.). Strict === already handled
+            // above by the typed fast paths.
+            if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_bits = blk.bitcast_double_to_i64(&l);
+                let r_bits = blk.bitcast_double_to_i64(&r);
+                let result_bits = blk.call(I64, "js_loose_eq", &[(I64, &l_bits), (I64, &r_bits)]);
+                if matches!(op, CompareOp::LooseNe) {
+                    let cmp = blk.icmp_eq(I64, &result_bits, crate::nanbox::TAG_TRUE_I64);
+                    let inv = blk.xor(crate::types::I1, &cmp, "true");
+                    let tagged = blk.select(
+                        crate::types::I1,
+                        &inv,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    return Ok(blk.bitcast_i64_to_double(&tagged));
+                }
+                return Ok(blk.bitcast_i64_to_double(&result_bits));
+            }
+
             let l = lower_expr(ctx, left)?;
             let r = lower_expr(ctx, right)?;
             let pred = match op {
-                CompareOp::Eq | CompareOp::LooseEq => "oeq",
-                CompareOp::Ne | CompareOp::LooseNe => "one",
+                CompareOp::Eq => "oeq",
+                CompareOp::Ne => "one",
                 CompareOp::Lt => "olt",
                 CompareOp::Le => "ole",
                 CompareOp::Gt => "ogt",
                 CompareOp::Ge => "oge",
+                // LooseEq/Ne handled above
+                CompareOp::LooseEq | CompareOp::LooseNe => unreachable!(),
             };
             let blk = ctx.block();
             let bit = blk.fcmp(pred, &l, &r);
-            // Result is a NaN-boxed boolean (TAG_TRUE / TAG_FALSE) so
-            // downstream `console.log(x === y)` prints "true"/"false"
-            // via the runtime's NaN-tag dispatch instead of "1"/"0".
             let tag_true_i64 = crate::nanbox::TAG_TRUE_I64;
             let tag_false_i64 = crate::nanbox::TAG_FALSE_I64;
             let tagged_i64 = blk.select(crate::types::I1, &bit, crate::types::I64, tag_true_i64, tag_false_i64);

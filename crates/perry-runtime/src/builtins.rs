@@ -750,6 +750,60 @@ pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
     }
 }
 
+/// JS abstract equality (==). Implements the coercion rules:
+/// - Same type: use strict equality
+/// - null == undefined: true
+/// - number == string: coerce string to number
+/// - boolean == anything: coerce boolean to number, recurse
+/// - string == number: coerce string to number
+#[no_mangle]
+pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
+    // Same bits → always equal (handles null==null, undefined==undefined, etc.)
+    if a.bits() == b.bits() {
+        return JSValue::bool(true);
+    }
+    // null == undefined (and vice versa)
+    if (a.is_null() && b.is_undefined()) || (a.is_undefined() && b.is_null()) {
+        return JSValue::bool(true);
+    }
+    // null/undefined != anything else
+    if a.is_null() || a.is_undefined() || b.is_null() || b.is_undefined() {
+        return JSValue::bool(false);
+    }
+    // Both numbers
+    if a.is_number() && b.is_number() {
+        return JSValue::bool(a.as_number() == b.as_number());
+    }
+    // Both strings: content compare
+    if a.is_string() && b.is_string() {
+        let result = crate::string::js_string_equals(
+            a.as_string_ptr(),
+            b.as_string_ptr(),
+        );
+        return JSValue::bool(result != 0);
+    }
+    // Boolean on either side: coerce to number and recurse
+    if a.is_bool() {
+        let a_num = if a.as_bool() { 1.0 } else { 0.0 };
+        return js_loose_eq(JSValue::number(a_num), b);
+    }
+    if b.is_bool() {
+        let b_num = if b.as_bool() { 1.0 } else { 0.0 };
+        return js_loose_eq(a, JSValue::number(b_num));
+    }
+    // String vs number: coerce string to number
+    if a.is_number() && b.is_string() {
+        let b_num = js_number_coerce(f64::from_bits(b.bits()));
+        return JSValue::bool(a.as_number() == b_num);
+    }
+    if a.is_string() && b.is_number() {
+        let a_num = js_number_coerce(f64::from_bits(a.bits()));
+        return JSValue::bool(a_num == b.as_number());
+    }
+    // Fallback: not equal
+    JSValue::bool(false)
+}
+
 #[no_mangle]
 pub extern "C" fn js_lt(a: JSValue, b: JSValue) -> JSValue {
     JSValue::bool(a.to_number() < b.to_number())

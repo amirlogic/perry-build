@@ -205,6 +205,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // js_eq takes JSValue (#[repr(transparent)] u64) for both
     // params + return — i64 in the ABI, not double.
     module.declare_function("js_eq", I64, &[I64, I64]);
+    module.declare_function("js_loose_eq", I64, &[I64, I64]);
     module.declare_function("js_number_to_fixed", I64, &[DOUBLE, DOUBLE]);
     module.declare_function("js_string_replace_regex", I64, &[I64, I64, I64]);
     module.declare_function("js_array_at", DOUBLE, &[I64, DOUBLE]);
