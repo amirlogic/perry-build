@@ -1000,10 +1000,21 @@ pub struct OptimizedLibs {
     /// Path to the rebuilt `libperry_stdlib.a`. `None` means "fall back
     /// to the prebuilt full stdlib".
     pub stdlib: Option<PathBuf>,
+    /// LLVM bitcode (`.bc`) for perry-runtime (Phase J).
+    pub runtime_bc: Option<PathBuf>,
+    /// LLVM bitcode (`.bc`) for perry-stdlib (Phase J).
+    pub stdlib_bc: Option<PathBuf>,
 }
 
 impl OptimizedLibs {
-    fn empty() -> Self { OptimizedLibs { runtime: None, stdlib: None } }
+    fn empty() -> Self {
+        OptimizedLibs {
+            runtime: None,
+            stdlib: None,
+            runtime_bc: None,
+            stdlib_bc: None,
+        }
+    }
 }
 
 /// Rebuild perry-runtime + perry-stdlib in a single cargo invocation with
@@ -1183,9 +1194,115 @@ fn build_optimized_libs(
         }
     }
 
+    // Phase J: when PERRY_LLVM_BITCODE_LINK=1, also emit LLVM bitcode
+    // (.bc) for whole-program LTO via `cargo rustc --emit=llvm-bc,link`.
+    let bitcode_requested = std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
+    let (runtime_bc, stdlib_bc) = if bitcode_requested {
+        if matches!(format, OutputFormat::Text) {
+            println!("  auto-optimize: emitting LLVM bitcode for whole-program LTO");
+        }
+
+        let mut bc_rustflags = String::new();
+        if panic_abort_safe {
+            bc_rustflags.push_str("-C panic=abort ");
+        }
+        bc_rustflags.push_str("-C codegen-units=1");
+
+        let emit_bc = |crate_name: &str| -> Option<PathBuf> {
+            let mut cmd = Command::new("cargo");
+            cmd.current_dir(&workspace_root)
+                .env("CARGO_TARGET_DIR", &target_dir)
+                .env("RUSTFLAGS", &bc_rustflags)
+                .arg("rustc")
+                .arg("--release")
+                .arg("-p").arg(crate_name)
+                .arg("--no-default-features");
+            if !cross_features.is_empty() {
+                cmd.arg("--features").arg(cross_features.join(","));
+            }
+            if let Some(triple) = rust_target_triple(target) {
+                cmd.arg("--target").arg(triple);
+            }
+            cmd.arg("--").arg("--emit=llvm-bc,link");
+
+            match cmd.status() {
+                Ok(s) if s.success() => {}
+                Ok(s) => {
+                    if matches!(format, OutputFormat::Text) {
+                        eprintln!(
+                            "  auto-optimize: cargo rustc --emit=llvm-bc for {} failed (exit {})",
+                            crate_name, s
+                        );
+                    }
+                    return None;
+                }
+                Err(e) => {
+                    if matches!(format, OutputFormat::Text) {
+                        eprintln!(
+                            "  auto-optimize: failed to spawn cargo rustc for {} ({})",
+                            crate_name, e
+                        );
+                    }
+                    return None;
+                }
+            }
+
+            // Glob for the .bc file in deps/
+            let deps_dir = release_dir.join("deps");
+            let crate_underscore = crate_name.replace('-', "_");
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&deps_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with(&format!("{}-", crate_underscore))
+                        && name_str.ends_with(".bc")
+                        && !name_str.contains(".rcgu")
+                    {
+                        candidates.push(entry.path());
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| {
+                let ma = a.metadata().and_then(|m| m.modified()).ok();
+                let mb = b.metadata().and_then(|m| m.modified()).ok();
+                mb.cmp(&ma)
+            });
+            if let Some(bc_path) = candidates.first() {
+                if matches!(format, OutputFormat::Text) {
+                    if let Ok(meta) = std::fs::metadata(bc_path) {
+                        println!(
+                            "  auto-optimize: bitcode {} ({:.1} MB)",
+                            bc_path.display(),
+                            meta.len() as f64 / (1024.0 * 1024.0)
+                        );
+                    }
+                }
+                Some(bc_path.clone())
+            } else {
+                if matches!(format, OutputFormat::Text) {
+                    eprintln!(
+                        "  auto-optimize: no .bc file found for {} in {}",
+                        crate_name,
+                        deps_dir.display()
+                    );
+                }
+                None
+            }
+        };
+
+        let rt_bc = emit_bc("perry-runtime");
+        let sl_bc = emit_bc("perry-stdlib");
+        (rt_bc, sl_bc)
+    } else {
+        (None, None)
+    };
+
     OptimizedLibs {
         runtime: if runtime_path.exists() { Some(runtime_path) } else { None },
         stdlib: if stdlib_path.exists() { Some(stdlib_path) } else { None },
+        runtime_bc,
+        stdlib_bc,
     }
 }
 
@@ -4015,6 +4132,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     });
 
     let use_llvm_backend = args.backend == "llvm";
+    // Phase J: detect bitcode-link mode. The actual .bc paths aren't known
+    // yet (build_optimized_libs runs after compilation), but we decide the
+    // mode here so the per-module codegen can emit .ll instead of .o.
+    let bitcode_link = use_llvm_backend
+        && std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
     let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
         .map(|(path, hir_module)| {
             // --backend llvm: experimental path. Phase 1 only supports single-
@@ -4091,6 +4213,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     is_entry_module: is_entry,
                     non_entry_module_prefixes,
                     import_function_prefixes,
+                    emit_ir_only: bitcode_link,
                 };
                 let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
                     .map_err(|e| format!(
@@ -4101,7 +4224,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
                     .trim_matches('_')
                     .to_string();
-                let obj_path = PathBuf::from(format!("{}.o", obj_name));
+                // In bitcode mode the bytes are .ll text; use .ll extension.
+                let ext = if bitcode_link { "ll" } else { "o" };
+                let obj_path = PathBuf::from(format!("{}.{}", obj_name, ext));
                 return Ok((obj_path, object_code));
             }
 
@@ -4297,7 +4422,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             Ok((obj_path, object_code)) => {
                 fs::write(&obj_path, &object_code)?;
                 match format {
-                    OutputFormat::Text => println!("Wrote object file: {}", obj_path.display()),
+                    OutputFormat::Text => {
+                        let label = if obj_path.extension().and_then(|e| e.to_str()) == Some("ll") {
+                            "Wrote LLVM IR"
+                        } else {
+                            "Wrote object file"
+                        };
+                        println!("{}: {}", label, obj_path.display());
+                    }
                     OutputFormat::Json => {}
                 }
                 obj_paths.push(obj_path);
@@ -4455,6 +4587,91 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             obj_paths.push(stub_path);
         }
     }
+
+    // Phase J: bitcode link — merge user .ll + runtime/stdlib .bc into one
+    // optimized object via llvm-link → opt → llc. This replaces both the
+    // per-module clang -c step AND the archive linking.
+    let bitcode_linked = if bitcode_link && optimized_libs.runtime_bc.is_some() {
+        if matches!(format, OutputFormat::Text) {
+            println!("Using LLVM bitcode link (whole-program LTO)");
+        }
+        // Separate .ll files (user modules) from .o files (stubs)
+        let ll_files: Vec<PathBuf> = obj_paths.iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("ll"))
+            .cloned()
+            .collect();
+        let stub_objs: Vec<PathBuf> = obj_paths.iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) != Some("ll"))
+            .cloned()
+            .collect();
+
+        if ll_files.is_empty() {
+            eprintln!("  bitcode-link: no .ll files produced, falling back to normal link");
+            false
+        } else {
+            let runtime_bc = optimized_libs.runtime_bc.as_ref().unwrap();
+            let stdlib_bc = optimized_libs.stdlib_bc.as_deref();
+
+            match perry_codegen_llvm::linker::bitcode_link_pipeline(
+                &ll_files,
+                runtime_bc,
+                stdlib_bc,
+                target.as_deref(),
+            ) {
+                Ok(linked_obj) => {
+                    match format {
+                        OutputFormat::Text => {
+                            if let Ok(meta) = std::fs::metadata(&linked_obj) {
+                                println!(
+                                    "  bitcode-link: merged {} modules → {} ({:.1} MB)",
+                                    ll_files.len(),
+                                    linked_obj.display(),
+                                    meta.len() as f64 / (1024.0 * 1024.0)
+                                );
+                            }
+                        }
+                        OutputFormat::Json => {}
+                    }
+                    // Clean up intermediate .ll files
+                    for ll in &ll_files {
+                        let _ = fs::remove_file(ll);
+                    }
+                    // Replace obj_paths with the merged .o + any stubs
+                    obj_paths = vec![linked_obj];
+                    obj_paths.extend(stub_objs);
+                    true
+                }
+                Err(e) => {
+                    eprintln!("  bitcode-link: pipeline failed ({}), falling back to normal link", e);
+                    false
+                }
+            }
+        }
+    } else if bitcode_link {
+        // bitcode_link was requested but runtime .bc wasn't produced.
+        // Fall back: compile any .ll files to .o via clang -c.
+        eprintln!("  bitcode-link: runtime .bc not available, falling back to normal link");
+        let mut new_obj_paths: Vec<PathBuf> = Vec::new();
+        for p in &obj_paths {
+            if p.extension().and_then(|e| e.to_str()) == Some("ll") {
+                let ll_text = fs::read_to_string(p)?;
+                let obj_bytes = perry_codegen_llvm::linker::compile_ll_to_object(
+                    &ll_text,
+                    target.as_deref(),
+                )?;
+                let obj_path = p.with_extension("o");
+                fs::write(&obj_path, &obj_bytes)?;
+                let _ = fs::remove_file(p);
+                new_obj_paths.push(obj_path);
+            } else {
+                new_obj_paths.push(p.clone());
+            }
+        }
+        obj_paths = new_obj_paths;
+        false
+    } else {
+        false
+    };
 
     // Generate JS bundle if needed
     let _js_bundle_path = if ctx.needs_js_runtime && !ctx.js_modules.is_empty() {
@@ -4943,6 +5160,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // perry-runtime may not include all symbols (e.g., perry_init_guard_check_and_set).
     // watchOS: swiftc treats duplicate symbols as errors (not warnings like clang),
     // so skip the standalone runtime when the UI lib already bundles it.
+    // Note: even when bitcode_linked is true, we still link the .a archives.
+    // The merged .o contains the crate code but NOT the Rust standard library
+    // symbols (alloc, std::thread_local, etc.). The .a archive provides those
+    // as a fallback — the linker only pulls object files from the .a that
+    // resolve still-undefined symbols (first-definition-wins on macOS).
     let skip_runtime = (is_android || is_watchos) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {

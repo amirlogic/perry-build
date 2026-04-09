@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.89
+**Current Version:** 0.4.90
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.90 (llvm-backend)
+- feat: Phase J — bitcode link mode for whole-program LTO. `PERRY_LLVM_BITCODE_LINK=1` compiles runtime+stdlib to LLVM bitcode (`.bc`) via `cargo rustc --emit=llvm-bc`, emits user modules as `.ll`, then merges everything via `llvm-link → opt -O3 → llc`. Fibonacci benchmark: **31% faster** (72ms→50ms/iter). Falls back to normal link if LLVM tools or `.bc` files unavailable. New files: `bitcode_link_pipeline` in `linker.rs`, `emit_ir_only` flag in `CompileOptions`, `runtime_bc`/`stdlib_bc` in `OptimizedLibs`.
 
 ### v0.4.89 (llvm-backend)
 - feat: LLVM backend Phase E.36–E.38 — boxed mutable captures for shared-state closures (`makeCounter` pattern), module-wide LocalId→Type map so closures see captured-var types (`items.length` inside a closure now finds the array fast path), generic class method dispatch via Generic base stripping, indexed string access (`arr[i].length`), string-vs-unknown `===` fallback via `js_string_equals` on both sides (catches `c === Color.Red` when Color is a `const` object). Array-mutating method calls (`push`/`pop`/`shift`/`unshift`/`splice`/`sort`/`reverse`/`fill`/`copyWithin`) inside closures count as writes on the receiver and trigger boxing. `ArrayPush` write-back goes through `js_box_set` when the array local is boxed. MATCH count 67 → 69 / 142 (test_edge_class_advanced, test_edge_enums_const, test_edge_higher_order, test_process_env, test_closure_capture_types all flipped). Commits 1d65e56, 2964723, eaf7129.

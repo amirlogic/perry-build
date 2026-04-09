@@ -70,6 +70,10 @@ pub struct CompileOptions {
     /// `perry_fn_<source_prefix>__<funcname>`. Built by the CLI driver
     /// from each module's `hir.imports` table.
     pub import_function_prefixes: std::collections::HashMap<String, String>,
+    /// When true, `compile_module` returns the textual LLVM IR (`.ll`)
+    /// as bytes instead of invoking `clang -c` to produce an object file.
+    /// Used by the bitcode-link path (`PERRY_LLVM_BITCODE_LINK=1`).
+    pub emit_ir_only: bool,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -547,7 +551,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         hir.name,
         strings.len()
     );
-    crate::linker::compile_ll_to_object(&ll_text, opts.target.as_deref())
+    if opts.emit_ir_only {
+        Ok(ll_text.into_bytes())
+    } else {
+        crate::linker::compile_ll_to_object(&ll_text, opts.target.as_deref())
+    }
 }
 
 /// Compile a single user function into the module.
