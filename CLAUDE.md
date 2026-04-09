@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.90
+**Current Version:** 0.4.91
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.91 (llvm-backend)
+- fix: labeled `break outer;` / `continue outer;` now target the correct enclosing loop instead of always the innermost. Added `label_targets` + `pending_label` to FnCtx; `Stmt::Labeled` sets pending label, loop lowering (`for`/`while`/`do-while`) consumes it and registers in the map, `LabeledBreak`/`LabeledContinue` look up by name.
+- fix: `new Child()` where `Child extends Parent` with no own constructor now inlines the parent's constructor body. Was silently skipping `this.items = []` etc., causing stale/missing field data on inherited classes.
 
 ### v0.4.90 (llvm-backend)
 - feat: Phase J — bitcode link mode for whole-program LTO. `PERRY_LLVM_BITCODE_LINK=1` compiles runtime+stdlib to LLVM bitcode (`.bc`) via `cargo rustc --emit=llvm-bc`, emits user modules as `.ll`, then merges everything via `llvm-link → opt -O3 → llc`. Fibonacci benchmark: **31% faster** (72ms→50ms/iter). Falls back to normal link if LLVM tools or `.bc` files unavailable. New files: `bitcode_link_pipeline` in `linker.rs`, `emit_ir_only` flag in `CompileOptions`, `runtime_bc`/`stdlib_bc` in `OptimizedLibs`.

@@ -794,6 +794,57 @@ pub(crate) fn lower_new(
         // Restore the enclosing function's local scope.
         ctx.locals = saved_locals;
         ctx.local_types = saved_local_types;
+    } else {
+        // No own constructor — walk the parent chain to find an
+        // inherited constructor and inline it. TypeScript semantics:
+        // `class Child extends Parent {}` auto-forwards constructor
+        // arguments to the parent constructor.
+        let mut parent_name = class.extends_name.as_deref();
+        while let Some(pname) = parent_name {
+            if let Some(parent_class) = ctx.classes.get(pname).copied() {
+                if let Some(parent_ctor) = &parent_class.constructor {
+                    let saved_locals = ctx.locals.clone();
+                    let saved_local_types = ctx.local_types.clone();
+
+                    // Map constructor params from the parent's ctor to
+                    // the supplied args. If caller passed fewer args
+                    // than the parent expects, extra params get
+                    // undefined.
+                    for (i, param) in parent_ctor.params.iter().enumerate() {
+                        let slot = ctx.block().alloca(DOUBLE);
+                        if i < lowered_args.len() {
+                            ctx.block().store(DOUBLE, &lowered_args[i], &slot);
+                        } else {
+                            let undef = crate::nanbox::double_literal(
+                                f64::from_bits(crate::nanbox::TAG_UNDEFINED),
+                            );
+                            ctx.block().store(DOUBLE, &undef, &slot);
+                        }
+                        ctx.locals.insert(param.id, slot);
+                        ctx.local_types.insert(param.id, param.ty.clone());
+                    }
+
+                    // Push the parent class name so `this` inside the
+                    // parent ctor body resolves field names via the
+                    // parent's field list.
+                    ctx.class_stack.pop();
+                    ctx.class_stack.push(pname.to_string());
+
+                    crate::stmt::lower_stmts(ctx, &parent_ctor.body)?;
+
+                    // Restore class_stack to the child.
+                    ctx.class_stack.pop();
+                    ctx.class_stack.push(class_name.to_string());
+
+                    ctx.locals = saved_locals;
+                    ctx.local_types = saved_local_types;
+                    break; // Found and inlined the parent ctor.
+                }
+                parent_name = parent_class.extends_name.as_deref();
+            } else {
+                break;
+            }
+        }
     }
 
     ctx.this_stack.pop();

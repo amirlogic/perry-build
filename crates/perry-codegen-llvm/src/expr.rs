@@ -87,6 +87,15 @@ pub(crate) struct FnCtx<'a> {
     /// the next iteration); break → exit block.
     /// For `while`/`do-while`: continue → cond block; break → exit block.
     pub loop_targets: Vec<(String, String)>,
+    /// Map from label name → (continue_label, break_label). Populated by
+    /// `Stmt::Labeled { label, body }` when the body is a loop. Looked up
+    /// by `Stmt::LabeledBreak(label)` / `Stmt::LabeledContinue(label)`.
+    pub label_targets: std::collections::HashMap<String, (String, String)>,
+    /// Pending label set by `Stmt::Labeled` just before lowering the body.
+    /// The next loop that runs (`for`/`while`/`do-while`) consumes it and
+    /// registers itself in `label_targets` so `break label;` /
+    /// `continue label;` can jump to the right blocks.
+    pub pending_label: Option<String>,
     /// Map from class name → HIR Class definition. Built once in
     /// `compile_module` from `hir.classes`. Used by `Expr::New` to look up
     /// the field count, constructor body, and (eventually) method table.

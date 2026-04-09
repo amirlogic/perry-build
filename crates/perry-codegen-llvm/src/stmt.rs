@@ -219,19 +219,46 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         // preceding case is valid JS.
         Stmt::Switch { discriminant, cases } => lower_switch(ctx, discriminant, cases),
 
-        // Labeled statement: just lower the body. Real labeled
-        // break/continue support requires per-label loop_targets
-        // entries; for now we share the implicit innermost target,
-        // which works for the common case where label is unused.
-        Stmt::Labeled { body, .. } => lower_stmt(ctx, body),
-        Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {
-            // Same as plain break/continue against the innermost loop.
-            let target = ctx
-                .loop_targets
-                .last()
-                .cloned()
-                .ok_or_else(|| anyhow!("labeled break/continue outside any loop"))?;
-            ctx.block().br(&target.1);
+        // Labeled statement: set the pending label so the next loop
+        // lowered (for/while/do-while) can register itself in
+        // `label_targets` under this name.
+        Stmt::Labeled { label, body } => {
+            ctx.pending_label = Some(label.clone());
+            lower_stmt(ctx, body)?;
+            // If the body wasn't a loop that consumed the pending label,
+            // clear it to avoid leaking into subsequent statements.
+            ctx.pending_label = None;
+            // Clean up the label target now that we've exited the labeled
+            // statement's scope.
+            ctx.label_targets.remove(label);
+            Ok(())
+        }
+        Stmt::LabeledBreak(label) => {
+            if let Some((_cont, brk)) = ctx.label_targets.get(label).cloned() {
+                ctx.block().br(&brk);
+            } else {
+                // Fallback: use innermost loop (for unresolved labels).
+                let target = ctx
+                    .loop_targets
+                    .last()
+                    .map(|(_c, b)| b.clone())
+                    .ok_or_else(|| anyhow!("labeled break '{}' outside any loop", label))?;
+                ctx.block().br(&target);
+            }
+            Ok(())
+        }
+        Stmt::LabeledContinue(label) => {
+            if let Some((cont, _brk)) = ctx.label_targets.get(label).cloned() {
+                ctx.block().br(&cont);
+            } else {
+                // Fallback: use innermost loop.
+                let target = ctx
+                    .loop_targets
+                    .last()
+                    .map(|(c, _b)| c.clone())
+                    .ok_or_else(|| anyhow!("labeled continue '{}' outside any loop", label))?;
+                ctx.block().br(&target);
+            }
             Ok(())
         }
 
@@ -421,6 +448,13 @@ fn lower_for(
     // to jump. For for-loops, continue runs the update step.
     ctx.loop_targets.push((update_label.clone(), exit_label.clone()));
 
+    // If this for-loop has a pending label (from an enclosing Stmt::Labeled),
+    // register it so `break label;` / `continue label;` resolve here.
+    let consumed_label = ctx.pending_label.take();
+    if let Some(ref lbl) = consumed_label {
+        ctx.label_targets.insert(lbl.clone(), (update_label.clone(), exit_label.clone()));
+    }
+
     // Body block.
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
@@ -480,6 +514,12 @@ fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) 
     // For while-loops, continue jumps back to the cond block.
     ctx.loop_targets.push((cond_label.clone(), exit_label.clone()));
 
+    // Consume pending label (from enclosing Stmt::Labeled).
+    let consumed_label = ctx.pending_label.take();
+    if let Some(ref lbl) = consumed_label {
+        ctx.label_targets.insert(lbl.clone(), (cond_label.clone(), exit_label.clone()));
+    }
+
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
     if !ctx.block().is_terminated() {
@@ -512,6 +552,12 @@ fn lower_do_while(
     // Push break/continue targets BEFORE compiling the body so nested
     // break/continue see them.
     ctx.loop_targets.push((cond_label.clone(), exit_label.clone()));
+
+    // Consume pending label (from enclosing Stmt::Labeled).
+    let consumed_label = ctx.pending_label.take();
+    if let Some(ref lbl) = consumed_label {
+        ctx.label_targets.insert(lbl.clone(), (cond_label.clone(), exit_label.clone()));
+    }
 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
