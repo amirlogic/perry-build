@@ -99,6 +99,10 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
 pub extern "C" fn js_console_log_number(value: f64) {
     if is_negative_zero(value) {
         println!("-0");
+    } else if value.is_nan() {
+        println!("NaN");
+    } else if value.is_infinite() {
+        if value > 0.0 { println!("Infinity"); } else { println!("-Infinity"); }
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         println!("{}", value as i64);
     } else {
