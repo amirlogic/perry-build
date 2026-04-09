@@ -17,7 +17,7 @@ Perry can cross-compile TypeScript apps for iOS devices and the iOS Simulator.
 perry app.ts -o app --target ios-simulator
 ```
 
-This uses Cranelift cross-compilation with the iOS Simulator SDK. The binary can be run in the Xcode Simulator.
+This uses LLVM cross-compilation with the iOS Simulator SDK. The binary can be run in the Xcode Simulator.
 
 ## Building for Device
 

@@ -146,7 +146,7 @@ if (isMobile) {
 }
 ```
 
-These are constant-folded by Cranelift at compile time — dead branches are eliminated with zero runtime cost.
+These are constant-folded by LLVM at compile time — dead branches are eliminated with zero runtime cost.
 
 ## Next Steps
 

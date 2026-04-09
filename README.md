@@ -11,7 +11,7 @@ perry compile src/main.ts -o myapp
 ./myapp    # that's it — a standalone native binary
 ```
 
-Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [Cranelift](https://cranelift.dev/) for native code generation. The output is a single binary with no runtime dependencies.
+Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [LLVM](https://llvm.org/) for native code generation. The output is a single binary with no runtime dependencies.
 
 ---
 
@@ -76,12 +76,12 @@ Method dispatch uses direct function calls (no vtable). String concatenation use
 
 | Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | Why they're faster |
 |-----------|-------|---------|-----|---------|--------|-------------------|
-| mandelbrot | 71ms | 25ms | 31ms | 0.3x | 0.4x | V8 TurboFan schedules f64 ops across 2 FPUs more aggressively than Cranelift |
+| mandelbrot | 71ms | 25ms | 31ms | 0.3x | 0.4x | V8 TurboFan schedules f64 ops across 2 FPUs more aggressively |
 | matrix_multiply | 61ms | 36ms | 36ms | 0.6x | 0.6x | V8 auto-vectorizes nested loops with SIMD (NEON on ARM) |
 | math_intensive | 370ms | 52ms | 53ms | 0.1x | 0.1x | Harmonic series: V8 vectorizes `result += 1.0/i` across SIMD lanes |
 | nested_loops | 32ms | 18ms | 20ms | 0.6x | 0.6x | V8's loop optimization + SIMD for array access in nested loops |
 
-V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's Cranelift backend generates correct scalar code but doesn't yet vectorize. This is the main performance frontier for Perry's codegen.
+V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's LLVM backend benefits from LLVM's mature optimization pipeline, but these benchmarks were taken before the LLVM migration and will be updated.
 
 Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, bun, cargo)
 
@@ -625,7 +625,7 @@ perry/
 │   ├── perry-types/            # Type system
 │   ├── perry-hir/              # HIR data structures and AST→HIR lowering
 │   ├── perry-transform/        # IR passes (closure conversion, async, inlining)
-│   ├── perry-codegen/          # Cranelift native codegen
+│   ├── perry-codegen-llvm/     # LLVM native codegen
 │   ├── perry-codegen-js/       # JavaScript codegen (--target web)
 │   ├── perry-codegen-wasm/     # WebAssembly codegen (--target wasm)
 │   ├── perry-codegen-swiftui/  # SwiftUI codegen (iOS/watchOS widgets)
@@ -669,7 +669,7 @@ cargo run --release -- compile file.ts --print-hir       # Debug HIR
 
 1. **HIR** — add node type to `crates/perry-hir/src/ir.rs`
 2. **Lowering** — handle AST→HIR in `crates/perry-hir/src/lower.rs`
-3. **Codegen** — generate Cranelift IR in `crates/perry-codegen/src/codegen.rs`
+3. **Codegen** — generate LLVM IR in `crates/perry-codegen-llvm/src/codegen.rs`
 4. **Runtime** — add runtime functions in `crates/perry-runtime/` if needed
 5. **Test** — add `test-files/test_feature.ts`
 

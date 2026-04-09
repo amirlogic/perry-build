@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
+Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
 **Current Version:** 0.4.89
 
@@ -66,7 +66,7 @@ cargo run --release -- file.ts --print-hir              # Debug: print HIR
 ## Architecture
 
 ```
-TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Codegen (Cranelift) → .o → Link (cc) → Executable
+TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Codegen (LLVM) → .o → Link (cc) → Executable
 ```
 
 | Crate | Purpose |
@@ -76,7 +76,7 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 | **perry-types** | Type system definitions |
 | **perry-hir** | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
 | **perry-transform** | IR passes (closure conversion, async lowering, inlining) |
-| **perry-codegen** | Cranelift-based native code generation |
+| **perry-codegen-llvm** | LLVM-based native code generation |
 | **perry-runtime** | Runtime: value.rs, object.rs, array.rs, string.rs, gc.rs, arena.rs, thread.rs |
 | **perry-stdlib** | Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
 | **perry-ui** / **perry-ui-macos** / **perry-ui-ios** / **perry-ui-tvos** | Native UI (AppKit/UIKit) |
@@ -145,10 +145,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - **Wrong tag**: Strings=STRING_TAG, objects=POINTER_TAG, BigInt=BIGINT_TAG.
 - **`as f64` vs `from_bits`**: `u64 as f64` is numeric conversion (WRONG). Use `f64::from_bits(u64)` to preserve bits.
 
-### Cranelift Type Mismatches
-- Loop counter optimization produces I32 — always convert before passing to F64/I64 functions
-- Check `builder.func.dfg.value_type(val)` before conversion; handle F64↔I64, I32→F64, I32→I64
-- Constructor parameters always F64 (NaN-boxed) at signature level
+### LLVM Type Mismatches
+- Loop counter optimization produces i32 — always convert before passing to f64/i64 functions
+- Check LLVM value types before conversion; handle f64↔i64, i32→f64, i32→i64
+- Constructor parameters always f64 (NaN-boxed) at signature level
 
 ### Async / Threading
 - Thread-local arenas: JSValues from tokio workers invalid on main thread
