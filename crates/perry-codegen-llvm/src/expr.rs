@@ -2545,9 +2545,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- new Date() --------
-        Expr::DateNew(_arg) => {
-            // Ignore the optional timestamp arg for now.
-            Ok(ctx.block().call(DOUBLE, "js_date_new", &[]))
+        Expr::DateNew(arg) => {
+            if let Some(ts_expr) = arg {
+                let ts = lower_expr(ctx, ts_expr)?;
+                Ok(ctx.block().call(DOUBLE, "js_date_new_from_value", &[(DOUBLE, &ts)]))
+            } else {
+                Ok(ctx.block().call(DOUBLE, "js_date_new", &[]))
+            }
         }
 
         // -------- arr.find(cb) / findIndex(cb) / findLast(cb) / findLastIndex(cb) --------
