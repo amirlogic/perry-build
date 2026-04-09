@@ -20,6 +20,8 @@ pub mod runtime_decls;
 pub mod linker;
 pub(crate) mod expr;
 pub(crate) mod stmt;
+pub(crate) mod collectors;
+pub(crate) mod boxed_vars;
 pub mod codegen;
 
 pub use codegen::{compile_module, CompileOptions};

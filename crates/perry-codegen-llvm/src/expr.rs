@@ -303,9 +303,9 @@ pub(crate) fn compute_auto_captures(
 ) -> Vec<u32> {
     let mut out: Vec<u32> = explicit.to_vec();
     let mut referenced: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    crate::codegen::collect_ref_ids_in_stmts_pub(body, &mut referenced);
+    crate::collectors::collect_ref_ids_in_stmts(body, &mut referenced);
     let mut inner_lets: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    crate::codegen::collect_let_ids_pub(body, &mut inner_lets);
+    crate::collectors::collect_let_ids(body, &mut inner_lets);
     let param_ids: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
     let already: std::collections::HashSet<u32> = out.iter().copied().collect();
     // Sort for determinism (HashSet iteration order is unspecified).
