@@ -382,7 +382,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
                     );
                 }
-            } else if ctx.boxed_vars.contains(id) {
+            } else if ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id) {
+                // Box path — only for non-global locals. Module globals
+                // have their own shared storage and don't need boxing.
+                // Without the !module_globals guard, closures that
+                // modify a module-level variable would silently skip
+                // the store (ctx.locals doesn't have the global's slot).
                 if let Some(slot) = ctx.locals.get(id).cloned() {
                     let blk = ctx.block();
                     let box_dbl = blk.load(DOUBLE, &slot);
@@ -445,8 +450,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 return Ok(if *prefix { new } else { old });
             }
             // Boxed enclosing-scope var: load slot (box ptr), deref,
-            // increment, box_set.
-            if ctx.boxed_vars.contains(id) {
+            // increment, box_set. Skip for module globals (they
+            // have their own shared storage).
+            if ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id) {
                 if let Some(slot) = ctx.locals.get(id).cloned() {
                     let blk = ctx.block();
                     let box_dbl = blk.load(DOUBLE, &slot);
