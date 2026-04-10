@@ -3003,7 +3003,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let arr_ptr = blk.call(I64, "js_iterator_to_array", &[(DOUBLE, &iter_box)]);
             Ok(nanbox_pointer_inline(blk, &arr_ptr))
         }
-        Expr::WeakRefDeref(o) => lower_expr(ctx, o),
+        Expr::WeakRefDeref(o) => {
+            // `ref.deref()` — returns the wrapped target (or undefined if
+            // collected; GC never clears the stub slot, so always returns
+            // the target). Runtime reads the `target` field from the WeakRef
+            // wrapper object and returns its stored NaN-boxed value, so
+            // downstream paths (`.length`, method dispatch) see the real
+            // tagged pointer again.
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_weakref_deref", &[(DOUBLE, &v)]))
+        }
         Expr::Uint8ArrayNew(_) => Ok(double_literal(0.0)),
         Expr::Uint8ArrayLength(_) => Ok(double_literal(0.0)),
         Expr::Uint8ArrayGet { .. } => Ok(double_literal(0.0)),
@@ -3437,7 +3446,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, d)?;
             Ok(ctx.block().call(DOUBLE, "js_date_get_utc_milliseconds", &[(DOUBLE, &v)]))
         }
-        Expr::Btoa(o) | Expr::Atob(o) => lower_expr(ctx, o),
+        Expr::Atob(inner) => {
+            // atob(base64) — decode to a binary string. Runtime takes a
+            // NaN-boxed string (f64) and returns a raw *const StringHeader
+            // (i64), which we re-NaN-box with STRING_TAG.
+            let v = lower_expr(ctx, inner)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_atob", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::Btoa(inner) => {
+            // btoa(string) — base64-encode a binary string. Same ABI as atob.
+            let v = lower_expr(ctx, inner)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_btoa", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
         Expr::ArrayFlat { array } => {
             let arr_box = lower_expr(ctx, array)?;
             let blk = ctx.block();
@@ -3869,9 +3893,43 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Return an empty-string-equivalent sentinel.
             Ok(double_literal(0.0))
         }
-        Expr::FinalizationRegistryNew(_) => Ok(double_literal(0.0)),
-        Expr::FinalizationRegistryRegister { .. } => Ok(double_literal(0.0)),
-        Expr::FinalizationRegistryUnregister { .. } => Ok(double_literal(0.0)),
+        Expr::FinalizationRegistryNew(callback) => {
+            // `new FinalizationRegistry(cb)` — allocates a wrapper object
+            // that stores the cleanup callback and an `entries` list for
+            // later register/unregister lookups. Runtime returns a raw
+            // *mut ObjectHeader (i64); NaN-box with POINTER_TAG so the
+            // value can flow through subsequent dispatch sites.
+            let cb = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let obj = blk.call(I64, "js_finreg_new", &[(DOUBLE, &cb)]);
+            Ok(nanbox_pointer_inline(blk, &obj))
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            // `reg.register(target, held, token?)` — always returns undefined.
+            let reg = lower_expr(ctx, registry)?;
+            let tgt = lower_expr(ctx, target)?;
+            let h = lower_expr(ctx, held)?;
+            let tok = if let Some(token_expr) = token {
+                lower_expr(ctx, token_expr)?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_finreg_register",
+                &[(DOUBLE, &reg), (DOUBLE, &tgt), (DOUBLE, &h), (DOUBLE, &tok)],
+            ))
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            // `reg.unregister(token)` — returns NaN-boxed boolean.
+            let reg = lower_expr(ctx, registry)?;
+            let tok = lower_expr(ctx, token)?;
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_finreg_unregister",
+                &[(DOUBLE, &reg), (DOUBLE, &tok)],
+            ))
+        }
         Expr::ErrorNewWithCause { message, cause } => {
             // new Error(msg, { cause }). Runtime stores the cause
             // on the ErrorHeader so `e.cause` returns it.
@@ -3932,8 +3990,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_structured_clone", &[(DOUBLE, &v)]))
         }
 
-        // -------- WeakRefNew stub (returns the source as the ref) --------
-        Expr::WeakRefNew(operand) => lower_expr(ctx, operand),
+        // -------- `new WeakRef(target)` — allocate a wrapper object --------
+        Expr::WeakRefNew(operand) => {
+            // Runtime strongly holds the target in a `target` field, so
+            // `deref()` always returns it. Pass the NaN-boxed target through;
+            // the runtime reads the bits directly. Result is a raw
+            // *mut ObjectHeader (i64) — re-NaN-box with POINTER_TAG.
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let obj = blk.call(I64, "js_weakref_new", &[(DOUBLE, &v)]);
+            Ok(nanbox_pointer_inline(blk, &obj))
+        }
 
         // -------- fs.unlinkSync(path) --------
         Expr::FsUnlinkSync(path) => {

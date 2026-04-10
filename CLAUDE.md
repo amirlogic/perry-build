@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.115
+**Current Version:** 0.4.116
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.116 (llvm-backend)
+- feat: LLVM backend wires `WeakRef`/`FinalizationRegistry`/`atob`/`btoa` to the real runtime (`js_weakref_new`/`_deref`, `js_finreg_new`/`_register`/`_unregister`, `js_atob`/`_btoa`). Previously all 6 variants were passthrough/0.0 stubs. `collectors.rs::collect_closures_in_expr` now descends into `FinalizationRegistryNew(cb)` so inline cleanup callbacks get their LLVM function emitted (was failing with "use of undefined value @perry_closure_*"). `test_gap_global_apis` diff drops 58 → 50 lines (atob/btoa/unregistered now match Node); `test_gap_weakref_finalization` module-level WeakRef/FinRegistry now produce correct `hello`/`object`/`registered`/`unregistered` output.
 
 ### v0.4.115 (llvm-backend)
 - feat: ES2023 immutable array methods (parallel Agent ARRAY) — `Expr::ArrayToReversed`/`ArrayToSorted`/`ArrayToSpliced`/`ArrayWith`/`ArrayCopyWithin` now call the existing runtime functions (`js_array_to_reversed`/`js_array_to_sorted_default`/`js_array_to_sorted_with_comparator`/`js_array_to_spliced`/`js_array_with`/`js_array_copy_within`) instead of returning the receiver unchanged. `toSpliced` builds a stack `[N x double]` buffer for insert items. Runtime declarations added in `runtime_decls.rs`. `test_gap_array_methods` diff drops 64 → 37 lines.

@@ -392,6 +392,19 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_replace_regex_fn", I64, &[I64, I64, DOUBLE]);
     // structuredClone(v) — real deep copy, was stubbed as passthrough.
     module.declare_function("js_structured_clone", DOUBLE, &[DOUBLE]);
+    // WeakRef / FinalizationRegistry (weakref.rs). `js_weakref_new` /
+    // `js_finreg_new` return raw `*mut ObjectHeader` (i64 pointer, must be
+    // POINTER_TAG-boxed at the call site). The deref/register/unregister
+    // helpers already return NaN-tagged f64 values.
+    module.declare_function("js_weakref_new", I64, &[DOUBLE]);
+    module.declare_function("js_weakref_deref", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_finreg_new", I64, &[DOUBLE]);
+    module.declare_function("js_finreg_register", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_finreg_unregister", DOUBLE, &[DOUBLE, DOUBLE]);
+    // atob/btoa: base64 decode/encode. Take a NaN-boxed string (f64),
+    // return a raw *const StringHeader (i64, must be STRING_TAG-boxed).
+    module.declare_function("js_atob", I64, &[DOUBLE]);
+    module.declare_function("js_btoa", I64, &[DOUBLE]);
     module.declare_function("js_object_is_frozen", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_sealed", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_extensible", DOUBLE, &[DOUBLE]);

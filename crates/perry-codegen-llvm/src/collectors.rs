@@ -417,6 +417,29 @@ fn collect_closures_in_expr(
             walk(object, seen, out);
         }
         Expr::InstanceOf { expr, .. } => walk(expr, seen, out),
+        // WeakRef / FinalizationRegistry: the target / callback operands can
+        // be inline closures (e.g. `new FinalizationRegistry(held => ...)`),
+        // so we must descend into them or the closure body never gets its
+        // LLVM function emitted and codegen drops an `@perry_closure_*`
+        // reference into IR with no matching definition.
+        Expr::WeakRefNew(o) | Expr::WeakRefDeref(o) | Expr::FinalizationRegistryNew(o) => {
+            walk(o, seen, out);
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            walk(registry, seen, out);
+            walk(target, seen, out);
+            walk(held, seen, out);
+            if let Some(t) = token {
+                walk(t, seen, out);
+            }
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            walk(registry, seen, out);
+            walk(token, seen, out);
+        }
+        // atob/btoa: the argument is just a string expression, but it could
+        // still contain a nested closure (e.g. inside a ternary), so walk it.
+        Expr::Atob(o) | Expr::Btoa(o) | Expr::StructuredClone(o) => walk(o, seen, out),
         _ => {}
     }
 }
