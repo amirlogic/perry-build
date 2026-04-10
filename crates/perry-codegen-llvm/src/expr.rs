@@ -4134,7 +4134,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &h))
         }
         Expr::BufferFrom { data, .. } => lower_expr(ctx, data),
-        Expr::BufferAlloc { .. } => Ok(double_literal(0.0)),
+        Expr::BufferAlloc { size, fill } => {
+            // Phase H: call js_buffer_alloc(size, fill) which returns
+            // a raw *mut BufferHeader i64. NaN-box with POINTER_TAG
+            // so downstream BUFFER_REGISTRY checks + `.length` paths
+            // can use it. Missing fill defaults to 0.
+            let size_box = lower_expr(ctx, size)?;
+            let fill_i32 = if let Some(fill_expr) = fill {
+                let fill_box = lower_expr(ctx, fill_expr)?;
+                ctx.block().fptosi(DOUBLE, &fill_box, I32)
+            } else {
+                "0".to_string()
+            };
+            let blk = ctx.block();
+            let size_i32 = blk.fptosi(DOUBLE, &size_box, I32);
+            let buf_handle = blk.call(
+                I64,
+                "js_buffer_alloc",
+                &[(I32, &size_i32), (I32, &fill_i32)],
+            );
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
+        }
 
         // -------- process.pid / process.ppid — raw f64 number --------
         Expr::ProcessPid => Ok(ctx.block().call(DOUBLE, "js_process_pid", &[])),

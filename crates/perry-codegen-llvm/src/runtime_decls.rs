@@ -484,6 +484,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_crypto_random_bytes_buffer", I64, &[DOUBLE]);
     module.declare_function("js_crypto_random_uuid", I64, &[]);
     module.declare_function("js_string_from_bytes", I64, &[I64, I32]);
+    // Buffer.alloc(size, fill) — returns raw *mut BufferHeader.
+    module.declare_function("js_buffer_alloc", I64, &[I32, I32]);
     // JSON full-featured stringify/parse (replacer + indent + reviver).
     module.declare_function("js_json_stringify_full", I64, &[DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_json_parse_with_reviver", I64, &[I64, I64]);
