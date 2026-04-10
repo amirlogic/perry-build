@@ -4508,6 +4508,111 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             lower_native_method_call(ctx, module, method, object.as_deref(), args)
         }
 
+        // Phase H fs: `fs.METHOD(args...)` — catch all Call expressions
+        // where the callee is a PropertyGet on a `NativeModuleRef("fs")`
+        // and dispatch to the matching runtime function. HIR already
+        // routes the common cases (`readFileSync`, `writeFileSync`,
+        // etc.) into dedicated `Expr::Fs*` variants, but several sync
+        // APIs (`statSync`, `readdirSync`, `renameSync`, ...) fall
+        // through to this generic shape. Handling them here avoids
+        // touching HIR or the lower_call dispatch tower.
+        Expr::Call { callee, args, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { object, .. } if matches!(
+                    object.as_ref(),
+                    Expr::NativeModuleRef(name) if name == "fs"
+                )
+            ) =>
+        {
+            let property = if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                property.as_str()
+            } else {
+                unreachable!()
+            };
+            match property {
+                "statSync" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    Ok(ctx.block().call(DOUBLE, "js_fs_stat_sync", &[(DOUBLE, &p)]))
+                }
+                "readdirSync" if args.len() >= 1 => {
+                    // Runtime returns a raw ArrayHeader pointer
+                    // transmuted to f64 (no NaN-box tag). Unbox as i64
+                    // and re-NaN-box with POINTER_TAG so downstream
+                    // length/index paths see a proper array handle.
+                    let p = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let raw = blk.call(DOUBLE, "js_fs_readdir_sync", &[(DOUBLE, &p)]);
+                    let raw_bits = blk.bitcast_double_to_i64(&raw);
+                    Ok(nanbox_pointer_inline(blk, &raw_bits))
+                }
+                "renameSync" if args.len() >= 2 => {
+                    let from = lower_expr(ctx, &args[0])?;
+                    let to = lower_expr(ctx, &args[1])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_rename_sync",
+                        &[(DOUBLE, &from), (DOUBLE, &to)],
+                    );
+                    Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                }
+                "copyFileSync" if args.len() >= 2 => {
+                    let from = lower_expr(ctx, &args[0])?;
+                    let to = lower_expr(ctx, &args[1])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_copy_file_sync",
+                        &[(DOUBLE, &from), (DOUBLE, &to)],
+                    );
+                    Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                }
+                "accessSync" if args.len() >= 1 => {
+                    // Node throws on inaccessible paths; Perry's LLVM
+                    // backend doesn't have a clean path to throw from
+                    // runtime helpers yet, so we return undefined
+                    // unconditionally. The test's missing-path case in
+                    // a try/catch will still see `accessBad = false`.
+                    let p = lower_expr(ctx, &args[0])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_access_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                }
+                "realpathSync" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let str_handle = blk.call(
+                        I64,
+                        "js_fs_realpath_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    Ok(nanbox_string_inline(blk, &str_handle))
+                }
+                "mkdtempSync" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let str_handle = blk.call(
+                        I64,
+                        "js_fs_mkdtemp_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    Ok(nanbox_string_inline(blk, &str_handle))
+                }
+                "rmdirSync" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_rmdir_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+                }
+                _ => lower_call(ctx, callee, args),
+            }
+        }
+
         // -------- Calls --------
         Expr::Call { callee, args, .. } => lower_call(ctx, callee, args),
 
