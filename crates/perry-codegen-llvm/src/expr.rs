@@ -1460,7 +1460,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             body,
             captures,
             mutable_captures,
-            captures_this: _,
+            captures_this,
             is_async,
             ..
         } => {
@@ -1555,9 +1555,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 func_id
             );
 
+            // Closures with `captures_this` reserve one extra capture
+            // slot (at index `auto_captures.len()`) for the receiver.
+            // `lower_object_literal` patches that slot with the
+            // containing object pointer AFTER the closure is built.
+            // Arrow-in-class closures leave it at 0.0, the existing
+            // non-crashing fallback.
+            let total_caps = if *captures_this {
+                auto_captures.len() + 1
+            } else {
+                auto_captures.len()
+            };
+
             let blk = ctx.block();
             let func_ref = format!("@{}", func_name);
-            let cap_count = auto_captures.len().to_string();
+            let cap_count = total_caps.to_string();
             let closure_handle = blk.call(
                 I64,
                 "js_closure_alloc",
@@ -1568,6 +1580,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 blk.call_void(
                     "js_closure_set_capture_f64",
                     &[(I64, &closure_handle), (I32, &idx_str), (DOUBLE, val)],
+                );
+            }
+            // Initialize the reserved `this` slot to 0.0 so reads
+            // don't return garbage before any patch happens.
+            if *captures_this {
+                let this_idx = auto_captures.len().to_string();
+                blk.call_void(
+                    "js_closure_set_capture_f64",
+                    &[
+                        (I64, &closure_handle),
+                        (I32, &this_idx),
+                        (DOUBLE, &double_literal(0.0)),
+                    ],
                 );
             }
             Ok(nanbox_pointer_inline(blk, &closure_handle))
@@ -2307,6 +2332,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "ReferenceError" => 0xFFFF0012u32,
                 "SyntaxError" => 0xFFFF0013u32,
                 "AggregateError" => 0xFFFF0014u32,
+                // Uint8Array / Buffer — runtime detects these via a
+                // thread-local buffer registry (see buffer.rs). The
+                // TextEncoder path registers its ArrayHeader result
+                // in that same registry so `encoded instanceof Uint8Array`
+                // returns true.
+                "Uint8Array" | "Buffer" => 0xFFFF0004u32,
                 _ => ctx.class_ids.get(ty).copied().unwrap_or(0),
             };
             let cid_str = cid.to_string();
@@ -3512,8 +3543,36 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
             Ok(double_literal(0.0))
         }
-        Expr::TextEncoderNew | Expr::TextDecoderNew => Ok(double_literal(0.0)),
-        Expr::TextEncoderEncode(o) | Expr::TextDecoderDecode(o) => lower_expr(ctx, o),
+        Expr::TextEncoderNew => {
+            // Stateless UTF-8 encoder — return a non-null sentinel pointer.
+            // NaN-box with POINTER_TAG so `typeof encoder === "object"` holds.
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_text_encoder_new", &[]);
+            Ok(nanbox_pointer_inline(blk, &h))
+        }
+        Expr::TextDecoderNew => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_text_decoder_new", &[]);
+            Ok(nanbox_pointer_inline(blk, &h))
+        }
+        Expr::TextEncoderEncode(o) => {
+            // encoder.encode(str) — runtime returns an i64 pointer to an
+            // ArrayHeader whose f64 elements hold the UTF-8 byte values.
+            // NaN-box with POINTER_TAG so `.length` / `[i]` inline paths
+            // can unbox it as an array handle.
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let arr_ptr = blk.call(I64, "js_text_encoder_encode_llvm", &[(DOUBLE, &v)]);
+            Ok(nanbox_pointer_inline(blk, &arr_ptr))
+        }
+        Expr::TextDecoderDecode(o) => {
+            // decoder.decode(bufOrArr) — runtime returns an i64 string
+            // pointer. NaN-box with STRING_TAG.
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let str_ptr = blk.call(I64, "js_text_decoder_decode_llvm", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &str_ptr))
+        }
         Expr::OsArch | Expr::OsType | Expr::OsPlatform | Expr::OsRelease | Expr::OsHostname => {
             Ok(double_literal(0.0))
         }
@@ -4000,11 +4059,46 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
         Expr::NativeModuleRef(_) => Ok(double_literal(0.0)),
 
-        // ObjectRest is the `...rest` capture in destructuring. We
-        // stub by returning the source object — wrong (it should be
-        // the object minus the excluded keys) but doesn't crash and
-        // unblocks programs that don't actually use rest fields.
-        Expr::ObjectRest { object, .. } => lower_expr(ctx, object),
+        // ObjectRest is the `...rest` capture in destructuring:
+        // `const { a, b, ...rest } = obj` — `rest` must be a clone of
+        // `obj` with keys `a`/`b` stripped. We build an exclude-keys
+        // array of NaN-boxed strings and call `js_object_rest`, which
+        // returns a fresh object pointer that we re-NaN-box.
+        Expr::ObjectRest { object, exclude_keys } => {
+            let obj_box = lower_expr(ctx, object)?;
+            let key_handle_globals: Vec<String> = exclude_keys
+                .iter()
+                .map(|k| {
+                    let idx = ctx.strings.intern(k);
+                    format!("@{}", ctx.strings.entry(idx).handle_global)
+                })
+                .collect();
+            let blk = ctx.block();
+            let obj_handle = {
+                let bits = blk.bitcast_double_to_i64(&obj_box);
+                blk.and(I64, &bits, POINTER_MASK_I64)
+            };
+            let n_str = (exclude_keys.len() as u32).to_string();
+            let keys_arr = blk.call(
+                I64,
+                "js_array_alloc_with_length",
+                &[(I32, &n_str)],
+            );
+            for (i, handle_global) in key_handle_globals.iter().enumerate() {
+                let idx_str = i.to_string();
+                let key_box = blk.load(DOUBLE, handle_global);
+                blk.call_void(
+                    "js_array_set_f64_unchecked",
+                    &[(I64, &keys_arr), (I32, &idx_str), (DOUBLE, &key_box)],
+                );
+            }
+            let rest_ptr = blk.call(
+                I64,
+                "js_object_rest",
+                &[(I64, &obj_handle), (I64, &keys_arr)],
+            );
+            Ok(nanbox_pointer_inline(blk, &rest_ptr))
+        }
 
         // -------- BigInt(literal) --------
         // The HIR carries the literal as a string for arbitrary
@@ -4263,21 +4357,45 @@ fn lower_object_literal(ctx: &mut FnCtx<'_>, props: &[(String, Expr)]) -> Result
     let zero_str = "0".to_string();
     let n_str = field_count.to_string();
 
-    // Allocate. Result is a raw i64 object pointer (NOT NaN-boxed).
     let obj_handle = ctx
         .block()
         .call(I64, "js_object_alloc", &[(I32, &zero_str), (I32, &n_str)]);
 
+    // Track `(closure_value_double, reserved_this_slot_idx)` for each
+    // method closure that needs `this` patched after the object is
+    // fully built. Enables `calc.add(n) { this.value = ... }`.
+    let mut this_patches: Vec<(String, u32)> = Vec::new();
+
     for (key, value_expr) in props {
-        // Intern the key in the StringPool. This is a separate borrow
-        // from the function-level &mut ctx.func, so it's allowed.
         let key_idx = ctx.strings.intern(key);
         let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
 
-        // Lower the value first (recursive lower_expr — borrows ctx).
-        let v = lower_expr(ctx, value_expr)?;
+        if let Expr::Closure {
+            params: cparams,
+            body: cbody,
+            captures: ccaps,
+            captures_this: true,
+            ..
+        } = value_expr
+        {
+            let auto_caps = compute_auto_captures(ctx, cparams, cbody, ccaps);
+            let this_idx = auto_caps.len() as u32;
 
-        // Now load the key handle and call set_field.
+            let v = lower_expr(ctx, value_expr)?;
+            this_patches.push((v.clone(), this_idx));
+
+            let blk = ctx.block();
+            let key_box = blk.load(DOUBLE, &key_handle_global);
+            let key_bits = blk.bitcast_double_to_i64(&key_box);
+            let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+            blk.call_void(
+                "js_object_set_field_by_name",
+                &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &v)],
+            );
+            continue;
+        }
+
+        let v = lower_expr(ctx, value_expr)?;
         let blk = ctx.block();
         let key_box = blk.load(DOUBLE, &key_handle_global);
         let key_bits = blk.bitcast_double_to_i64(&key_box);
@@ -4288,7 +4406,30 @@ fn lower_object_literal(ctx: &mut FnCtx<'_>, props: &[(String, Expr)]) -> Result
         );
     }
 
-    // Inline NaN-box (POINTER_TAG).
+    // Patch each method closure's reserved `this` slot with the object
+    // pointer (NaN-boxed). Done AFTER all fields are set so every
+    // method sees the fully-initialized object.
+    if !this_patches.is_empty() {
+        let blk = ctx.block();
+        let obj_tagged = {
+            let tagged = blk.or(I64, &obj_handle, crate::nanbox::POINTER_TAG_I64);
+            blk.bitcast_i64_to_double(&tagged)
+        };
+        for (closure_val, this_idx) in &this_patches {
+            let bits = blk.bitcast_double_to_i64(closure_val);
+            let closure_handle = blk.and(I64, &bits, POINTER_MASK_I64);
+            let idx_str = this_idx.to_string();
+            blk.call_void(
+                "js_closure_set_capture_f64",
+                &[
+                    (I64, &closure_handle),
+                    (I32, &idx_str),
+                    (DOUBLE, &obj_tagged),
+                ],
+            );
+        }
+    }
+
     Ok(nanbox_pointer_inline(ctx.block(), &obj_handle))
 }
 

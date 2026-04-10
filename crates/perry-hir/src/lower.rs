@@ -142,6 +142,11 @@ pub struct LoweringContext {
     /// calls in `for...of` so the iterator protocol loop is emitted instead of
     /// the array-index loop.
     pub(crate) generator_func_names: HashSet<String>,
+    /// Classes that define `*[Symbol.iterator]()`. Maps class name →
+    /// `FuncId` of the synthesized top-level generator function that
+    /// takes `this` as its first parameter. Consumed by `for...of` to
+    /// dispatch through the iterator protocol via a direct FuncRef call.
+    pub(crate) iterator_func_for_class: std::collections::HashMap<String, perry_types::FuncId>,
     /// Local names whose value was assigned from `regex.exec(...)`. Used to
     /// route `local.index` / `local.groups` to the bare RegExpExecIndex/Groups
     /// HIR variants which read the runtime's thread-local exec metadata.
@@ -204,6 +209,7 @@ impl LoweringContext {
             weakmap_locals: HashSet::new(),
             weakset_locals: HashSet::new(),
             generator_func_names: HashSet::new(),
+            iterator_func_for_class: std::collections::HashMap::new(),
             regex_exec_locals: HashSet::new(),
         }
     }
@@ -3330,13 +3336,42 @@ fn lower_stmt(
                 } else { false }
             } else { false };
 
-            if is_generator_call {
+            // Also detect: for (const x of new Range(...)) where Range
+            // defines `*[Symbol.iterator]()`. We lowered that method as
+            // a synthesized top-level generator function taking `this`
+            // as its first parameter; the for-of here dispatches by
+            // calling that function with the lowered receiver.
+            let iter_from_class: Option<perry_types::FuncId> = if let ast::Expr::New(new_expr) = &*for_of_stmt.right {
+                if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+                    let class_name = ident.sym.to_string();
+                    ctx.iterator_func_for_class.get(&class_name).copied()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if is_generator_call || iter_from_class.is_some() {
                 // Lower to iterator protocol:
-                //   let __iter = genFunc(...);
+                //   let __iter = genFunc(...);                     // generator-fn path
+                //   let __iter = __perry_iter_Range(new Range(...));  // class path
                 //   let __result = __iter.next();
                 //   while (!__result.done) { const x = __result.value; body; __result = __iter.next(); }
                 let for_scope_mark = ctx.push_block_scope();
                 let iter_expr = lower_expr(ctx, &for_of_stmt.right)?;
+                // For the class path we wrap the lowered `new Range(..)`
+                // in a direct FuncRef call to the synthesized iterator
+                // function (which has `this` as its first parameter).
+                let iter_expr = if let Some(iter_fn_id) = iter_from_class {
+                    Expr::Call {
+                        callee: Box::new(Expr::FuncRef(iter_fn_id)),
+                        args: vec![iter_expr],
+                        type_args: vec![],
+                    }
+                } else {
+                    iter_expr
+                };
                 let iter_id = ctx.fresh_local();
                 ctx.locals.push((format!("__iter_{}", iter_id), iter_id, Type::Any));
                 module.init.push(Stmt::Let {

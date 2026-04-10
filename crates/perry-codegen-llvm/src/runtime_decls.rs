@@ -344,6 +344,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_decode_uri", I64, &[DOUBLE]);
     module.declare_function("js_encode_uri_component", I64, &[DOUBLE]);
     module.declare_function("js_decode_uri_component", I64, &[DOUBLE]);
+    // TextEncoder / TextDecoder — LLVM variant uses an ArrayHeader-backed
+    // buffer (see `crates/perry-runtime/src/text.rs`). Encode returns an
+    // i64 pointing at an ArrayHeader with f64 elements (one per UTF-8
+    // byte). Decode accepts both ArrayHeader (from encode) and
+    // BufferHeader (from `new Uint8Array([...])`).
+    module.declare_function("js_text_encoder_new", I64, &[]);
+    module.declare_function("js_text_decoder_new", I64, &[]);
+    module.declare_function("js_text_encoder_encode_llvm", I64, &[DOUBLE]);
+    module.declare_function("js_text_decoder_decode_llvm", I64, &[DOUBLE]);
     // Microtask queue (queueMicrotask / process.nextTick).
     module.declare_function("js_queue_microtask", VOID, &[I64]);
     // Object introspection / mutation (Agent A's accessor-descriptor work).
@@ -569,4 +578,12 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_object_alloc", I64, &[I32, I32]);
     module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
     module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
+    // Object rest destructuring: copy all properties from src except excluded keys.
+    // Takes a src object ptr and an array of NaN-boxed strings (the excluded keys),
+    // returns a new object pointer.
+    module.declare_function("js_object_rest", I64, &[I64, I64]);
+    // Array alloc variant that pre-sets length to N (for exclude_keys array filling).
+    module.declare_function("js_array_alloc_with_length", I64, &[I32]);
+    // Unchecked array set (plain array, no buffer/Set/Map dispatch).
+    module.declare_function("js_array_set_f64_unchecked", VOID, &[I64, I32, DOUBLE]);
 }

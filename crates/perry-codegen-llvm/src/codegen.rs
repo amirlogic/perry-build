@@ -1013,22 +1013,30 @@ fn compile_closure(
         .map(|(i, id)| (*id, i as u32))
         .collect();
 
-    // Arrow-function `this` capture: `enclosing_class` tells us the
-    // class the closure was lexically nested in. We allocate a slot
-    // and store an undefined sentinel — the closure can't actually
-    // call methods on it (we'd need to thread the real `this` through
-    // captures), but `console.log(this)` and similar reads at least
-    // produce a non-crashing value. Full support lives in a later
-    // phase that adds a synthetic capture for the outer `this`.
+    // `this` capture. Object-literal methods get `captures_this=true`
+    // AND the creation site (lower_object_literal) patches a reserved
+    // capture slot at index `auto_captures.len()` with the containing
+    // object pointer. At function entry we read that slot and store it
+    // into the `this` alloca so `Expr::This` loads the real receiver.
+    //
+    // Arrow-in-class leftover path (`enclosing_class.is_some()` without
+    // the object-literal patch) keeps the old 0.0 sentinel — reads
+    // return a bogus value but don't crash.
     let this_stack = if captures_this || enclosing_class.is_some() {
+        let this_cap_idx = auto_captures.len() as u32;
         let blk = lf.block_mut(0).unwrap();
         let slot = blk.alloca(DOUBLE);
-        // Initialize with a sentinel double — `this` reads from a
-        // closure that doesn't actually capture `this` will return
-        // garbage, but won't crash. Real `this` capture support
-        // (synthetic capture slot for the outer this) lives in a
-        // future phase.
-        blk.store(DOUBLE, "0.0", &slot);
+        if captures_this {
+            let idx_str = this_cap_idx.to_string();
+            let v = blk.call(
+                DOUBLE,
+                "js_closure_get_capture_f64",
+                &[(I64, "%this_closure"), (I32, &idx_str)],
+            );
+            blk.store(DOUBLE, &v, &slot);
+        } else {
+            blk.store(DOUBLE, "0.0", &slot);
+        }
         vec![slot]
     } else {
         Vec::new()

@@ -15,6 +15,19 @@ use crate::lower_patterns::*;
 use crate::destructuring::*;
 use crate::analysis::*;
 
+/// Detect the computed key `[Symbol.iterator]` in a class method / object
+/// literal. Recognizes the standard `Symbol.iterator` form — doesn't try to
+/// evaluate arbitrary expressions, which is enough for `*[Symbol.iterator]()`
+/// as emitted by SWC for user code.
+pub(crate) fn is_symbol_iterator_key(expr: &ast::Expr) -> bool {
+    if let ast::Expr::Member(member) = expr {
+        if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
+            return obj.sym.as_ref() == "Symbol" && prop.sym.as_ref() == "iterator";
+        }
+    }
+    false
+}
+
 pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Function> {
     let name = fn_decl.ident.sym.to_string();
     let func_id = ctx.lookup_func(&name).unwrap_or_else(|| ctx.fresh_func());
@@ -271,10 +284,19 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                 if method.function.body.is_none() {
                     continue;
                 }
-                // Get the property name for getters/setters
+                // Get the property name for getters/setters. Computed
+                // keys are only accepted for `[Symbol.iterator]`, which
+                // we register under the sentinel name `@@iterator`.
                 let prop_name = match &method.key {
                     ast::PropName::Ident(ident) => ident.sym.to_string(),
                     ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                    ast::PropName::Computed(computed) => {
+                        if is_symbol_iterator_key(&computed.expr) {
+                            "@@iterator".to_string()
+                        } else {
+                            continue;
+                        }
+                    }
                     _ => continue,
                 };
 
@@ -290,7 +312,48 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                         setters.push((prop_name, func));
                     }
                     ast::MethodKind::Method => {
-                        let func = lower_class_method(ctx, method)?;
+                        let mut func = lower_class_method(ctx, method)?;
+                        // `*[Symbol.iterator]()` — lift to a top-level
+                        // generator function with `this` as an explicit
+                        // first parameter. The generator transform
+                        // (which only visits `module.functions`) then
+                        // rewrites it to return the `{next, return,
+                        // throw}` closure triple. For-of sites use
+                        // `iterator_func_for_class` to dispatch.
+                        if prop_name == "@@iterator" && func.is_generator && !method.is_static {
+                            let this_id = ctx.fresh_local();
+                            let mut new_params = Vec::with_capacity(func.params.len() + 1);
+                            new_params.push(Param {
+                                id: this_id,
+                                name: "this".to_string(),
+                                ty: Type::Named(name.clone()),
+                                default: None,
+                                is_rest: false,
+                            });
+                            new_params.extend(func.params.drain(..));
+
+                            let mut body = std::mem::take(&mut func.body);
+                            crate::analysis::replace_this_in_stmts(&mut body, this_id);
+
+                            let top_name = format!("__perry_iter_{}", name);
+                            let top_fn_id = ctx.fresh_func();
+                            let top_fn = Function {
+                                id: top_fn_id,
+                                name: top_name,
+                                type_params: Vec::new(),
+                                params: new_params,
+                                return_type: Type::Any,
+                                body,
+                                is_async: false,
+                                is_generator: true,
+                                is_exported: false,
+                                captures: Vec::new(),
+                                decorators: Vec::new(),
+                            };
+                            ctx.pending_functions.push(top_fn);
+                            ctx.iterator_func_for_class.insert(name.clone(), top_fn_id);
+                            continue;
+                        }
                         if method.is_static {
                             static_methods.push(func);
                         } else {
@@ -927,6 +990,9 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
     let name = match &method.key {
         ast::PropName::Ident(ident) => ident.sym.to_string(),
         ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+        ast::PropName::Computed(computed) if is_symbol_iterator_key(&computed.expr) => {
+            "@@iterator".to_string()
+        }
         _ => return Err(anyhow!("Unsupported method key")),
     };
 
