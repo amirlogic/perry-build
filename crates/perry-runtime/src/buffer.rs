@@ -37,7 +37,7 @@ thread_local! {
 }
 
 /// Register a buffer pointer in the thread-local registry
-fn register_buffer(ptr: *const BufferHeader) {
+pub fn register_buffer(ptr: *const BufferHeader) {
     BUFFER_REGISTRY.with(|r| r.borrow_mut().insert(ptr as usize));
 }
 

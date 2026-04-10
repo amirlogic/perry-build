@@ -46,6 +46,13 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ArrayValues { .. }
         | Expr::StringMatch { .. }
         | Expr::StringMatchAll { .. } => Some(HirType::Array(Box::new(HirType::Any))),
+        // TextEncoder.encode(str) — runtime returns an ArrayHeader whose
+        // f64 elements hold UTF-8 byte values. Refining the local type to
+        // Array(Number) lets `encoded.length` / `encoded[i]` hit the
+        // inline array fast paths instead of the dynamic-field fallback.
+        Expr::TextEncoderEncode(_) => Some(HirType::Array(Box::new(HirType::Number))),
+        // TextDecoder.decode(buf) always produces a string.
+        Expr::TextDecoderDecode(_) => Some(HirType::String),
         // string.split(sep) → Array<string>
         Expr::StringSplit { .. } => Some(HirType::Array(Box::new(HirType::String))),
         // Set.values() / Set.keys() → iterable, but Array.from wraps it

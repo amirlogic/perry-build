@@ -34,6 +34,7 @@ pub mod url;
 pub mod regex;
 pub mod os;
 pub mod buffer;
+pub mod text;
 pub mod child_process;
 pub mod net;
 pub mod json;
