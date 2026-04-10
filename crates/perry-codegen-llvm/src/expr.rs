@@ -1074,7 +1074,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 && (is_array_expr(ctx, object) || is_string_expr(ctx, object)
                     || matches!(
                         crate::type_analysis::static_type_of(ctx, object),
-                        Some(HirType::Named(_))
+                        Some(HirType::Named(_)) | Some(HirType::Tuple(_))
                     )) =>
         {
             let recv_box = lower_expr(ctx, object)?;

@@ -461,7 +461,7 @@ pub(crate) fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
 ///   (e.g. `arr.map(...)` — but those use the special Expr::ArrayMap
 ///   variant which is already handled)
 pub(crate) fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
-    matches!(static_type_of(ctx, e), Some(HirType::Array(_)))
+    matches!(static_type_of(ctx, e), Some(HirType::Array(_)) | Some(HirType::Tuple(_)))
 }
 
 /// Best-effort static type lookup for an expression. Returns the HIR
