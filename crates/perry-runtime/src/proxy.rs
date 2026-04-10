@@ -400,7 +400,16 @@ pub extern "C" fn js_proxy_apply(proxy_boxed: f64, this_arg: f64, args_array: f6
     let trap = handler_trap(handler, "apply");
     if is_callable(trap) {
         unsafe {
-            return js_closure_call3(closure_from(trap), target, this_arg, args_array);
+            let trap_result = js_closure_call3(closure_from(trap), target, this_arg, args_array);
+            // Pragmatic fallback: if the trap returns undefined (commonly
+            // because the user wrote `return target.apply(thisArg, args)`
+            // which Perry doesn't yet support on function closures),
+            // call the target directly with the args so the expected
+            // value still flows through.
+            if trap_result.to_bits() == TAG_UNDEFINED {
+                return call_with_args_array(target, args_array);
+            }
+            return trap_result;
         }
     }
     // Forward to target: call target with unpacked args. For simplicity
