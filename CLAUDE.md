@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.99
+**Current Version:** 0.4.100
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.100 (llvm-backend)
+- feat: LLVM backend Phase F — cross-module import data now flows all the way from `CompileOptions` into `FnCtx`. Added `CrossModuleCtx` bundle and 5 new `FnCtx` fields (`namespace_imports`, `imported_async_funcs`, `type_aliases`, `imported_func_param_counts`, `imported_func_return_types`). `compile_module` now merges imported enums into `enum_table`, builds owned stub `Class` objects for imported classes and inserts them into `class_table`/`class_ids`/`method_names`, and pre-declares imported class methods + constructors as extern LLVM functions so the linker can resolve cross-module method calls. Threaded `&cross_module` through all 6 FnCtx construction sites. Multi-module tests (main/reexport/export_all) still pass; downstream consumers (lower_call, type_analysis) can now read the cross-module data in later phases.
 
 ### v0.4.99 (llvm-backend)
 - fix: `ArrayForEach`/`ArrayFlatMap` expressions were missing from `collect_ref_ids_in_expr`, so module-level arrays used inside `arr.forEach(cb)` within functions weren't promoted to module globals. The function saw a zero pointer and the forEach loop never executed. `test_edge_closure_module_map` now passes.

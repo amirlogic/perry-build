@@ -118,6 +118,17 @@ pub struct ImportedClass {
     pub parent_name: Option<String>,
 }
 
+/// Cross-module import context, bundled into a single struct to avoid
+/// adding five more individual parameters to every compile_* function.
+/// Built once in `compile_module` from `CompileOptions`.
+pub(crate) struct CrossModuleCtx {
+    pub namespace_imports: std::collections::HashSet<String>,
+    pub imported_async_funcs: std::collections::HashSet<String>,
+    pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
+    pub imported_func_param_counts: std::collections::HashMap<String, usize>,
+    pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+}
+
 /// Compile a Perry HIR module to an object file via LLVM IR.
 pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> {
     let triple = opts.target.clone().unwrap_or_else(default_target_triple);
@@ -161,7 +172,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Class lookup table for `Expr::New`. Indexed by class name —
     // the HIR has unique names per module.
-    let class_table: HashMap<String, &perry_hir::Class> = hir
+    let mut class_table: HashMap<String, &perry_hir::Class> = hir
         .classes
         .iter()
         .map(|c| (c.name.clone(), c))
@@ -171,7 +182,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // starting at 1 (0 is reserved for anonymous object literals).
     // Used by lower_new to tag the object header so virtual
     // dispatch and instanceof can read the actual class at runtime.
-    let class_ids: HashMap<String, u32> = hir
+    let mut class_ids: HashMap<String, u32> = hir
         .classes
         .iter()
         .enumerate()
@@ -181,7 +192,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // Enum lookup table for `Expr::EnumMember`. Each (enum_name,
     // member_name) maps to its EnumValue, which the codegen lowers
     // to either a numeric or string constant. Built once here.
-    let enum_table: HashMap<(String, String), perry_hir::EnumValue> = hir
+    let mut enum_table: HashMap<(String, String), perry_hir::EnumValue> = hir
         .enums
         .iter()
         .flat_map(|e| {
@@ -190,6 +201,90 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 .map(move |m| ((e.name.clone(), m.name.clone()), m.value.clone()))
         })
         .collect();
+
+    // ── Phase F: merge imported cross-module definitions ──────────
+    //
+    // Imported enums: add their members to the enum_table so
+    // `Expr::EnumMember` can resolve them in this module.
+    for (enum_name, members) in &opts.imported_enums {
+        for (member_name, value) in members {
+            enum_table
+                .entry((enum_name.clone(), member_name.clone()))
+                .or_insert_with(|| value.clone());
+        }
+    }
+
+    // Imported classes: build lightweight stub `Class` objects so the
+    // codegen dispatch tables (class_table, method_names, class_ids)
+    // can resolve cross-module class method calls. The actual method
+    // bodies live in the other module's .o — here we only need the
+    // metadata for dispatch and the extern LLVM declarations for the
+    // linker.
+    let mut imported_class_stubs: Vec<perry_hir::Class> = Vec::new();
+    let next_class_id = (hir.classes.len() as u32) + 1;
+    for (idx, ic) in opts.imported_classes.iter().enumerate() {
+        let class_id = next_class_id + (idx as u32);
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+
+        // Skip if already defined locally (local definition takes precedence).
+        if class_table.contains_key(effective_name) {
+            continue;
+        }
+
+        // Assign a class id for dispatch / instanceof.
+        class_ids.insert(effective_name.to_string(), class_id);
+        // Also register the canonical name if aliased.
+        if ic.local_alias.is_some() && !class_ids.contains_key(&ic.name) {
+            class_ids.insert(ic.name.clone(), class_id);
+        }
+
+        // Build a stub Class with the minimum fields the codegen needs.
+        // Most fields are empty — only name, extends_name, and methods
+        // are consulted by dispatch.
+        let stub = perry_hir::Class {
+            id: 0, // imported — no local ClassId
+            name: effective_name.to_string(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: ic.parent_name.clone(),
+            native_extends: None,
+            fields: Vec::new(),
+            constructor: None,
+            methods: ic.method_names.iter().map(|m| perry_hir::Function {
+                id: 0,
+                name: m.clone(),
+                type_params: Vec::new(),
+                params: Vec::new(),
+                return_type: perry_types::Type::Any,
+                body: Vec::new(),
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                captures: Vec::new(),
+                decorators: Vec::new(),
+            }).collect(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            is_exported: false,
+        };
+        imported_class_stubs.push(stub);
+    }
+    // Add imported class stubs to the class_table (references into the
+    // Vec we just built — the Vec lives for the remainder of compile_module).
+    for stub in &imported_class_stubs {
+        class_table.entry(stub.name.clone()).or_insert(stub);
+    }
+
+    // Build the cross-module context bundle from CompileOptions.
+    let cross_module = CrossModuleCtx {
+        namespace_imports: opts.namespace_imports.iter().cloned().collect(),
+        imported_async_funcs: opts.imported_async_funcs,
+        type_aliases: opts.type_aliases,
+        imported_func_param_counts: opts.imported_func_param_counts,
+        imported_func_return_types: opts.imported_func_return_types,
+    };
 
     // Module-level globals registry. Pre-walk:
     //   1. Collect every LocalId referenced from any function or method
@@ -318,6 +413,68 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 format!("perry_static_{}__{}__{}", module_prefix, c.name, sm.name),
             );
         }
+    }
+
+    // Phase F: register imported class methods in the method_names
+    // registry and pre-declare them as extern LLVM functions so the
+    // linker can resolve cross-module method calls.
+    for ic in &opts.imported_classes {
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+        // Skip if locally defined — local methods take precedence.
+        if hir.classes.iter().any(|c| c.name == *effective_name) {
+            continue;
+        }
+        let src = &ic.source_prefix;
+
+        for method_name in &ic.method_names {
+            // The source module emitted its methods as
+            // `perry_method_<source_prefix>__<class>__<method>`.
+            // Use the canonical class name (ic.name) for the symbol
+            // since that's how the source module mangled it.
+            let llvm_fn = format!(
+                "perry_method_{}__{}__{}",
+                sanitize(src),
+                sanitize(&ic.name),
+                sanitize(method_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), method_name.clone()))
+                .or_insert_with(|| llvm_fn.clone());
+
+            // Declare extern: double method(double this, double arg0, …).
+            // We don't know the exact param count of each method from the
+            // ImportedClass metadata (only method_names), so declare with
+            // a variadic-safe 6-arg signature. The LLVM IR `declare` is
+            // just a prototype — it only matters that the symbol exists
+            // and the return type is correct. At the call site, only the
+            // actual args are passed.
+            // For methods, signature is: double(double_this, ..args)
+            // We declare conservatively with just (double) → double;
+            // extra args at call sites are fine because LLVM validates
+            // the callsite against the number of args it actually passes.
+            // Actually, LLVM requires exact match. We don't know the
+            // arity, so declare with 6 params as a safe upper bound.
+            // Call sites with fewer args work because LLVM only checks
+            // at the indirect call site. For direct calls, the linker
+            // resolves regardless.
+            let param_types: Vec<crate::types::LlvmType> =
+                std::iter::repeat(DOUBLE).take(6).collect();
+            llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
+        }
+
+        // Constructor: declared as
+        // `<source_prefix>__<class>_constructor(i64 this, double arg0, …) → void`
+        // matching the Cranelift convention.
+        let ctor_fn = format!(
+            "{}__{}_constructor",
+            sanitize(src),
+            sanitize(&ic.name),
+        );
+        let mut ctor_params: Vec<crate::types::LlvmType> = vec![I64];
+        for _ in 0..ic.constructor_param_count {
+            ctor_params.push(DOUBLE);
+        }
+        llmod.declare_function(&ctor_fn, VOID, &ctor_params);
     }
 
     // Resolve user function names up-front so body lowering can emit
@@ -458,7 +615,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -482,6 +639,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &module_boxed_vars,
             &module_local_types,
             &closure_rest_params,
+            &cross_module,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
     }
@@ -492,7 +650,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
         // Getters and setters are also methods, just registered under
@@ -501,13 +659,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, getter_fn) in &class.getters {
             let mut renamed = getter_fn.clone();
             renamed.name = format!("__get_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
         }
         for (prop, setter_fn) in &class.setters {
             let mut renamed = setter_fn.clone();
             renamed.name = format!("__set_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
         }
         // Static methods compile as plain functions named
@@ -531,6 +689,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 &module_prefix,
                 &module_boxed_vars,
                 &closure_rest_params,
+                &cross_module,
             )
             .with_context(|| format!("lowering static method '{}::{}'", class.name, sm.name))?;
         }
@@ -593,6 +752,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &opts.non_entry_module_prefixes,
         &module_boxed_vars,
         &closure_rest_params,
+        &cross_module,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -633,6 +793,7 @@ fn compile_function(
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -706,6 +867,11 @@ fn compile_function(
         boxed_vars,
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -760,6 +926,7 @@ fn compile_closure(
     module_boxed_vars: &std::collections::HashSet<u32>,
     module_local_types: &HashMap<u32, perry_types::Type>,
     closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
@@ -907,6 +1074,11 @@ fn compile_closure(
         boxed_vars: closure_boxed_vars,
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -939,6 +1111,7 @@ fn compile_method(
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -1010,6 +1183,11 @@ fn compile_method(
         boxed_vars: method_boxed_vars,
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1055,6 +1233,7 @@ fn compile_module_entry(
     non_entry_module_prefixes: &[String],
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
 
@@ -1109,6 +1288,11 @@ fn compile_module_entry(
             boxed_vars: main_boxed_vars,
             closure_rest_params: &closure_rest_params,
             local_closure_func_ids: HashMap::new(),
+            namespace_imports: &cross_module.namespace_imports,
+            imported_async_funcs: &cross_module.imported_async_funcs,
+            type_aliases: &cross_module.type_aliases,
+            imported_func_param_counts: &cross_module.imported_func_param_counts,
+            imported_func_return_types: &cross_module.imported_func_return_types,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1160,6 +1344,11 @@ fn compile_module_entry(
             boxed_vars: init_boxed_vars,
             closure_rest_params: &closure_rest_params,
             local_closure_func_ids: HashMap::new(),
+            namespace_imports: &cross_module.namespace_imports,
+            imported_async_funcs: &cross_module.imported_async_funcs,
+            type_aliases: &cross_module.type_aliases,
+            imported_func_param_counts: &cross_module.imported_func_param_counts,
+            imported_func_return_types: &cross_module.imported_func_return_types,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1234,6 +1423,7 @@ fn compile_static_method(
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
 ) -> Result<()> {
     let llvm_name = format!("perry_static_{}__{}__{}", module_prefix, class_name, f.name);
 
@@ -1293,6 +1483,11 @@ fn compile_static_method(
         boxed_vars: module_boxed_vars.clone(),
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

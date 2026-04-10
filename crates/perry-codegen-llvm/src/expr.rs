@@ -184,6 +184,25 @@ pub(crate) struct FnCtx<'a> {
     /// Used by the closure call site in `lower_call` to look up the
     /// callee's rest param info from `closure_rest_params`.
     pub local_closure_func_ids: std::collections::HashMap<u32, u32>,
+
+    // ── Cross-module import plumbing (Phase F) ──────────────────────
+
+    /// Locals that are namespace imports (`import * as X from "./mod"`).
+    /// Codegen uses this to know that `X.foo()` should be dispatched as
+    /// a cross-module call rather than an object method call.
+    pub namespace_imports: &'a std::collections::HashSet<String>,
+    /// Names of imported functions that are async. Used to wrap
+    /// cross-module calls in promise machinery.
+    pub imported_async_funcs: &'a std::collections::HashSet<String>,
+    /// Type alias map (name → Type) aggregated from all modules. Used
+    /// to resolve `Named` types in function signatures and dispatch.
+    pub type_aliases: &'a std::collections::HashMap<String, perry_types::Type>,
+    /// Imported function parameter counts, keyed by function name.
+    /// Used for rest-param bundling on cross-module calls.
+    pub imported_func_param_counts: &'a std::collections::HashMap<String, usize>,
+    /// Imported function return types, keyed by local function name.
+    /// Used for type-aware dispatch on cross-module call results.
+    pub imported_func_return_types: &'a std::collections::HashMap<String, perry_types::Type>,
 }
 
 impl<'a> FnCtx<'a> {
