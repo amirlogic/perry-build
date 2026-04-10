@@ -80,7 +80,17 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::OsPlatform
         | Expr::OsRelease
         | Expr::OsHostname
-        | Expr::OsEOL => Some(HirType::String),
+        | Expr::OsEOL
+        // Date string-returning methods all produce real string handles
+        // via js_date_to_*_string. Refining the local lets `dateStr.includes("2024")`
+        // hit the string .includes fast path.
+        | Expr::DateToDateString(_)
+        | Expr::DateToTimeString(_)
+        | Expr::DateToLocaleString(_)
+        | Expr::DateToLocaleDateString(_)
+        | Expr::DateToLocaleTimeString(_)
+        | Expr::DateToISOString(_)
+        | Expr::DateToJSON(_) => Some(HirType::String),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -315,7 +325,15 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::StringFromCharCode(_)
         | Expr::StringAt { .. }
         | Expr::RegExpSource(_)
-        | Expr::RegExpFlags(_) => true,
+        | Expr::RegExpFlags(_)
+        // Date.prototype.to*String() → string
+        | Expr::DateToDateString(_)
+        | Expr::DateToTimeString(_)
+        | Expr::DateToLocaleString(_)
+        | Expr::DateToLocaleDateString(_)
+        | Expr::DateToLocaleTimeString(_)
+        | Expr::DateToISOString(_)
+        | Expr::DateToJSON(_) => true,
         // process.* / os.* string-returning accessors. These lower to runtime
         // calls that return raw StringHeader* pointers, NaN-boxed with STRING_TAG
         // in expr.rs. Without this, `process.version.startsWith('v')` falls

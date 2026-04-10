@@ -411,17 +411,29 @@ pub extern "C" fn js_date_get_utc_date(timestamp: f64) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn js_date_get_utc_hours(timestamp: f64) -> f64 {
-    js_date_get_hours(timestamp)
+    if timestamp.is_nan() { return f64::NAN; }
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (_, _, _, hour, _, _) = timestamp_to_components(secs);
+    hour as f64
 }
 
 #[no_mangle]
 pub extern "C" fn js_date_get_utc_minutes(timestamp: f64) -> f64 {
-    js_date_get_minutes(timestamp)
+    if timestamp.is_nan() { return f64::NAN; }
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (_, _, _, _, minute, _) = timestamp_to_components(secs);
+    minute as f64
 }
 
 #[no_mangle]
 pub extern "C" fn js_date_get_utc_seconds(timestamp: f64) -> f64 {
-    js_date_get_seconds(timestamp)
+    if timestamp.is_nan() { return f64::NAN; }
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms.div_euclid(1000);
+    let (_, _, _, _, _, second) = timestamp_to_components(secs);
+    second as f64
 }
 
 #[no_mangle]

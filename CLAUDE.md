@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.119
+**Current Version:** 0.4.120
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.120 (llvm-backend)
+- fix: `js_date_get_utc_hours`/`_utc_minutes`/`_utc_seconds` were delegating to the LOCAL-time getters (`js_date_get_hours` etc.) via a one-line shim, so `d.getUTCHours()` returned local hours and mismatched Node on any non-UTC system. Replaced the shims with direct `timestamp_to_components` (UTC) calls.
+- feat: `type_analysis.rs` now recognizes `DateToDateString`/`DateToTimeString`/`DateToLocaleString`/`DateToLocaleDateString`/`DateToLocaleTimeString`/`DateToISOString`/`DateToJSON` as string-returning (in both `refine_type_from_init` and `is_string_expr`). Lets `dateStr.includes("2024")` hit the string method fast path instead of returning undefined.
+- `test_gap_date_methods` flipped DIFF (12 lines) → MATCH.
 
 ### v0.4.119 (llvm-backend)
 - fix: `Symbol()` / `Symbol.for()` / `Symbol.keyFor()` / `sym.description` / `sym.toString()` / `Object.getOwnPropertySymbols()` wired correctly in LLVM backend. The SYMBOL agent's commit (`2d6663e`) added HIR variants but the expr.rs dispatch was lost in a concurrent agent conflict — this commit re-applies the wire-up with the correct `f64` signatures (runtime functions in `symbol.rs` take and return NaN-boxed f64 directly). `test_gap_symbols` flips LLVM_CRASH → DIFF (28 lines output now, most match Node; remaining diffs from `s1 === s2` deduplication and symbol-keyed property access which need deeper HIR work).
