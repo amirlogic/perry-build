@@ -476,6 +476,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_error_new_with_cause", I64, &[I64, DOUBLE]);
     // AggregateError.errors field access — returns raw *ArrayHeader.
     module.declare_function("js_error_get_errors", I64, &[I64]);
+    // Crypto stdlib — sha256/md5/hmac/randomBytes/randomUUID used by
+    // the expr.rs chain collapse for createHash().update().digest().
+    module.declare_function("js_crypto_sha256", I64, &[I64]);
+    module.declare_function("js_crypto_md5", I64, &[I64]);
+    module.declare_function("js_crypto_hmac_sha256", I64, &[I64, I64]);
+    module.declare_function("js_crypto_random_bytes_buffer", I64, &[DOUBLE]);
+    module.declare_function("js_crypto_random_uuid", I64, &[]);
+    module.declare_function("js_string_from_bytes", I64, &[I64, I32]);
     // JSON full-featured stringify/parse (replacer + indent + reviver).
     module.declare_function("js_json_stringify_full", I64, &[DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_json_parse_with_reviver", I64, &[I64, I64]);
