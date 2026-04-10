@@ -1055,6 +1055,14 @@ pub enum Expr {
     ObjectIsSealed(Box<Expr>),                             // Object.isSealed(obj)
     ObjectIsExtensible(Box<Expr>),                         // Object.isExtensible(obj)
     ObjectGetPrototypeOf(Box<Expr>),                       // Object.getPrototypeOf(obj)
+    ObjectGetOwnPropertySymbols(Box<Expr>),                // Object.getOwnPropertySymbols(obj) -> symbol[]
+
+    // Symbol operations
+    SymbolNew(Option<Box<Expr>>),                          // Symbol() / Symbol(description)
+    SymbolFor(Box<Expr>),                                  // Symbol.for(key) -> registered symbol
+    SymbolKeyFor(Box<Expr>),                               // Symbol.keyFor(sym) -> key | undefined
+    SymbolDescription(Box<Expr>),                          // sym.description
+    SymbolToString(Box<Expr>),                             // sym.toString()
 
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string

@@ -171,6 +171,31 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_has_property", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_write_file_sync", I32, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_exists_sync", I32, &[DOUBLE]);
+    // fs.readFileSync(path, encoding) — returns a raw *mut StringHeader i64.
+    module.declare_function("js_fs_read_file_sync", I64, &[DOUBLE]);
+    // fs.mkdirSync(path) — returns i32 status (1=success).
+    module.declare_function("js_fs_mkdir_sync", I32, &[DOUBLE]);
+    // fs.unlinkSync(path) — returns i32 status.
+    module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
+    // fs.readdirSync(path) — returns NaN-boxed array of string names (f64).
+    module.declare_function("js_fs_readdir_sync", DOUBLE, &[DOUBLE]);
+    // fs.statSync(path) — returns a NaN-boxed object with isFile/isDirectory/size fields.
+    module.declare_function("js_fs_stat_sync", DOUBLE, &[DOUBLE]);
+    // fs.renameSync(from, to) — returns i32 status.
+    module.declare_function("js_fs_rename_sync", I32, &[DOUBLE, DOUBLE]);
+    // fs.copyFileSync(from, to) — returns i32 status.
+    module.declare_function("js_fs_copy_file_sync", I32, &[DOUBLE, DOUBLE]);
+    // fs.accessSync(path) — returns i32 status (1=ok, 0=error).
+    module.declare_function("js_fs_access_sync", I32, &[DOUBLE]);
+    // fs.realpathSync(path) — returns raw *mut StringHeader i64.
+    module.declare_function("js_fs_realpath_sync", I64, &[DOUBLE]);
+    // fs.mkdtempSync(prefix) — returns raw *mut StringHeader i64.
+    module.declare_function("js_fs_mkdtemp_sync", I64, &[DOUBLE]);
+    // fs.rmdirSync(path) — returns i32 status.
+    module.declare_function("js_fs_rmdir_sync", I32, &[DOUBLE]);
+    // Stats helper: method dispatcher called from the LLVM dispatch fast path.
+    module.declare_function("js_fs_stats_is_file", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_fs_stats_is_directory", DOUBLE, &[DOUBLE]);
     // fs.readFileSync(path) with no encoding — returns a raw *mut BufferHeader
     // that the runtime's format_jsvalue path recognizes via BUFFER_REGISTRY
     // and prints as `<Buffer xx xx ...>`.
@@ -198,6 +223,34 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_console_warn_spread", VOID, &[I64]);
     module.declare_function("js_getenv", I64, &[I64]);
     module.declare_function("js_console_table", VOID, &[DOUBLE]);
+    // process.* — see `perry-runtime/src/os.rs` and `perry-runtime/src/process.rs`.
+    // Most process accessors return raw pointers (I64) that the call site
+    // must NaN-box. The ones that return already-boxed f64 values
+    // (`js_process_versions`, `js_process_memory_usage`, `js_process_hrtime_bigint`,
+    // `js_process_stdin/out/err`) are declared as DOUBLE.
+    module.declare_function("js_process_cwd", I64, &[]);
+    module.declare_function("js_process_argv", I64, &[]);
+    module.declare_function("js_process_pid", DOUBLE, &[]);
+    module.declare_function("js_process_ppid", DOUBLE, &[]);
+    module.declare_function("js_process_uptime", DOUBLE, &[]);
+    module.declare_function("js_process_version", I64, &[]);
+    module.declare_function("js_process_versions", DOUBLE, &[]);
+    module.declare_function("js_process_memory_usage", DOUBLE, &[]);
+    module.declare_function("js_process_hrtime_bigint", DOUBLE, &[]);
+    module.declare_function("js_process_chdir", VOID, &[I64]);
+    module.declare_function("js_process_kill", VOID, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_process_on", VOID, &[I64, I64]);
+    module.declare_function("js_process_next_tick", VOID, &[I64]);
+    module.declare_function("js_process_stdin", DOUBLE, &[]);
+    module.declare_function("js_process_stdout", DOUBLE, &[]);
+    module.declare_function("js_process_stderr", DOUBLE, &[]);
+    // os.* — also used by Expr::OsArch/Type/Platform/Release/Hostname/EOL.
+    module.declare_function("js_os_platform", I64, &[]);
+    module.declare_function("js_os_arch", I64, &[]);
+    module.declare_function("js_os_type", I64, &[]);
+    module.declare_function("js_os_release", I64, &[]);
+    module.declare_function("js_os_hostname", I64, &[]);
+    module.declare_function("js_os_eol", I64, &[]);
     // Heap-allocated mutable capture boxes.
     // See crates/perry-runtime/src/box.rs. These let multiple
     // closures share mutable state (e.g. a counter captured by
@@ -360,6 +413,16 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_define_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_object_get_own_property_descriptor", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_object_get_own_property_names", DOUBLE, &[DOUBLE]);
+    // Symbol runtime (perry-runtime/src/symbol.rs)
+    module.declare_function("js_symbol_new", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_symbol_new_empty", DOUBLE, &[]);
+    module.declare_function("js_symbol_for", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_symbol_key_for", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_symbol_description", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_symbol_to_string", I64, &[DOUBLE]);
+    module.declare_function("js_symbol_equals", I32, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_is_symbol", I32, &[DOUBLE]);
+    module.declare_function("js_object_get_own_property_symbols", I64, &[DOUBLE]);
     module.declare_function("js_object_create", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_freeze", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_seal", DOUBLE, &[DOUBLE]);
@@ -411,6 +474,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Error subclasses (Agent B's runtime work).
     module.declare_function("js_aggregateerror_new", I64, &[I64, I64]);
     module.declare_function("js_error_new_with_cause", I64, &[I64, DOUBLE]);
+    // AggregateError.errors field access — returns raw *ArrayHeader.
+    module.declare_function("js_error_get_errors", I64, &[I64]);
     // JSON full-featured stringify/parse (replacer + indent + reviver).
     module.declare_function("js_json_stringify_full", I64, &[DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_json_parse_with_reviver", I64, &[I64, I64]);

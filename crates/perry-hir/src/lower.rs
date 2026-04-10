@@ -4156,7 +4156,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 ast::UnaryOp::Plus => Ok(Expr::Unary { op: UnaryOp::Pos, operand }),
                 ast::UnaryOp::Bang => Ok(Expr::Unary { op: UnaryOp::Not, operand }),
                 ast::UnaryOp::Tilde => Ok(Expr::Unary { op: UnaryOp::BitNot, operand }),
-                ast::UnaryOp::TypeOf => Ok(Expr::TypeOf(operand)),
+                ast::UnaryOp::TypeOf => {
+                    // Fast path: known Symbol-producing expressions resolve to "symbol"
+                    // at compile time (avoids needing runtime js_value_typeof to
+                    // recognize the SymbolHeader magic).
+                    if matches!(&*operand, Expr::SymbolNew(_) | Expr::SymbolFor(_)) {
+                        return Ok(Expr::String("symbol".to_string()));
+                    }
+                    Ok(Expr::TypeOf(operand))
+                }
                 ast::UnaryOp::Delete => Ok(Expr::Delete(operand)),
                 ast::UnaryOp::Void => Ok(Expr::Void(operand)),
                 _ => Err(anyhow!("Unsupported unary operator: {:?}", unary.op)),
@@ -4439,6 +4447,27 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         }
                                         "getOwnPropertyNames" => {
                                             return Ok(Expr::ObjectGetOwnPropertyNames(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined))));
+                                        }
+                                        "getOwnPropertySymbols" => {
+                                            return Ok(Expr::ObjectGetOwnPropertySymbols(Box::new(args.into_iter().next().unwrap_or(Expr::Undefined))));
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
+                            // Check for Symbol static methods: Symbol.for / Symbol.keyFor
+                            if obj_name == "Symbol" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "for" => {
+                                            let key = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::SymbolFor(Box::new(key)));
+                                        }
+                                        "keyFor" => {
+                                            let sym = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::SymbolKeyFor(Box::new(sym)));
                                         }
                                         _ => {} // Fall through to generic handling
                                     }
@@ -7198,6 +7227,14 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     return Ok(Expr::QueueMicrotask(Box::new(args.remove(0))));
                                 } else {
                                     return Err(anyhow!("queueMicrotask requires one argument"));
+                                }
+                            }
+                            "Symbol" => {
+                                // Symbol() / Symbol(description)
+                                if args.is_empty() {
+                                    return Ok(Expr::SymbolNew(None));
+                                } else {
+                                    return Ok(Expr::SymbolNew(Some(Box::new(args.remove(0)))));
                                 }
                             }
                             "perryResolveStaticPlugin" => {

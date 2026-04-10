@@ -2588,6 +2588,17 @@ impl JsEmitter {
             Expr::ObjectIsSealed(obj) => { self.output.push_str("Object.isSealed("); self.emit_expr(obj); self.output.push(')'); }
             Expr::ObjectIsExtensible(obj) => { self.output.push_str("Object.isExtensible("); self.emit_expr(obj); self.output.push(')'); }
             Expr::ObjectGetPrototypeOf(obj) => { self.output.push_str("Object.getPrototypeOf("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectGetOwnPropertySymbols(obj) => { self.output.push_str("Object.getOwnPropertySymbols("); self.emit_expr(obj); self.output.push(')'); }
+            // Symbol stubs
+            Expr::SymbolNew(desc) => {
+                self.output.push_str("Symbol(");
+                if let Some(d) = desc { self.emit_expr(d); }
+                self.output.push(')');
+            }
+            Expr::SymbolFor(key) => { self.output.push_str("Symbol.for("); self.emit_expr(key); self.output.push(')'); }
+            Expr::SymbolKeyFor(sym) => { self.output.push_str("Symbol.keyFor("); self.emit_expr(sym); self.output.push(')'); }
+            Expr::SymbolDescription(sym) => { self.emit_expr(sym); self.output.push_str(".description"); }
+            Expr::SymbolToString(sym) => { self.emit_expr(sym); self.output.push_str(".toString()"); }
             // RegExp stubs
             Expr::RegExpExec { regex, string } => { self.emit_expr(regex); self.output.push_str(".exec("); self.emit_expr(string); self.output.push(')'); }
             Expr::RegExpSource(re) => { self.emit_expr(re); self.output.push_str(".source"); }
