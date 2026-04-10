@@ -534,6 +534,19 @@ pub(crate) fn lower_string_method(
             );
             Ok(blk.bitcast_i64_to_double(&tagged))
         }
+        // `.toString()` on a union-typed receiver (string | number) may
+        // arrive here when `is_string_expr` returned true because the
+        // union contains String. Dispatch through js_jsvalue_to_string
+        // which inspects the NaN tag at runtime — correct for both a
+        // real string and a narrowed number/bool/etc.
+        "toString" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &recv_box)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
         // Best-effort fallback: lower args for side effects, return
         // the receiver string. Compile succeeds; runtime gets the
         // pre-method-call value.

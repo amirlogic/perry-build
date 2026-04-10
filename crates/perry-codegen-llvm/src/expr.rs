@@ -517,8 +517,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         //   which dispatches on the NaN tag at runtime)
         Expr::Binary { op, left, right } => {
             if matches!(op, BinaryOp::Add) {
-                let l_is_str = is_string_expr(ctx, left);
-                let r_is_str = is_string_expr(ctx, right);
+                // Use the stricter `is_definitely_string_expr` check for
+                // the string-concat fast path. A union type `string|number`
+                // that happens to contain a number at runtime would get
+                // misrouted through lower_string_coerce_concat, which
+                // treats the operand as a string pointer (bitcast + mask)
+                // and reads garbage. The numeric Add path below handles
+                // narrowed-number unions correctly via js_number_coerce.
+                let l_is_str = crate::type_analysis::is_definitely_string_expr(ctx, left);
+                let r_is_str = crate::type_analysis::is_definitely_string_expr(ctx, right);
                 if l_is_str && r_is_str {
                     return lower_string_concat(ctx, left, right);
                 }
@@ -720,6 +727,58 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let tagged = blk.select(
                     crate::types::I1,
                     &bit,
+                    I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged));
+            }
+            // Null/Undefined literal fast path: `x === null` / `x === undefined` /
+            // `x !== null` etc. Both TAG_NULL and TAG_UNDEFINED are NaN-tagged
+            // doubles, so fcmp is unordered (always false) and the string/js_eq
+            // fallbacks misclassify these tags as "invalid string → both equal".
+            // Compare raw i64 bits directly.
+            //
+            // For LooseEq/LooseNe (== / !=), null and undefined are loosely
+            // equal to each other but not to anything else. Handle that by
+            // routing `x == null` to `(bits == TAG_NULL) | (bits == TAG_UNDEF)`.
+            let left_is_null = matches!(left.as_ref(), Expr::Null);
+            let left_is_undef = matches!(left.as_ref(), Expr::Undefined);
+            let right_is_null = matches!(right.as_ref(), Expr::Null);
+            let right_is_undef = matches!(right.as_ref(), Expr::Undefined);
+            let either_nullish_lit = left_is_null || left_is_undef || right_is_null || right_is_undef;
+            if either_nullish_lit
+                && matches!(op, CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe)
+            {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_bits = blk.bitcast_double_to_i64(&l);
+                let r_bits = blk.bitcast_double_to_i64(&r);
+                let is_loose = matches!(op, CompareOp::LooseEq | CompareOp::LooseNe);
+                let bit = if is_loose {
+                    // Loose equality: x == null → (x === null) || (x === undefined)
+                    let eq_l_r = blk.icmp_eq(I64, &l_bits, &r_bits);
+                    let cmp_l_null = blk.icmp_eq(I64, &l_bits, crate::nanbox::TAG_NULL_I64);
+                    let cmp_l_undef = blk.icmp_eq(I64, &l_bits, crate::nanbox::TAG_UNDEFINED_I64);
+                    let cmp_r_null = blk.icmp_eq(I64, &r_bits, crate::nanbox::TAG_NULL_I64);
+                    let cmp_r_undef = blk.icmp_eq(I64, &r_bits, crate::nanbox::TAG_UNDEFINED_I64);
+                    let l_nullish = blk.or(crate::types::I1, &cmp_l_null, &cmp_l_undef);
+                    let r_nullish = blk.or(crate::types::I1, &cmp_r_null, &cmp_r_undef);
+                    let both_nullish = blk.and(crate::types::I1, &l_nullish, &r_nullish);
+                    blk.or(crate::types::I1, &eq_l_r, &both_nullish)
+                } else {
+                    // Strict equality: bit-exact compare
+                    blk.icmp_eq(I64, &l_bits, &r_bits)
+                };
+                let bit_final = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
+                    blk.xor(crate::types::I1, &bit, "true")
+                } else {
+                    bit
+                };
+                let tagged = blk.select(
+                    crate::types::I1,
+                    &bit_final,
                     I64,
                     crate::nanbox::TAG_TRUE_I64,
                     crate::nanbox::TAG_FALSE_I64,

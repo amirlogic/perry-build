@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.123
+**Current Version:** 0.4.124
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.124 (llvm-backend)
+- fix: `x === null` / `x === undefined` on NaN-tagged values now bit-exact compares via `icmp_eq` on raw i64 bits, plus loose-equality `x == null` treats both TAG_NULL and TAG_UNDEFINED as nullish. Previously `is_string_expr` returned true for `x: string | null | undefined` (union contains String), routing the compare through `js_string_equals(0, 0)` which returns 1 → `process(undefined)` incorrectly returned "null". Added a null/undefined literal fast path ahead of the string/js_eq paths in `expr.rs::Expr::Compare`.
+- fix: `.toString()` on a union-typed receiver (`string | number`) now dispatches through `js_jsvalue_to_string` instead of the string fast path. `lower_string_method` added a `"toString"` arm that calls the runtime helper on the boxed double (no unboxing), so a narrowed number correctly prints its decimal form. `switchNarrowing(42)` → "n:42" (was "n:").
+- fix: `Expr::Binary { op: Add }` string-concat fast path now uses a stricter `is_definitely_string_expr` check. Unions containing String no longer force the concat path — `numSum + item` inside a typeof-narrowed number branch now hits the numeric add path with `js_number_coerce` fallback and correctly sums. `is_definitely_string_expr` still recognizes `.toString()` / trimmed / sliced / etc. so `i.toString() + j.toString()` remains a pure string concat. `sumOrConcat` narrowed-union test now passes.
+- `test_edge_type_narrowing` DIFF 12 → 2 lines.
 
 ### v0.4.123 (llvm-backend)
 - feat: advanced class features — `test_gap_class_advanced` DIFF 20 lines → 8 lines. Private methods (`#secret(): number`), private static methods (`static #helper()`), private getters/setters (`get #value()` / `set #value(v)`), static initialization blocks (`static { ... }`), class field initializers without a constructor (`class FieldInit { x: number = 5 }`), and class expressions bound to `const` (`const ExprClass = class { ... }; new ExprClass(...)`). HIR `lower_decl.rs` now handles `ast::ClassMember::PrivateMethod`/`StaticBlock` in both `lower_class_decl` and `lower_class_from_ast`, and adds `lower_private_method`/`lower_private_getter`/`lower_private_setter`. Static blocks become synthetic `__perry_static_init_N` static methods; `codegen.rs::init_static_fields` now also calls these at module init time. `lower_new` in the LLVM backend now applies field initializers recursively (root parent down) before the constructor body runs. `lower_call.rs` gets `apply_field_initializers_recursive`. `lower.rs` pre-scan for static methods now tracks PrivateMethod/PrivateProp so `WithPrivateStatic.#helper()` in `publicMethod` resolves via `has_static_method`. `codegen.rs` sanitizes static field/method names so `#helper` becomes `_helper` in LLVM identifiers. Class expression detection in `lower_stmt` binds `const X = class {}` to the class name `X` directly so `new X(...)` works unchanged.

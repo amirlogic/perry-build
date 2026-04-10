@@ -296,6 +296,72 @@ pub(crate) fn is_map_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     }
 }
 
+/// Stricter variant of `is_string_expr` that requires the type to be
+/// definitely `String` — unions are NOT treated as strings. Used in the
+/// string-concat fast path where dispatching through the string-only
+/// codegen on a non-string union value produces garbage (e.g. masking an
+/// f64 number's bits with POINTER_MASK yields a null pointer).
+///
+/// For JS `+` semantics on a union of string and number, the correct
+/// behavior depends on the runtime value: `1 + "foo"` concatenates,
+/// `1 + 42` adds. The generic numeric-add path (with `js_number_coerce`
+/// fallback) handles narrowed-numeric cases correctly and is safer than
+/// the string path when the value might actually be a number.
+pub(crate) fn is_definitely_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::String(_) => true,
+        Expr::LocalGet(id) => {
+            matches!(ctx.local_types.get(id), Some(HirType::String))
+        }
+        Expr::StringCoerce(_)
+        | Expr::TypeOf(_)
+        | Expr::ArrayJoin { .. }
+        | Expr::JsonStringify(_)
+        | Expr::JsonStringifyPretty { .. }
+        | Expr::JsonStringifyFull(..)
+        | Expr::StringFromCodePoint(_)
+        | Expr::StringFromCharCode(_)
+        | Expr::PathSep
+        | Expr::PathDelimiter
+        | Expr::PathJoin(..)
+        | Expr::PathDirname(_)
+        | Expr::PathBasename(_)
+        | Expr::PathExtname(_)
+        | Expr::PathResolve(_)
+        | Expr::PathNormalize(_)
+        | Expr::ProcessVersion
+        | Expr::ProcessCwd
+        | Expr::OsArch
+        | Expr::OsType
+        | Expr::OsPlatform
+        | Expr::OsRelease
+        | Expr::OsHostname
+        | Expr::OsEOL => true,
+        // `.toString()` always returns a string regardless of receiver
+        // type, so it's safe to count as definitely-string for concat.
+        // Same for other unary string-returning string methods.
+        Expr::Call { callee, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { property, .. } if matches!(
+                    property.as_str(),
+                    "toString" | "toLowerCase" | "toUpperCase" | "trim"
+                        | "trimStart" | "trimEnd" | "slice" | "substring"
+                        | "substr" | "charAt" | "repeat" | "replace"
+                        | "replaceAll" | "padStart" | "padEnd" | "concat"
+                        | "normalize" | "toFixed" | "toPrecision" | "toExponential"
+                )
+            ) =>
+        {
+            true
+        }
+        Expr::Binary { op: BinaryOp::Add, left, right } => {
+            is_definitely_string_expr(ctx, left) || is_definitely_string_expr(ctx, right)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
