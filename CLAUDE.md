@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.116
+**Current Version:** 0.4.117
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.117 (llvm-backend)
+- fix: `format_jsvalue`/`format_jsvalue_for_json` now cap nesting at Node's default `util.inspect` depth (2). Nested arrays collapse to `[Array]` and nested objects to `[Object]` past that level, so `console.log({ a: { b: { c: { d: 1 } } } })` prints `{ a: { b: { c: [Object] } } }` instead of the full tree.
+- fix: `format_jsvalue_for_json` array formatter now renders `[ 1, 2, 3 ]` with spaces inside the brackets (matching Node's `util.inspect`). Nested arrays inside `console.log({ nested: { arr: [1, 2, 3] } })` now print byte-for-byte with Node. Empty arrays still render as `[]`.
 
 ### v0.4.116 (llvm-backend)
 - feat: LLVM backend wires `WeakRef`/`FinalizationRegistry`/`atob`/`btoa` to the real runtime (`js_weakref_new`/`_deref`, `js_finreg_new`/`_register`/`_unregister`, `js_atob`/`_btoa`). Previously all 6 variants were passthrough/0.0 stubs. `collectors.rs::collect_closures_in_expr` now descends into `FinalizationRegistryNew(cb)` so inline cleanup callbacks get their LLVM function emitted (was failing with "use of undefined value @perry_closure_*"). `test_gap_global_apis` diff drops 58 → 50 lines (atob/btoa/unregistered now match Node); `test_gap_weakref_finalization` module-level WeakRef/FinRegistry now produce correct `hello`/`object`/`registered`/`unregistered` output.

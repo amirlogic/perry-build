@@ -359,7 +359,12 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         format!("{}: {}", name_str, message_str)
                     }
                 } else if gc_type == crate::gc::GC_TYPE_ARRAY {
-                    // Array — format as [ elem1, elem2, ... ] matching Node.js util.inspect
+                    // Array — format as [ elem1, elem2, ... ] matching Node.js util.inspect.
+                    // Node's default depth cap is 2: anything more than 2
+                    // levels of nesting collapses to `[Array]`.
+                    if depth > 2 {
+                        return "[Array]".to_string();
+                    }
                     let maybe_arr = ptr;
                     let length = (*maybe_arr).length as usize;
                     let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
@@ -389,7 +394,11 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         format!("[ {} ]", inner)
                     }
                 } else if gc_type == crate::gc::GC_TYPE_OBJECT {
-                    // Object — check for keys_array
+                    // Object — check for keys_array. Node's default depth
+                    // cap is 2: anything past that collapses to `[Object]`.
+                    if depth > 2 {
+                        return "[Object]".to_string();
+                    }
                     let obj_ptr = ptr as *const crate::object::ObjectHeader;
                     let keys_array = (*obj_ptr).keys_array;
 
@@ -471,7 +480,13 @@ unsafe fn format_buffer_value(buf_ptr: *const crate::buffer::BufferHeader) -> St
 }
 
 /// Format an object as JSON-like string
-/// Reads keys from the keys_array and values from the fields
+/// Reads keys from the keys_array and values from the fields.
+///
+/// `depth` is the current nesting level: `format_jsvalue`/`format_jsvalue_for_json`
+/// invoke this with `depth = 0` for the outermost object, and each nested
+/// object recurses with `depth + 1`. The hard cap at depth > 10 remains as a
+/// crash safety net for cyclic structures; the Node-style `[Object]` truncation
+/// at depth > 2 is enforced by `format_jsvalue_for_json` on the way in.
 unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, depth: usize) -> String {
     if depth > 10 {
         return "{...}".to_string();
@@ -516,6 +531,12 @@ unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, dep
 }
 
 /// Format a JSValue for JSON output (strings get quotes)
+///
+/// Node's `util.inspect` default options truncate nested objects at depth 2 —
+/// anything past that prints as `[Object]` / `[Array]`. We mirror that so
+/// `console.log({ a: { b: { c: { d: 1 } } } })` matches Node byte-for-byte.
+/// The hard guard at depth > 10 remains as a crash safety net for pathological
+/// cyclic structures.
 fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
     if depth > 10 {
         return "\"...\"".to_string();
@@ -602,6 +623,11 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                     let gc_type = (*gc_header).obj_type;
 
                     if gc_type == crate::gc::GC_TYPE_ARRAY {
+                        // Node's default depth cap: beyond 2 levels of
+                        // nesting, arrays collapse to `[Array]`.
+                        if depth > 2 {
+                            return "[Array]".to_string();
+                        }
                         let maybe_arr = ptr;
                         let length = (*maybe_arr).length as usize;
                         if length > 1_000_000 {
@@ -613,8 +639,20 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                             let elem_value = *data_ptr.add(i);
                             parts.push(format_jsvalue_for_json(elem_value, depth + 1));
                         }
-                        format!("[{}]", parts.join(", "))
+                        // Node formats empty arrays as `[]` and non-empty
+                        // arrays with a space inside the brackets:
+                        // `[ 1, 2, 3 ]`. Match byte-for-byte.
+                        if length == 0 {
+                            "[]".to_string()
+                        } else {
+                            format!("[ {} ]", parts.join(", "))
+                        }
                     } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                        // Past Node's default depth cap, nested objects
+                        // collapse to the literal token `[Object]`.
+                        if depth > 2 {
+                            return "[Object]".to_string();
+                        }
                         let obj_ptr = ptr as *const crate::object::ObjectHeader;
                         let keys_array = (*obj_ptr).keys_array;
                         if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
