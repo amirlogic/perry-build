@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.127
+**Current Version:** 0.4.128
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.128 (llvm-backend)
+- fix: `pre_scan_weakref_locals` in `lower.rs` didn't descend into function bodies — only walked top-level statements, block/if/while/for/try/switch. Function declarations were skipped, so `function f() { const ref = new WeakRef(x); ref.deref(); }` didn't register `ref` as a weakref local and `ref.deref()` fell through to the generic method dispatch (which returns undefined). Added `ast::Decl::Fn(...)` descent. Same fix needed for WeakMap/WeakSet/FinalizationRegistry/Proxy via `record_var`'s switch. `test_gap_weakref_finalization` DIFF 18 → MATCH.
 
 ### v0.4.127 (llvm-backend)
 - feat: `test_gap_weakref_finalization` DIFF 18 → 1. WeakMap/WeakSet dispatch now works end-to-end:

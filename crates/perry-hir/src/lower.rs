@@ -782,6 +782,17 @@ fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) 
                     record_var(decl, ctx);
                 }
             }
+            // Function declarations — descend into the body so `const
+            // ref = new WeakRef(x)` inside a function is still tracked
+            // and `ref.deref()` lowers to `Expr::WeakRefDeref` instead
+            // of falling through to the generic method dispatch.
+            ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) => {
+                if let Some(body) = &fn_decl.function.body {
+                    for s in &body.stmts {
+                        walk_stmt(s, ctx);
+                    }
+                }
+            }
             ast::Stmt::Block(block) => {
                 for s in &block.stmts {
                     walk_stmt(s, ctx);
