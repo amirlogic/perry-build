@@ -678,4 +678,24 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_array_alloc_with_length", I64, &[I32]);
     // Unchecked array set (plain array, no buffer/Set/Map dispatch).
     module.declare_function("js_array_set_f64_unchecked", VOID, &[I64, I32, DOUBLE]);
+
+    // --- Proxy / Reflect ---
+    module.declare_function("js_proxy_new", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_revoke", VOID, &[DOUBLE]);
+    module.declare_function("js_proxy_is_revoked", I32, &[DOUBLE]);
+    module.declare_function("js_proxy_is_proxy", I32, &[DOUBLE]);
+    module.declare_function("js_proxy_target", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_proxy_get", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_set", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_has", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_delete", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_apply", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_proxy_construct", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_get", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_set", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_has", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_delete", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_own_keys", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_reflect_apply", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_reflect_define_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
 }

@@ -143,13 +143,9 @@ pub extern "C" fn js_proxy_target(proxy_boxed: f64) -> f64 {
 /// Helper: fetch the trap closure from the handler object by name. Returns
 /// TAG_UNDEFINED if the handler has no such trap.
 fn handler_trap(handler: f64, trap_name: &str) -> f64 {
-    // Build a string handle for the trap name and route through the standard
-    // object field lookup. Handler is NaN-boxed pointer.
     unsafe {
         let key = crate::string::js_string_from_bytes(trap_name.as_ptr(), trap_name.len() as u32);
-        // Strip POINTER_TAG to get raw object pointer.
-        let obj_bits = handler.to_bits();
-        let obj_ptr = (obj_bits & POINTER_MASK) as *const crate::ObjectHeader;
+        let obj_ptr = extract_pointer(handler.to_bits()) as *const crate::ObjectHeader;
         if obj_ptr.is_null() {
             return f64::from_bits(TAG_UNDEFINED);
         }
@@ -214,15 +210,25 @@ pub extern "C" fn js_proxy_get(proxy_boxed: f64, key: f64) -> f64 {
     target_get(target, key)
 }
 
+/// Extract a raw heap pointer (48-bit) from either a NaN-boxed value
+/// (POINTER_TAG / STRING_TAG) or a raw i64/f64-reinterpreted pointer
+/// (module-level globals store Arrays/Objects as raw I64s, not NaN-boxed).
+fn extract_pointer(bits: u64) -> u64 {
+    let top = bits >> 48;
+    if top == 0x7FFD || top == 0x7FFF {
+        bits & POINTER_MASK
+    } else if top == 0 {
+        // Raw untagged pointer (module-level I64 global).
+        bits
+    } else {
+        0
+    }
+}
+
 fn target_get(target: f64, key: f64) -> f64 {
-    // If the target is a function/closure, and we're indexing by a string
-    // name, defer to `js_object_has_property`? No — the only test path that
-    // reaches here is a regular object. Use the generic by-name getter.
     unsafe {
-        let target_bits = target.to_bits();
-        let obj_ptr = (target_bits & POINTER_MASK) as *const crate::ObjectHeader;
-        let key_bits = key.to_bits();
-        let key_ptr = (key_bits & POINTER_MASK) as *const crate::StringHeader;
+        let obj_ptr = extract_pointer(target.to_bits()) as *const crate::ObjectHeader;
+        let key_ptr = extract_pointer(key.to_bits()) as *const crate::StringHeader;
         if obj_ptr.is_null() || key_ptr.is_null() {
             return f64::from_bits(TAG_UNDEFINED);
         }
@@ -268,10 +274,8 @@ pub extern "C" fn js_proxy_set(proxy_boxed: f64, key: f64, value: f64) -> f64 {
 
 fn target_set(target: f64, key: f64, value: f64) {
     unsafe {
-        let target_bits = target.to_bits();
-        let obj_ptr = (target_bits & POINTER_MASK) as *mut crate::ObjectHeader;
-        let key_bits = key.to_bits();
-        let key_ptr = (key_bits & POINTER_MASK) as *const crate::StringHeader;
+        let obj_ptr = extract_pointer(target.to_bits()) as *mut crate::ObjectHeader;
+        let key_ptr = extract_pointer(key.to_bits()) as *const crate::StringHeader;
         if obj_ptr.is_null() || key_ptr.is_null() {
             return;
         }
@@ -341,10 +345,8 @@ pub extern "C" fn js_proxy_delete(proxy_boxed: f64, key: f64) -> f64 {
     }
     // Forward to target.
     unsafe {
-        let target_bits = target.to_bits();
-        let obj_ptr = (target_bits & POINTER_MASK) as *mut crate::ObjectHeader;
-        let key_bits = key.to_bits();
-        let key_ptr = (key_bits & POINTER_MASK) as *const crate::StringHeader;
+        let obj_ptr = extract_pointer(target.to_bits()) as *mut crate::ObjectHeader;
+        let key_ptr = extract_pointer(key.to_bits()) as *const crate::StringHeader;
         if !obj_ptr.is_null() && !key_ptr.is_null() {
             crate::object::js_object_delete_field(obj_ptr, key_ptr);
         }
@@ -495,10 +497,8 @@ pub extern "C" fn js_reflect_delete(target: f64, key: f64) -> f64 {
         return js_proxy_delete(target, key);
     }
     unsafe {
-        let target_bits = target.to_bits();
-        let obj_ptr = (target_bits & POINTER_MASK) as *mut crate::ObjectHeader;
-        let key_bits = key.to_bits();
-        let key_ptr = (key_bits & POINTER_MASK) as *const crate::StringHeader;
+        let obj_ptr = extract_pointer(target.to_bits()) as *mut crate::ObjectHeader;
+        let key_ptr = extract_pointer(key.to_bits()) as *const crate::StringHeader;
         if !obj_ptr.is_null() && !key_ptr.is_null() {
             crate::object::js_object_delete_field(obj_ptr, key_ptr);
         }
