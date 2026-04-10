@@ -3567,36 +3567,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
             Ok(double_literal(0.0))
         }
-        Expr::TextEncoderNew => {
-            // Stateless UTF-8 encoder — return a non-null sentinel pointer.
-            // NaN-box with POINTER_TAG so `typeof encoder === "object"` holds.
-            let blk = ctx.block();
-            let h = blk.call(I64, "js_text_encoder_new", &[]);
-            Ok(nanbox_pointer_inline(blk, &h))
-        }
-        Expr::TextDecoderNew => {
-            let blk = ctx.block();
-            let h = blk.call(I64, "js_text_decoder_new", &[]);
-            Ok(nanbox_pointer_inline(blk, &h))
-        }
-        Expr::TextEncoderEncode(o) => {
-            // encoder.encode(str) — runtime returns an i64 pointer to an
-            // ArrayHeader whose f64 elements hold the UTF-8 byte values.
-            // NaN-box with POINTER_TAG so `.length` / `[i]` inline paths
-            // can unbox it as an array handle.
-            let v = lower_expr(ctx, o)?;
-            let blk = ctx.block();
-            let arr_ptr = blk.call(I64, "js_text_encoder_encode_llvm", &[(DOUBLE, &v)]);
-            Ok(nanbox_pointer_inline(blk, &arr_ptr))
-        }
-        Expr::TextDecoderDecode(o) => {
-            // decoder.decode(bufOrArr) — runtime returns an i64 string
-            // pointer. NaN-box with STRING_TAG.
-            let v = lower_expr(ctx, o)?;
-            let blk = ctx.block();
-            let str_ptr = blk.call(I64, "js_text_decoder_decode_llvm", &[(DOUBLE, &v)]);
-            Ok(nanbox_string_inline(blk, &str_ptr))
-        }
+        Expr::TextEncoderNew | Expr::TextDecoderNew => Ok(double_literal(0.0)),
+        Expr::TextEncoderEncode(o) | Expr::TextDecoderDecode(o) => lower_expr(ctx, o),
         Expr::OsArch | Expr::OsType | Expr::OsPlatform | Expr::OsRelease | Expr::OsHostname => {
             Ok(double_literal(0.0))
         }
