@@ -2922,8 +2922,44 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // We don't actually iterate; just lower the callback for side
         // effects (so closures get auto-collected) and return undefined.
         Expr::ArrayForEach { array, callback } => {
-            let _ = lower_expr(ctx, array)?;
-            let _ = lower_expr(ctx, callback)?;
+            // Lower as: for (let i = 0; i < arr.length; i++)
+            //              callback(arr[i], i);
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            // Load length.
+            let len_ptr = blk.inttoptr(I64, &arr_handle);
+            let len_i32 = blk.load(I32, &len_ptr);
+            // Loop: for i = 0; i < len; i++
+            let cond_idx = ctx.new_block("foreach.cond");
+            let body_idx = ctx.new_block("foreach.body");
+            let exit_idx = ctx.new_block("foreach.exit");
+            let cond_lbl = ctx.block_label(cond_idx);
+            let body_lbl = ctx.block_label(body_idx);
+            let exit_lbl = ctx.block_label(exit_idx);
+            // i alloca
+            let i_slot = ctx.block().alloca(I32);
+            ctx.block().store(I32, "0", &i_slot);
+            ctx.block().br(&cond_lbl);
+            // cond: i < len
+            ctx.current_block = cond_idx;
+            let i_val = ctx.block().load(I32, &i_slot);
+            let cmp = ctx.block().icmp_slt(I32, &i_val, &len_i32);
+            ctx.block().cond_br(&cmp, &body_lbl, &exit_lbl);
+            // body: callback(arr[i], i)
+            ctx.current_block = body_idx;
+            let i_cur = ctx.block().load(I32, &i_slot);
+            let elem = ctx.block().call(DOUBLE, "js_array_get_f64", &[(I64, &arr_handle), (I32, &i_cur)]);
+            let i_f64 = ctx.block().sitofp(I32, &i_cur, DOUBLE);
+            ctx.block().call(DOUBLE, "js_closure_call2", &[(I64, &cb_handle), (DOUBLE, &elem), (DOUBLE, &i_f64)]);
+            // i++
+            let i_next = ctx.block().add(I32, &i_cur, "1");
+            ctx.block().store(I32, &i_next, &i_slot);
+            ctx.block().br(&cond_lbl);
+            // exit
+            ctx.current_block = exit_idx;
             Ok(double_literal(0.0))
         }
 

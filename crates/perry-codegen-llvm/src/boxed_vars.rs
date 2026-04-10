@@ -368,6 +368,26 @@ fn collect_closure_refs_and_writes_in_expr(
         Expr::ArrayPush { value, .. } => {
             collect_closure_refs_and_writes_in_expr(value, refs, writes);
         }
+        // Array HOF expressions that carry a callback — the callback
+        // is often a Closure whose body may capture and mutate outer
+        // variables. Without walking these, mutable captures inside
+        // arr.forEach/map/filter/flatMap callbacks aren't detected
+        // and don't get boxed.
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            collect_closure_refs_and_writes_in_expr(array, refs, writes);
+            collect_closure_refs_and_writes_in_expr(callback, refs, writes);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            collect_closure_refs_and_writes_in_expr(array, refs, writes);
+            collect_closure_refs_and_writes_in_expr(callback, refs, writes);
+            if let Some(init) = initial {
+                collect_closure_refs_and_writes_in_expr(init, refs, writes);
+            }
+        }
         _ => {}
     }
 }
