@@ -1045,20 +1045,53 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     &[(I64, &obj_handle), (I64, &key_handle)],
                 ));
             }
-            // Last-resort fallback: call js_array_get_f64 which handles
-            // arrays, buffers, sets, maps polymorphically. For object
-            // field access by dynamic string key (e.g. obj[key] where
-            // key comes from a closure), route through
-            // js_object_get_field_by_name_f64 instead.
-            let arr_box = lower_expr(ctx, object)?;
+            // Last-resort fallback with runtime tag check on the index.
+            // If the index has STRING_TAG (0x7FFF) in top 16 bits,
+            // use object field access. Otherwise, inline array path.
+            let obj_box = lower_expr(ctx, object)?;
             let idx_box = lower_expr(ctx, index)?;
             let blk = ctx.block();
-            let arr_handle = unbox_to_i64(blk, &arr_box);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
-            Ok(blk.call(
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let idx_bits = blk.bitcast_double_to_i64(&idx_box);
+            let top16 = blk.lshr(I64, &idx_bits, "48");
+            // STRING_TAG = 0x7FFF AND lower 48 bits >= 0x1000 (valid ptr)
+            let is_str_tag = blk.icmp_eq(I64, &top16, "32767");
+            let lower48 = blk.and(I64, &idx_bits, POINTER_MASK_I64);
+            let is_valid_ptr = blk.icmp_ugt(I64, &lower48, "4095");
+            let is_str = blk.and(crate::types::I1, &is_str_tag, &is_valid_ptr);
+            let str_idx = ctx.new_block("iget.str");
+            let num_idx = ctx.new_block("iget.num");
+            let merge_idx = ctx.new_block("iget.merge");
+            let str_lbl = ctx.block_label(str_idx);
+            let num_lbl = ctx.block_label(num_idx);
+            let merge_lbl = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&is_str, &str_lbl, &num_lbl);
+            // String key → object field access.
+            ctx.current_block = str_idx;
+            let key_handle = ctx.block().and(I64, &idx_bits, POINTER_MASK_I64);
+            let v_str = ctx.block().call(
                 DOUBLE,
-                "js_array_get_f64",
-                &[(I64, &arr_handle), (I32, &idx_i32)],
+                "js_object_get_field_by_name_f64",
+                &[(I64, &obj_handle), (I64, &key_handle)],
+            );
+            let str_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&merge_lbl);
+            // Numeric key → inline array-style read (offset 8+idx*8).
+            ctx.current_block = num_idx;
+            let idx_i32 = ctx.block().fptosi(DOUBLE, &idx_box, I32);
+            let idx_i64 = ctx.block().zext(I32, &idx_i32, I64);
+            let byte_off = ctx.block().shl(I64, &idx_i64, "3");
+            let with_hdr = ctx.block().add(I64, &byte_off, "8");
+            let elem_addr = ctx.block().add(I64, &obj_handle, &with_hdr);
+            let elem_ptr = ctx.block().inttoptr(I64, &elem_addr);
+            let v_num = ctx.block().load(DOUBLE, &elem_ptr);
+            let num_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&merge_lbl);
+            // Merge.
+            ctx.current_block = merge_idx;
+            Ok(ctx.block().phi(
+                DOUBLE,
+                &[(&v_str, &str_end_lbl), (&v_num, &num_end_lbl)],
             ))
         }
 
@@ -1181,24 +1214,47 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 );
                 return Ok(val_double);
             }
-            // Fallback: inline array-style write at obj + 8 + idx*8.
-            // Same layout assumption as the IndexGet fallback. Works
-            // for arrays/tuples (8-byte header + elements). For
-            // objects this writes at the wrong offset (objects have
-            // 24-byte headers) but is consistent with the GET path.
-            let arr_box = lower_expr(ctx, object)?;
-            let idx_double = lower_expr(ctx, index)?;
+            // Fallback with runtime STRING_TAG check, matching IndexGet.
+            let obj_box = lower_expr(ctx, object)?;
+            let idx_box = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
             let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            let idx_i64 = blk.zext(I32, &idx_i32, I64);
-            let byte_offset = blk.shl(I64, &idx_i64, "3");
-            let with_header = blk.add(I64, &byte_offset, "8");
-            let element_addr = blk.add(I64, &arr_handle, &with_header);
-            let element_ptr = blk.inttoptr(I64, &element_addr);
-            blk.store(DOUBLE, &val_double, &element_ptr);
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let idx_bits = blk.bitcast_double_to_i64(&idx_box);
+            let top16 = blk.lshr(I64, &idx_bits, "48");
+            let is_str_tag = blk.icmp_eq(I64, &top16, "32767");
+            let lower48 = blk.and(I64, &idx_bits, POINTER_MASK_I64);
+            let is_valid_ptr = blk.icmp_ugt(I64, &lower48, "4095");
+            let is_str = blk.and(crate::types::I1, &is_str_tag, &is_valid_ptr);
+            let str_set = ctx.new_block("iset.str");
+            let num_set = ctx.new_block("iset.num");
+            let set_merge = ctx.new_block("iset.merge");
+            let str_lbl = ctx.block_label(str_set);
+            let num_lbl = ctx.block_label(num_set);
+            let merge_lbl = ctx.block_label(set_merge);
+            ctx.block().cond_br(&is_str, &str_lbl, &num_lbl);
+            // String key → object field set.
+            ctx.current_block = str_set;
+            let key_handle = ctx.block().and(I64, &idx_bits, POINTER_MASK_I64);
+            ctx.block().call_void(
+                "js_object_set_field_by_name",
+                &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
+            );
+            ctx.block().br(&merge_lbl);
+            // Numeric key → inline array-style write (offset 8+idx*8).
+            ctx.current_block = num_set;
+            {
+                let blk = ctx.block();
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
+                let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                let byte_off = blk.shl(I64, &idx_i64, "3");
+                let with_hdr = blk.add(I64, &byte_off, "8");
+                let elem_addr = blk.add(I64, &obj_handle, &with_hdr);
+                let elem_ptr = blk.inttoptr(I64, &elem_addr);
+                blk.store(DOUBLE, &val_double, &elem_ptr);
+            }
+            ctx.block().br(&merge_lbl);
+            ctx.current_block = set_merge;
             Ok(val_double)
         }
 
