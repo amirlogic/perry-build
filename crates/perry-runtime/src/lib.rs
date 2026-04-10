@@ -47,6 +47,7 @@ pub mod stdlib_stubs;
 pub mod plugin;
 pub mod thread;
 pub mod geisterhand_registry;
+pub mod proxy;
 #[cfg(all(any(target_os = "ios", target_os = "tvos"), feature = "ios-game-loop"))]
 pub mod ios_game_loop;
 

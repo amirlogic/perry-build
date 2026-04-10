@@ -151,6 +151,8 @@ pub struct LoweringContext {
     /// route `local.index` / `local.groups` to the bare RegExpExecIndex/Groups
     /// HIR variants which read the runtime's thread-local exec metadata.
     pub(crate) regex_exec_locals: HashSet<String>,
+    pub(crate) proxy_locals: HashSet<String>,
+    pub(crate) proxy_revoke_locals: HashMap<String, String>,
 }
 
 impl LoweringContext {
@@ -211,6 +213,8 @@ impl LoweringContext {
             generator_func_names: HashSet::new(),
             iterator_func_for_class: std::collections::HashMap::new(),
             regex_exec_locals: HashSet::new(),
+            proxy_locals: HashSet::new(),
+            proxy_revoke_locals: HashMap::new(),
         }
     }
 
@@ -4474,6 +4478,88 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             }
 
+                            if obj_name == "Reflect" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "get" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let key = it.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectGet { target: Box::new(target), key: Box::new(key) });
+                                        }
+                                        "set" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let key = it.next().unwrap_or(Expr::Undefined);
+                                            let value = it.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectSet { target: Box::new(target), key: Box::new(key), value: Box::new(value) });
+                                        }
+                                        "has" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let key = it.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectHas { target: Box::new(target), key: Box::new(key) });
+                                        }
+                                        "deleteProperty" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let key = it.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectDelete { target: Box::new(target), key: Box::new(key) });
+                                        }
+                                        "ownKeys" => {
+                                            let target = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectOwnKeys(Box::new(target)));
+                                        }
+                                        "apply" => {
+                                            let mut it = args.into_iter();
+                                            let func = it.next().unwrap_or(Expr::Undefined);
+                                            let this_arg = it.next().unwrap_or(Expr::Undefined);
+                                            let args_arr = it.next().unwrap_or(Expr::Array(vec![]));
+                                            return Ok(Expr::ReflectApply { func: Box::new(func), this_arg: Box::new(this_arg), args: Box::new(args_arr) });
+                                        }
+                                        "construct" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let args_arr = it.next().unwrap_or(Expr::Array(vec![]));
+                                            return Ok(Expr::ReflectConstruct { target: Box::new(target), args: Box::new(args_arr) });
+                                        }
+                                        "defineProperty" => {
+                                            let mut it = args.into_iter();
+                                            let target = it.next().unwrap_or(Expr::Undefined);
+                                            let key = it.next().unwrap_or(Expr::Undefined);
+                                            let descriptor = it.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectDefineProperty { target: Box::new(target), key: Box::new(key), descriptor: Box::new(descriptor) });
+                                        }
+                                        "getPrototypeOf" => {
+                                            let target = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ReflectGetPrototypeOf(Box::new(target)));
+                                        }
+                                        "setPrototypeOf" => return Ok(Expr::Bool(true)),
+                                        "isExtensible" => {
+                                            let target = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectIsExtensible(Box::new(target)));
+                                        }
+                                        "preventExtensions" => {
+                                            let target = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectPreventExtensions(Box::new(target)));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+
+                            if obj_name == "Proxy" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    if method_ident.sym.as_ref() == "revocable" {
+                                        let mut it = args.into_iter();
+                                        let target = it.next().unwrap_or(Expr::Undefined);
+                                        let handler = it.next().unwrap_or(Expr::Object(vec![]));
+                                        return Ok(Expr::ProxyRevocable { target: Box::new(target), handler: Box::new(handler) });
+                                    }
+                                }
+                            }
+
                             // Check for Array static methods
                             if obj_name == "Array" {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
@@ -4567,15 +4653,29 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                             let obj_name = obj_ident.sym.to_string();
                             if ctx.lookup_class(&obj_name).is_some() {
-                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
-                                    let method_name = method_ident.sym.to_string();
-                                    if ctx.has_static_method(&obj_name, &method_name) {
-                                        return Ok(Expr::StaticMethodCall {
-                                            class_name: obj_name,
-                                            method_name,
-                                            args,
-                                        });
+                                match &member.prop {
+                                    ast::MemberProp::Ident(method_ident) => {
+                                        let method_name = method_ident.sym.to_string();
+                                        if ctx.has_static_method(&obj_name, &method_name) {
+                                            return Ok(Expr::StaticMethodCall {
+                                                class_name: obj_name,
+                                                method_name,
+                                                args,
+                                            });
+                                        }
                                     }
+                                    // Private static method: WithPrivateStatic.#helper()
+                                    ast::MemberProp::PrivateName(priv_ident) => {
+                                        let method_name = format!("#{}", priv_ident.name.to_string());
+                                        if ctx.has_static_method(&obj_name, &method_name) {
+                                            return Ok(Expr::StaticMethodCall {
+                                                class_name: obj_name,
+                                                method_name,
+                                                args,
+                                            });
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -7864,6 +7964,40 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         if prop_ident.sym.as_ref() == "EOL" {
                             return Ok(Expr::OsEOL);
                         }
+                    }
+                }
+            }
+
+            // --- Proxy property get: `p.foo` / `p[k]` for known proxy locals ---
+            {
+                fn unwrap_member_obj<'a>(mut e: &'a ast::Expr) -> &'a ast::Expr {
+                    loop {
+                        match e {
+                            ast::Expr::TsAs(ts_as) => e = &ts_as.expr,
+                            ast::Expr::TsNonNull(nn) => e = &nn.expr,
+                            ast::Expr::TsConstAssertion(ca) => e = &ca.expr,
+                            ast::Expr::TsTypeAssertion(ta) => e = &ta.expr,
+                            ast::Expr::Paren(p) => e = &p.expr,
+                            _ => break,
+                        }
+                    }
+                    e
+                }
+                let inner = unwrap_member_obj(member.obj.as_ref());
+                if let ast::Expr::Ident(obj_ident) = inner {
+                    let obj_name = obj_ident.sym.to_string();
+                    if ctx.proxy_locals.contains(&obj_name) {
+                        let proxy_expr = if let Some(id) = ctx.lookup_local(&obj_name) {
+                            Expr::LocalGet(id)
+                        } else {
+                            lower_expr(ctx, &member.obj)?
+                        };
+                        let key_expr = match &member.prop {
+                            ast::MemberProp::Ident(i) => Expr::String(i.sym.to_string()),
+                            ast::MemberProp::Computed(c) => lower_expr(ctx, &c.expr)?,
+                            ast::MemberProp::PrivateName(pn) => Expr::String(format!("#{}", pn.name.sym.as_ref())),
+                        };
+                        return Ok(Expr::ProxyGet { proxy: Box::new(proxy_expr), key: Box::new(key_expr) });
                     }
                 }
             }

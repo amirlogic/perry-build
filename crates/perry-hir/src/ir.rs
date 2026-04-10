@@ -1719,6 +1719,26 @@ pub enum Expr {
     /// import.meta.url - returns the URL of the current module
     /// The string is the file:// URL of the source file
     ImportMetaUrl(String),
+
+    // --- Proxy / Reflect (metaprogramming) -----------------------------
+    ProxyNew { target: Box<Expr>, handler: Box<Expr> },
+    ProxyGet { proxy: Box<Expr>, key: Box<Expr> },
+    ProxySet { proxy: Box<Expr>, key: Box<Expr>, value: Box<Expr> },
+    ProxyHas { proxy: Box<Expr>, key: Box<Expr> },
+    ProxyDelete { proxy: Box<Expr>, key: Box<Expr> },
+    ProxyApply { proxy: Box<Expr>, args: Vec<Expr> },
+    ProxyConstruct { proxy: Box<Expr>, args: Vec<Expr> },
+    ProxyRevocable { target: Box<Expr>, handler: Box<Expr> },
+    ProxyRevoke(Box<Expr>),
+    ReflectGet { target: Box<Expr>, key: Box<Expr> },
+    ReflectSet { target: Box<Expr>, key: Box<Expr>, value: Box<Expr> },
+    ReflectHas { target: Box<Expr>, key: Box<Expr> },
+    ReflectDelete { target: Box<Expr>, key: Box<Expr> },
+    ReflectOwnKeys(Box<Expr>),
+    ReflectApply { func: Box<Expr>, this_arg: Box<Expr>, args: Box<Expr> },
+    ReflectConstruct { target: Box<Expr>, args: Box<Expr> },
+    ReflectDefineProperty { target: Box<Expr>, key: Box<Expr>, descriptor: Box<Expr> },
+    ReflectGetPrototypeOf(Box<Expr>),
 }
 
 /// Binary operators
