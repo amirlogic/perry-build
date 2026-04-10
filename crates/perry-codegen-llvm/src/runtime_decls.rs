@@ -505,6 +505,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_promise_state", I32, &[I64]);
     module.declare_function("js_promise_value", DOUBLE, &[I64]);
     module.declare_function("js_promise_reason", DOUBLE, &[I64]);
+    // Safe guard used by `Expr::Await` to detect non-promise
+    // operands before unboxing. Takes a NaN-boxed f64, returns
+    // 1 if it points at a GC_TYPE_PROMISE allocation else 0.
+    module.declare_function("js_value_is_promise", I32, &[DOUBLE]);
     module.declare_function("js_promise_run_microtasks", I32, &[]);
     // js_stdlib_process_pending intentionally not declared — see
     // the await-loop comment in expr.rs for the dead-strip rationale.

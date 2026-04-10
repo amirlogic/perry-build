@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.120
+**Current Version:** 0.4.121
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.121 (llvm-backend)
+- fix: `test_gap_async_advanced` LLVM_CRASH → DIFF. Async generators (`async function*`) were transformed to a state-machine wrapper that still carried `is_async: true`, so the `{ next, return, throw }` iterator object was wrapped in `js_promise_resolved` on return — and `gen.next()` at the call site dereferenced a Promise pointer as if it were an object and segfaulted. `perry-transform::generator.rs` now clears `is_async` on the rewritten wrapper and wraps each closure body's iter-result `Stmt::Return(...)` in `Promise.resolve(...)` (via `wrap_returns_in_promise`) so `await gen.next()` still gets `{ value, done }`.
+- fix: `Expr::Await` lowering in the LLVM backend now guards with a new `js_value_is_promise(f64) -> i32` runtime helper (GC-type check in `promise.rs`). If the awaited value isn't actually a `GC_TYPE_PROMISE` allocation (e.g. `await someNumber`, or `await Promise.any([...])` where the codegen fell through to a non-promise fallback), the merge block returns the boxed operand directly instead of polling `js_promise_state` on a garbage pointer. This matches JS's "await non-promise returns the value itself" semantics and eliminates the secondary crash inside `testPromiseAnyAllReject`.
 
 ### v0.4.120 (llvm-backend)
 - fix: `js_date_get_utc_hours`/`_utc_minutes`/`_utc_seconds` were delegating to the LOCAL-time getters (`js_date_get_hours` etc.) via a one-line shim, so `d.getUTCHours()` returned local hours and mismatched Node on any non-UTC system. Replaced the shims with direct `timestamp_to_components` (UTC) calls.

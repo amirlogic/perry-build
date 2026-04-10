@@ -142,8 +142,94 @@ fn make_iter_result(value: Expr, done: bool) -> Expr {
     ])
 }
 
+/// Wrap any expression in `Promise.resolve(expr)`. Used by async
+/// generators so `gen.next()` returns a Promise the caller can
+/// `await`, matching JS async-iterator semantics.
+///
+/// We build the same HIR shape that `Promise.resolve(x)` sourced
+/// from user code would produce (`Call { callee: PropertyGet {
+/// GlobalGet(0), "resolve" }, args: [x] }`), which the codegen
+/// already recognizes and lowers via `js_promise_resolved`.
+fn wrap_in_promise_resolve(value: Expr) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::PropertyGet {
+            object: Box::new(Expr::GlobalGet(0)),
+            property: "resolve".to_string(),
+        }),
+        args: vec![value],
+        type_args: vec![],
+    }
+}
+
+/// Walk a statement list and wrap every `Stmt::Return(Some(v))`
+/// in `Promise.resolve(v)`. Recurses through If/While/For/Try/Switch
+/// bodies so nested returns inside the state-machine's if-chain are
+/// all covered. Used on `.next()` / `.return()` / `.throw()` closure
+/// bodies of async generators.
+fn wrap_returns_in_promise(stmts: &mut Vec<Stmt>) {
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Stmt::Return(Some(expr)) => {
+                let inner = std::mem::replace(expr, Expr::Undefined);
+                *expr = wrap_in_promise_resolve(inner);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                wrap_returns_in_promise(then_branch);
+                if let Some(eb) = else_branch {
+                    wrap_returns_in_promise(eb);
+                }
+            }
+            Stmt::While { body, .. } => wrap_returns_in_promise(body),
+            Stmt::DoWhile { body, .. } => wrap_returns_in_promise(body),
+            Stmt::For { body, .. } => wrap_returns_in_promise(body),
+            Stmt::Labeled { body, .. } => {
+                // Box<Stmt> — recurse over a single-element slice.
+                let mut v = vec![std::mem::replace(body.as_mut(), Stmt::Break)];
+                wrap_returns_in_promise(&mut v);
+                *body = Box::new(v.into_iter().next().unwrap());
+            }
+            Stmt::Try { body, catch, finally } => {
+                wrap_returns_in_promise(body);
+                if let Some(c) = catch {
+                    wrap_returns_in_promise(&mut c.body);
+                }
+                if let Some(f) = finally {
+                    wrap_returns_in_promise(f);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases.iter_mut() {
+                    wrap_returns_in_promise(&mut case.body);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Transform a single generator function into a state machine.
 fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, next_func_id: &mut u32) {
+    // Remember whether this was an async generator (`async function*`).
+    // Async generators are still lowered via the same state-machine
+    // transform, but:
+    //
+    //   (1) The outer wrapper must NOT be marked `is_async` anymore —
+    //       otherwise `Stmt::Return` in the LLVM backend wraps the
+    //       `{ next, return, throw }` iterator object in
+    //       `js_promise_resolved`, so `gen.next()` at the call site
+    //       dereferences a Promise pointer as if it were an object
+    //       and segfaults.
+    //
+    //   (2) The `.next()` / `.return()` / `.throw()` closure bodies
+    //       wrap their iter-result object in a resolved Promise, so
+    //       callers can still write `await gen.next()` and get
+    //       `{ value, done }` back (matching async-generator semantics
+    //       where `.next()` always returns a Promise).
+    //
+    // A non-async generator keeps the direct iter-result return path.
+    let is_async_generator = func.is_async;
+    func.is_async = false;
+
     let state_id = alloc_local(next_local_id);
     let done_id = alloc_local(next_local_id);
     let sent_id = alloc_local(next_local_id); // value passed by caller via next(val)
@@ -257,7 +343,7 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     let next_param_id = alloc_local(next_local_id);
 
     // Build next() method body
-    let next_body = vec![
+    let mut next_body = vec![
         // __sent = <param from next(val)>
         Stmt::Expr(Expr::LocalSet(
             sent_id,
@@ -277,6 +363,9 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
             body: while_body,
         },
     ];
+    if is_async_generator {
+        wrap_returns_in_promise(&mut next_body);
+    }
 
     // Build the new function body
     let mut new_body: Vec<Stmt> = Vec::new();
@@ -370,14 +459,18 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     // Build .return(value) closure — immediately marks done and returns {value, done: true}
     let return_param_id = alloc_local(next_local_id);
     let return_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
+    let mut return_body: Vec<Stmt> = vec![
+        Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
+        Stmt::Return(Some(make_iter_result(Expr::LocalGet(return_param_id), true))),
+    ];
+    if is_async_generator {
+        wrap_returns_in_promise(&mut return_body);
+    }
     let return_closure = Expr::Closure {
         func_id: return_func_id_val,
         params: vec![perry_hir::Param { id: return_param_id, name: "__ret_val".to_string(), ty: Type::Any, is_rest: false, default: None }],
         return_type: Type::Any,
-        body: vec![
-            Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
-            Stmt::Return(Some(make_iter_result(Expr::LocalGet(return_param_id), true))),
-        ],
+        body: return_body,
         captures: captures.clone(),
         mutable_captures: mutable_captures.clone(),
         captures_this: false,
@@ -417,6 +510,9 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     }
     throw_body.push(Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))));
     throw_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
+    if is_async_generator {
+        wrap_returns_in_promise(&mut throw_body);
+    }
     let throw_closure = Expr::Closure {
         func_id: throw_func_id_val,
         params: vec![perry_hir::Param { id: throw_param_id, name: "__throw_val".to_string(), ty: Type::Any, is_rest: false, default: None }],

@@ -374,6 +374,40 @@ pub extern "C" fn js_is_promise(ptr: *mut Promise) -> i32 {
     1
 }
 
+/// Safe `await`-side check: given a NaN-boxed JSValue, return 1 if it
+/// points at a real Promise allocation and 0 otherwise. Used by the
+/// LLVM backend's `Expr::Await` lowering so that `await <non-promise>`
+/// doesn't dereference a garbage pointer as if it were a `Promise`.
+///
+/// Inspects the NaN-box tag and, when the value is a pointer, walks
+/// back to the `GcHeader` to read the `obj_type`. Any non-POINTER_TAG
+/// bits (primitives, strings, bigints, null, undefined) return 0.
+#[no_mangle]
+pub extern "C" fn js_value_is_promise(value: f64) -> i32 {
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    let bits = value.to_bits();
+    let tag = bits & TAG_MASK;
+    if tag != POINTER_TAG {
+        return 0;
+    }
+    let ptr_usize = (bits & POINTER_MASK) as usize;
+    if ptr_usize < 0x10000 {
+        return 0;
+    }
+    unsafe {
+        let gc_header = (ptr_usize as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+            as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_PROMISE {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 // Queue for scheduled promise resolutions
 thread_local! {
     static SCHEDULED_RESOLVES: RefCell<Vec<(*mut Promise, f64)>> = RefCell::new(Vec::new());

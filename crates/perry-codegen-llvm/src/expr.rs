@@ -4262,28 +4262,57 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // Returns %value as a NaN-boxed double.
         Expr::Await(operand) => {
             let promise_box = lower_expr(ctx, operand)?;
-            let promise_handle = unbox_to_i64(ctx.block(), &promise_box);
 
-            // Pre-create blocks. We don't pass the promise as a block
-            // param because LLVM SSA tracks it via the entry name —
-            // unlike Cranelift's brif which needs explicit param flow.
+            // Defensive guard: if the operand is not actually a
+            // Promise (e.g. `await someNumber` or an unsupported
+            // runtime function that returned a raw handle), fall
+            // back to JS semantics — "await non-promise returns
+            // the value itself" — instead of unboxing garbage bits
+            // and polling `js_promise_state` on a random pointer.
+            //
+            // We call `js_value_is_promise(f64) -> i32` (GC-type
+            // check) and branch: truthy → existing polling path,
+            // falsy → store the box into a result slot and jump
+            // straight to the merge block.
+            //
+            // The result is materialized via an `alloca` slot so the
+            // merge block can reload a single SSA value without
+            // having to thread explicit phi nodes through every
+            // intermediate block.
+            let result_slot = ctx.block().alloca(DOUBLE);
+            // Pre-seed with the boxed operand so the non-promise
+            // branch just needs to jump to merge.
+            ctx.block().store(DOUBLE, &promise_box, &result_slot);
+
+            let is_promise_i32 = ctx
+                .block()
+                .call(I32, "js_value_is_promise", &[(DOUBLE, &promise_box)]);
+            let is_promise_bool = ctx.block().icmp_ne(I32, &is_promise_i32, "0");
+
             let check_idx = ctx.new_block("await.check");
             let wait_idx = ctx.new_block("await.wait");
             let settled_idx = ctx.new_block("await.settled");
             let reject_idx = ctx.new_block("await.reject");
             let done_idx = ctx.new_block("await.done");
+            let merge_idx = ctx.new_block("await.merge");
 
             let check_label = ctx.block_label(check_idx);
             let wait_label = ctx.block_label(wait_idx);
             let settled_label = ctx.block_label(settled_idx);
             let reject_label = ctx.block_label(reject_idx);
             let done_label = ctx.block_label(done_idx);
+            let merge_label = ctx.block_label(merge_idx);
 
-            // Branch into check.
-            ctx.block().br(&check_label);
+            ctx.block().cond_br(&is_promise_bool, &check_label, &merge_label);
 
             // === check ===
+            // Unbox the promise in each block that uses it — LLVM's
+            // SSA form requires every value definition to dominate
+            // its uses, and there's no single predecessor block we
+            // could hoist the unbox into (check is reachable from
+            // both the initial branch AND from `wait`).
             ctx.current_block = check_idx;
+            let promise_handle = unbox_to_i64(ctx.block(), &promise_box);
             let state = ctx
                 .block()
                 .call(I32, "js_promise_state", &[(I64, &promise_handle)]);
@@ -4306,23 +4335,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
             // === settled ===
             ctx.current_block = settled_idx;
+            let promise_handle2 = unbox_to_i64(ctx.block(), &promise_box);
             let state2 = ctx
                 .block()
-                .call(I32, "js_promise_state", &[(I64, &promise_handle)]);
+                .call(I32, "js_promise_state", &[(I64, &promise_handle2)]);
             let is_rejected = ctx.block().icmp_eq(I32, &state2, "2");
             ctx.block().cond_br(&is_rejected, &reject_label, &done_label);
 
             // === reject ===
             ctx.current_block = reject_idx;
+            let promise_handle3 = unbox_to_i64(ctx.block(), &promise_box);
             let reason = ctx
                 .block()
-                .call(DOUBLE, "js_promise_reason", &[(I64, &promise_handle)]);
+                .call(DOUBLE, "js_promise_reason", &[(I64, &promise_handle3)]);
             ctx.block().call_void("js_throw", &[(DOUBLE, &reason)]);
             ctx.block().unreachable();
 
             // === done ===
             ctx.current_block = done_idx;
-            Ok(ctx.block().call(DOUBLE, "js_promise_value", &[(I64, &promise_handle)]))
+            let promise_handle4 = unbox_to_i64(ctx.block(), &promise_box);
+            let value = ctx
+                .block()
+                .call(DOUBLE, "js_promise_value", &[(I64, &promise_handle4)]);
+            ctx.block().store(DOUBLE, &value, &result_slot);
+            ctx.block().br(&merge_label);
+
+            // === merge ===
+            ctx.current_block = merge_idx;
+            Ok(ctx.block().load(DOUBLE, &result_slot))
         }
 
         // -------- StaticFieldGet/Set --------
