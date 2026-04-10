@@ -101,6 +101,12 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::JsonStringify(_)
         | Expr::JsonStringifyPretty { .. }
         | Expr::JsonStringifyFull(..) => Some(HirType::String),
+        // `process.hrtime.bigint()` returns a BigInt value. Refining the
+        // local type lets `hr2 >= hr1` route through the BigInt compare
+        // fast path (`js_bigint_cmp`) instead of fcmp-on-NaN.
+        Expr::ProcessHrtimeBigint => Some(HirType::BigInt),
+        // `BigInt(x)` / `0n` literal via StringCoerce paths.
+        Expr::BigInt(_) => Some(HirType::BigInt),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -134,6 +140,15 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
             None
         }
         Expr::PropertyGet { object, property } => {
+            // Error instance `e.message` / `e.stack` / `e.name` — all
+            // return string handles via the runtime's GC_TYPE_ERROR
+            // dispatch in js_object_get_field_by_name_f64. Refining to
+            // String lets `const m = e.message; m.length` hit the
+            // string fast path instead of returning undefined.
+            if matches!(property.as_str(), "message" | "stack" | "name") {
+                let _ = object;
+                return Some(HirType::String);
+            }
             // obj.field where obj is a known class instance → field's
             // declared type. Reuses the same walk static_type_of uses.
             let receiver_class = receiver_class_name(ctx, object)?;
@@ -466,6 +481,15 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                         || matches!(property.as_str(), "toString")
                 )
             ) =>
+        {
+            true
+        }
+        // Error instance field access — e.message / e.stack / e.name
+        // all route through the runtime's GC_TYPE_ERROR dispatch and
+        // return string pointers. Recognize them so chained calls like
+        // `e.stack!.includes("...")` hit the string method fast path.
+        Expr::PropertyGet { property, .. }
+            if matches!(property.as_str(), "message" | "stack" | "name") =>
         {
             true
         }

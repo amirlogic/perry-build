@@ -1787,12 +1787,74 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let parent_class = match ctx.classes.get(&parent_name).copied() {
                 Some(c) => c,
                 None => {
-                    // Built-in parent (Error, Object, etc.) — skip
-                    // the inlined constructor body.
+                    // Built-in parent (Error, TypeError, RangeError, etc.)
+                    // — user classes extending them need `super(message)` to
+                    // assign `this.message = args[0]` and `this.name = parent_name`
+                    // so downstream `err.message` / `err.name` access works.
+                    // `instanceof Error` walking the extends chain is handled
+                    // elsewhere; this just makes `err.message` non-undefined.
+                    let is_error_like = matches!(
+                        parent_name.as_str(),
+                        "Error"
+                            | "TypeError"
+                            | "RangeError"
+                            | "ReferenceError"
+                            | "SyntaxError"
+                            | "URIError"
+                            | "EvalError"
+                            | "AggregateError"
+                    );
+                    // Lower args — at most 1 (message) for Error-like.
+                    let mut lowered_args: Vec<String> = Vec::with_capacity(super_args.len());
                     for a in super_args {
-                        let _ = lower_expr(ctx, a)?;
+                        lowered_args.push(lower_expr(ctx, a)?);
                     }
-                    return Ok(double_literal(0.0));
+                    if is_error_like {
+                        // Need the `this` pointer to set fields on.
+                        let this_slot = ctx.this_stack.last().cloned();
+                        if let Some(this_slot) = this_slot {
+                            let blk = ctx.block();
+                            let this_box = blk.load(DOUBLE, &this_slot);
+                            let this_bits = blk.bitcast_double_to_i64(&this_box);
+                            let this_handle = blk.and(I64, &this_bits, POINTER_MASK_I64);
+                            // this.message = args[0] (if provided)
+                            if let Some(msg_val) = lowered_args.first() {
+                                let key_idx = ctx.strings.intern("message");
+                                let key_handle_global =
+                                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                                let blk = ctx.block();
+                                let key_box = blk.load(DOUBLE, &key_handle_global);
+                                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                                blk.call_void(
+                                    "js_object_set_field_by_name",
+                                    &[(I64, &this_handle), (I64, &key_raw), (DOUBLE, msg_val)],
+                                );
+                            }
+                            // this.name = <parent_name> as default (can be
+                            // overridden by the subclass constructor body).
+                            let name_idx = ctx.strings.intern("name");
+                            let name_handle_global =
+                                format!("@{}", ctx.strings.entry(name_idx).handle_global);
+                            let name_val_idx = ctx.strings.intern(&parent_name);
+                            let name_val_global =
+                                format!("@{}", ctx.strings.entry(name_val_idx).handle_global);
+                            let blk = ctx.block();
+                            let name_key_box = blk.load(DOUBLE, &name_handle_global);
+                            let name_key_bits = blk.bitcast_double_to_i64(&name_key_box);
+                            let name_key_raw = blk.and(I64, &name_key_bits, POINTER_MASK_I64);
+                            let name_val_box = blk.load(DOUBLE, &name_val_global);
+                            blk.call_void(
+                                "js_object_set_field_by_name",
+                                &[
+                                    (I64, &this_handle),
+                                    (I64, &name_key_raw),
+                                    (DOUBLE, &name_val_box),
+                                ],
+                            );
+                        }
+                    }
+                    return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
                 }
             };
 
@@ -4062,15 +4124,36 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
             Ok(double_literal(0.0))
         }
-        Expr::TypeErrorNew(msg)
-        | Expr::RangeErrorNew(msg)
-        | Expr::SyntaxErrorNew(msg)
-        | Expr::ReferenceErrorNew(msg) => {
-            // Lower as a regular Error with the same message.
+        // Each Error subclass gets its own runtime constructor so the
+        // ErrorHeader's `error_kind` field is set to the right
+        // ERROR_KIND_* — required for `e instanceof TypeError` etc. to
+        // walk the ErrorHeader discriminant in `js_instanceof`.
+        Expr::TypeErrorNew(msg) => {
             let m = lower_expr(ctx, msg)?;
             let blk = ctx.block();
             let msg_handle = unbox_to_i64(blk, &m);
-            let err_handle = blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
+            let err_handle = blk.call(I64, "js_typeerror_new", &[(I64, &msg_handle)]);
+            Ok(nanbox_pointer_inline(blk, &err_handle))
+        }
+        Expr::RangeErrorNew(msg) => {
+            let m = lower_expr(ctx, msg)?;
+            let blk = ctx.block();
+            let msg_handle = unbox_to_i64(blk, &m);
+            let err_handle = blk.call(I64, "js_rangeerror_new", &[(I64, &msg_handle)]);
+            Ok(nanbox_pointer_inline(blk, &err_handle))
+        }
+        Expr::SyntaxErrorNew(msg) => {
+            let m = lower_expr(ctx, msg)?;
+            let blk = ctx.block();
+            let msg_handle = unbox_to_i64(blk, &m);
+            let err_handle = blk.call(I64, "js_syntaxerror_new", &[(I64, &msg_handle)]);
+            Ok(nanbox_pointer_inline(blk, &err_handle))
+        }
+        Expr::ReferenceErrorNew(msg) => {
+            let m = lower_expr(ctx, msg)?;
+            let blk = ctx.block();
+            let msg_handle = unbox_to_i64(blk, &m);
+            let err_handle = blk.call(I64, "js_referenceerror_new", &[(I64, &msg_handle)]);
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
         Expr::NumberIsSafeInteger(operand) => {

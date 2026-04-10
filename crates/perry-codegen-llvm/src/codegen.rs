@@ -1536,6 +1536,53 @@ fn init_static_fields(
     ctx: &mut crate::expr::FnCtx<'_>,
     hir: &HirModule,
 ) -> Result<()> {
+    // Phase C.3: register user classes that extend the built-in Error
+    // (or any of its subclasses) with the runtime, so `instanceof Error`
+    // walks the chain and returns true. Without this, `new HttpError(...)
+    // instanceof Error` returns false because the runtime's
+    // `EXTENDS_ERROR_REGISTRY` is empty for user classes.
+    for c in &hir.classes {
+        // Walk this class's extends_name chain; if any ancestor is a
+        // built-in error subclass, register this class's id.
+        let mut cur: Option<String> = c.extends_name.clone();
+        let mut extends_error = false;
+        let mut depth = 0usize;
+        while let Some(name) = cur {
+            if matches!(
+                name.as_str(),
+                "Error"
+                    | "TypeError"
+                    | "RangeError"
+                    | "ReferenceError"
+                    | "SyntaxError"
+                    | "URIError"
+                    | "EvalError"
+                    | "AggregateError"
+            ) {
+                extends_error = true;
+                break;
+            }
+            // Walk user-defined ancestor chain.
+            if let Some(parent) = ctx.classes.get(&name) {
+                cur = parent.extends_name.clone();
+                depth += 1;
+                if depth > 32 {
+                    break;
+                }
+            } else {
+                cur = None;
+            }
+        }
+        if extends_error {
+            if let Some(&cid) = ctx.class_ids.get(&c.name) {
+                let cid_str = cid.to_string();
+                ctx.block().call_void(
+                    "js_register_class_extends_error",
+                    &[(crate::types::I32, &cid_str)],
+                );
+            }
+        }
+    }
     for c in &hir.classes {
         for sf in &c.static_fields {
             let key = (c.name.clone(), sf.name.clone());

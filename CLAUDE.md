@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.124
+**Current Version:** 0.4.125
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,14 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.125 (llvm-backend)
+- feat: `test_gap_error_extensions` DIFF 14 → MATCH. Four coordinated fixes:
+  1. `super(message)` in a class that extends Error/TypeError/RangeError/etc now stores `this.message = args[0]` and `this.name = <parent_name>` via `js_object_set_field_by_name` in the SuperCall path, so `new HttpError("Not Found", 404).message` returns "Not Found" instead of undefined.
+  2. User classes extending Error (or any Error subclass) get registered via `js_register_class_extends_error` in `init_static_fields`, so `httpErr instanceof Error` walks the chain and returns true (the runtime already had `EXTENDS_ERROR_REGISTRY` but nothing populated it from the LLVM side).
+  3. `Expr::TypeErrorNew`/`RangeErrorNew`/`SyntaxErrorNew`/`ReferenceErrorNew` now dispatch to `js_typeerror_new`/`js_rangeerror_new`/etc so the `ErrorHeader.error_kind` field is set correctly and `e instanceof TypeError` returns true (was all routed through `js_error_new_with_message` which produced plain Error kind).
+  4. `e.message` / `e.stack` / `e.name` are now recognized as string-producing in both `refine_type_from_init` and `is_string_expr`, so `stackErr.stack!.includes(...)` and `const m = e.message; m.length` hit the string method fast path instead of falling through to dynamic dispatch.
+- fix: `process.hrtime.bigint()` result type refined to BigInt so `hr2 >= hr1` routes through the `js_bigint_cmp` fast path. `test_gap_node_process` DIFF 4 → 1.
 
 ### v0.4.124 (llvm-backend)
 - fix: `x === null` / `x === undefined` on NaN-tagged values now bit-exact compares via `icmp_eq` on raw i64 bits, plus loose-equality `x == null` treats both TAG_NULL and TAG_UNDEFINED as nullish. Previously `is_string_expr` returned true for `x: string | null | undefined` (union contains String), routing the compare through `js_string_equals(0, 0)` which returns 1 → `process(undefined)` incorrectly returned "null". Added a null/undefined literal fast path ahead of the string/js_eq paths in `expr.rs::Expr::Compare`.
