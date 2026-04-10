@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.126
+**Current Version:** 0.4.127
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.127 (llvm-backend)
+- feat: `test_gap_weakref_finalization` DIFF 18 → 1. WeakMap/WeakSet dispatch now works end-to-end:
+  1. `new WeakMap()`/`new WeakSet()` route through `lower_builtin_new` → `js_weakmap_new`/`js_weakset_new` returning NaN-boxed pointers. Previously fell through to `js_object_alloc` which created an empty ObjectHeader, so the runtime weakref functions couldn't find the entries array.
+  2. HIR `make_extern_call("js_weakmap_*")` dispatches through `ExternFuncRef` — `lower_call.rs` now recognizes the `js_*` name prefix as a built-in runtime function and emits a direct LLVM call instead of the old "lower args for side effects, return 0.0" soft fallback.
+  3. Added `runtime_decls.rs` entries for `js_weakmap_*`, `js_weakset_*`, `js_weak_throw_primitive`, `js_weakmap_new`, `js_weakset_new`.
 
 ### v0.4.126 (llvm-backend)
 - fix: HIR `lower_call` array-method block used `is_known_not_string` to route `.indexOf`/`.includes`/`.slice` on `Union<String, Void>` (JSON.stringify return) through ArrayIndexOf/ArrayIncludes, returning -1/false on a real string. Now treats `Union<T, ...>` containing String as possibly-string (`is_union_with_string`) so the ambiguous-method path falls through to runtime string dispatch. `test_edge_json_regex` DIFF 10 → MATCH.

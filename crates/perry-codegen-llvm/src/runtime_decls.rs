@@ -336,6 +336,21 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_rangeerror_new", I64, &[I64]);
     module.declare_function("js_syntaxerror_new", I64, &[I64]);
     module.declare_function("js_referenceerror_new", I64, &[I64]);
+    // WeakMap / WeakSet / WeakRef / FinalizationRegistry — called
+    // via ExternFuncRef from the HIR lowering (which synthesizes
+    // `Call(ExternFuncRef("js_weakmap_set"), [...])`). The f64/f64
+    // ABI matches both the runtime signature and the codegen's
+    // generic extern-call path at lower_call.rs:149.
+    module.declare_function("js_weakmap_new", I64, &[]);
+    module.declare_function("js_weakset_new", I64, &[]);
+    module.declare_function("js_weakmap_set", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_weakmap_get", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weakmap_has", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weakmap_delete", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weakset_add", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weakset_has", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weakset_delete", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_weak_throw_primitive", DOUBLE, &[]);
     module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
     module.declare_function("js_object_values", I64, &[I64]);
     module.declare_function("js_object_entries", I64, &[I64]);

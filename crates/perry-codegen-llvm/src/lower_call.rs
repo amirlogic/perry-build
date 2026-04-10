@@ -147,9 +147,22 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     // direct LLVM call to its scoped name and the system linker
     // resolves the symbol when the .o files are linked together.
     if let Expr::ExternFuncRef { name, .. } = callee {
+        // Built-in runtime extern functions (`js_weakmap_set`,
+        // `js_regexp_exec`, etc.) that start with `js_` are resolved
+        // directly against the runtime library — bypass the import-
+        // map lookup and emit a direct LLVM call with an f64/f64 ABI.
+        // (The declarations are added centrally in runtime_decls.rs.)
+        if name.starts_with("js_") {
+            let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                lowered.push(lower_expr(ctx, a)?);
+            }
+            let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+            return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
+        }
         // Soft fallback: built-in extern functions (setTimeout,
-        // js_weakmap_set, etc.) often aren't in the import map
-        // because the CLI only registers user-imported modules.
+        // etc.) that aren't in the import map.
         // Lower args for side effects and return undefined.
         let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() else {
             for a in args {
@@ -1437,6 +1450,28 @@ pub(crate) fn lower_builtin_new(
             Ok(Some(handle))
         }
 
+        "WeakMap" => {
+            // Lower init iterable args for side effects; the runtime's
+            // js_weakmap_new takes no args and the HIR lowering of
+            // `.set(k,v)` calls dispatch on the resulting handle.
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let handle = ctx.block().call(I64, "js_weakmap_new", &[]);
+            // js_weakmap_new returns a raw `*mut ObjectHeader` — NaN-box
+            // with POINTER_TAG so subsequent `js_weakmap_*` calls can
+            // `js_nanbox_get_pointer` on the f64.
+            let boxed = nanbox_pointer_inline(ctx.block(), &handle);
+            Ok(Some(boxed))
+        }
+        "WeakSet" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let handle = ctx.block().call(I64, "js_weakset_new", &[]);
+            let boxed = nanbox_pointer_inline(ctx.block(), &handle);
+            Ok(Some(boxed))
+        }
         "AbortController" => {
             // Lower any incidental args for side effects (shouldn't have any).
             for a in args {
