@@ -492,6 +492,17 @@ pub(crate) fn is_definitely_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::Binary { op: BinaryOp::Add, left, right } => {
             is_definitely_string_expr(ctx, left) || is_definitely_string_expr(ctx, right)
         }
+        // Ternary `cond ? a : b` is definitely a string when BOTH
+        // branches are definitely strings. Without this, code like
+        //   (d ? "D" : "") + (v ? "V" : "")
+        // misses the string-concat fast path because each ternary is
+        // typed as Any, the `+` falls through to numeric Add, both
+        // operands get js_number_coerce'd (string → NaN), and the
+        // result prints as "NaN" instead of the concatenation.
+        Expr::Conditional { then_expr, else_expr, .. } => {
+            is_definitely_string_expr(ctx, then_expr)
+                && is_definitely_string_expr(ctx, else_expr)
+        }
         _ => false,
     }
 }
