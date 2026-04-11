@@ -310,6 +310,23 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
         I64,
         &[I32, I32, PTR, I32],
     );
+    // Inline bump-allocator state accessor + slow path. The codegen
+    // calls `js_inline_arena_state` once per JS function entry, caches
+    // the returned pointer in a stack slot, and reads/writes the
+    // bump-pointer state directly via fixed GEPs (data=0, offset=8,
+    // size=16). When the bump check fails, it calls
+    // `js_inline_arena_slow_alloc` which syncs back to the underlying
+    // arena, allocates a new block, and returns the new pointer.
+    //
+    // The runtime structs live in `crates/perry-runtime/src/arena.rs`.
+    // Field offsets are load-bearing — keep `#[repr(C)] InlineArenaState`
+    // in sync with the GEPs we emit in `lower_call::compile_new`.
+    module.declare_function("js_inline_arena_state", PTR, &[]);
+    module.declare_function(
+        "js_inline_arena_slow_alloc",
+        PTR,
+        &[PTR, I64, I64],
+    );
     module.declare_function("js_object_delete_field", I32, &[I64, I64]);
     // js_eq takes JSValue (#[repr(transparent)] u64) for both
     // params + return — i64 in the ABI, not double.

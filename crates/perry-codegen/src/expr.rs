@@ -290,6 +290,17 @@ pub(crate) struct FnCtx<'a> {
     /// (e.g. `"%r3"`).
     pub arena_state_slot: Option<String>,
 
+    /// Per-class cached `keys_array` global slots. The
+    /// `@perry_class_keys_<class>` global is set once at module init,
+    /// then read on every `new ClassName()`. LLVM's LICM doesn't hoist
+    /// the load out of the loop because the inline-alloc slow path
+    /// calls into the runtime and LLVM can't prove the call doesn't
+    /// modify the global. We hoist it manually here: the first `new`
+    /// site for each class allocates a stack slot, emits a load+store
+    /// at function entry (via `entry_init_load_global`), and
+    /// subsequent sites for the same class load from the slot.
+    pub class_keys_slots: std::collections::HashMap<String, String>,
+
     /// Compile-time i18n resolution context. When `Some`, the
     /// `Expr::I18nString` lowering looks up the translation for the
     /// default locale at compile time and emits the resolved string
@@ -300,6 +311,35 @@ pub(crate) struct FnCtx<'a> {
     /// `opts.i18n_table`) and threaded through every `FnCtx`
     /// instantiation as a shared borrow.
     pub i18n: &'a Option<I18nLowerCtx>,
+
+    /// Local-variable class aliases: `let_name → class_name` for any
+    /// `Stmt::Let { name, init: Some(Expr::ClassRef(class_name)) }`
+    /// in the current function. Also propagated through `LocalGet`
+    /// chains (`const A = SomeClass; const B = A; new B()`) by
+    /// looking up the source local's name via `local_id_to_name`.
+    /// Populated by the Stmt::Let lowering in
+    /// `crates/perry-codegen/src/stmt.rs` and consulted by `lower_new`
+    /// when an `Expr::New { class_name }` lookup in `ctx.classes`
+    /// misses — `let C = SomeClass; new C()` then reroutes through
+    /// `lower_new("SomeClass", args)` instead of falling back to the
+    /// empty-object placeholder.
+    ///
+    /// Owned per-function: each `compile_function`/`compile_method`/
+    /// `compile_closure`/etc. instantiation gets a fresh empty map.
+    /// Aliases don't escape function boundaries because the let
+    /// binding's scope ends with the function.
+    pub local_class_aliases: std::collections::HashMap<String, String>,
+
+    /// `LocalId → name` lookup table for chained class alias
+    /// resolution. The HIR's `Stmt::Let { name, .. }` gives us the
+    /// (id, name) pair at lowering time, but the rest of FnCtx tracks
+    /// locals by id only (e.g. `ctx.locals: HashMap<u32, String>` is
+    /// id → SSA slot, `ctx.local_types` is id → HIR type). To handle
+    /// `let B = A; new B()` where `A` is itself a class alias, we
+    /// need to look up the *name* of the LocalGet's id so we can
+    /// check `ctx.local_class_aliases` (which is keyed by name).
+    /// Populated by Stmt::Let alongside `ctx.local_class_aliases`.
+    pub local_id_to_name: std::collections::HashMap<u32, String>,
 }
 
 /// Per-module i18n table snapshot used by the LLVM codegen to resolve

@@ -72,6 +72,48 @@ impl LlFunction {
         r
     }
 
+    /// Emit a one-time function-entry init sequence: allocate a `ptr`
+    /// slot, call `func_name()` (no args), store the result in the
+    /// slot, return the slot pointer name. Used by the inline bump
+    /// allocator to cache the per-thread `InlineArenaState` pointer
+    /// once per JS function (instead of paying a TLS access on every
+    /// `new ClassName()`).
+    ///
+    /// Lives in `entry_allocas` so the call + store run before any
+    /// user code in the entry block, dominating every reachable use.
+    /// The slot pointer is returned for the caller to load from at
+    /// each subsequent allocation site.
+    pub fn entry_init_call_ptr(&mut self, func_name: &str) -> String {
+        let slot = self.alloca_entry(crate::types::PTR);
+        let result_reg = format!("%r{}", self.reg_counter.next());
+        self.entry_allocas
+            .push(format!("  {} = call ptr @{}()", result_reg, func_name));
+        self.entry_allocas
+            .push(format!("  store ptr {}, ptr {}", result_reg, slot));
+        slot
+    }
+
+    /// Emit a one-time function-entry load of a module global into a
+    /// stack slot, returning the slot pointer. Used by the inline
+    /// bump allocator to cache class-static values like the per-class
+    /// `keys_array` global once per function instead of reloading it
+    /// inside the hot allocation loop.
+    ///
+    /// LLVM's LICM should hoist a loop-invariant global load on its
+    /// own, but doesn't when the loop body contains a call to an
+    /// external function (like `js_inline_arena_slow_alloc`) that
+    /// LLVM can't prove won't modify the global. Hoisting manually
+    /// at the codegen layer sidesteps the alias-analysis question.
+    pub fn entry_init_load_global(&mut self, global_name: &str, ty: crate::types::LlvmType) -> String {
+        let slot = self.alloca_entry(ty);
+        let result_reg = format!("%r{}", self.reg_counter.next());
+        self.entry_allocas
+            .push(format!("  {} = load {}, ptr @{}", result_reg, ty, global_name));
+        self.entry_allocas
+            .push(format!("  store {} {}, ptr {}", ty, result_reg, slot));
+        slot
+    }
+
     /// Create a new basic block with the given semantic name (e.g. "entry",
     /// "if.then"). A numeric suffix is appended to make the label unique
     /// across the function.

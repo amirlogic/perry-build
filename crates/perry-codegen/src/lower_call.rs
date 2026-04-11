@@ -1387,6 +1387,34 @@ pub(crate) fn lower_new(
         }
     }
 
+    // Local class alias rerouting: `let C = SomeClass; new C()` lowers
+    // as `Expr::New { class_name: "C" }` because the parser sees an
+    // Ident callee. The HIR doesn't statically resolve "C" to the
+    // underlying class, so without this rerouting we'd fall through to
+    // the empty-object placeholder. The Stmt::Let lowering populates
+    // `ctx.local_class_aliases[let_name] = class_name` whenever a
+    // `let` is initialized from `Expr::ClassRef(class_name)`. We
+    // resolve the class name to its underlying real class here and
+    // shadow the parameter so the rest of the function uses the
+    // resolved name (alloc, ctor lookup, field offsets, etc).
+    let resolved_owned: String;
+    let class_name: &str = if !ctx.classes.contains_key(class_name) {
+        if let Some(resolved) = ctx.local_class_aliases.get(class_name).cloned() {
+            if resolved != class_name {
+                resolved_owned = resolved;
+                eprintln!("[DBG] resolved alias to {}", resolved_owned);
+                &resolved_owned
+            } else {
+                class_name
+            }
+        } else {
+            class_name
+        }
+    } else {
+        class_name
+    };
+    eprintln!("[DBG] lower_new BODY for class={} (class_keys_globals?={})", class_name, ctx.class_keys_globals.contains_key(class_name));
+
     let class = match ctx.classes.get(class_name).copied() {
         Some(c) => c,
         None => {
@@ -1520,10 +1548,20 @@ pub(crate) fn lower_new(
             slot
         };
 
-        // Load the per-class keys global up front (its address is
-        // module-static, so it stays cheap to reload per call).
-        let keys_global_ref = format!("@{}", keys_global_name);
-        let keys_ptr = ctx.block().load(I64, &keys_global_ref);
+        // Hoist the per-class `keys_array` global load to the function
+        // entry block (cached in a stack slot per class). Without this
+        // hoisting, LLVM would reload `@perry_class_keys_<class>` on
+        // every loop iteration, because the loop body's `call
+        // @js_inline_arena_slow_alloc` blocks LICM — LLVM can't prove
+        // the call doesn't modify the global.
+        let keys_slot = if let Some(s) = ctx.class_keys_slots.get(class_name).cloned() {
+            s
+        } else {
+            let s = ctx.func.entry_init_load_global(&keys_global_name, I64);
+            ctx.class_keys_slots.insert(class_name.to_string(), s.clone());
+            s
+        };
+        let keys_ptr = ctx.block().load(I64, &keys_slot);
 
         // Inline bump-allocator IR.
         let blk = ctx.block();
@@ -1682,6 +1720,7 @@ pub(crate) fn lower_new(
     ctx.this_stack.push(this_slot);
     ctx.class_stack.push(class_name.to_string());
 
+    eprintln!("[DBG]   lower_new {}: this_stack.len()={} class_stack.len()={}", class_name, ctx.this_stack.len(), ctx.class_stack.len());
     // Apply field initializers FIRST — TypeScript / ES2022 semantics:
     // class field initializers run at the start of the constructor body
     // (after super() for derived classes, before any user ctor code).

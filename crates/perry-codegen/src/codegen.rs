@@ -1173,7 +1173,10 @@ fn compile_function(
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         arena_state_slot: None,
+        class_keys_slots: HashMap::new(),
         i18n: &cross_module.i18n,
+        local_class_aliases: HashMap::new(),
+        local_id_to_name: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1401,7 +1404,10 @@ fn compile_closure(
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         arena_state_slot: None,
+        class_keys_slots: HashMap::new(),
         i18n: &cross_module.i18n,
+        local_class_aliases: HashMap::new(),
+        local_id_to_name: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1523,7 +1529,10 @@ fn compile_method(
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         arena_state_slot: None,
+        class_keys_slots: HashMap::new(),
         i18n: &cross_module.i18n,
+        local_class_aliases: HashMap::new(),
+        local_id_to_name: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1640,7 +1649,10 @@ fn compile_module_entry(
             pending_declares: Vec::new(),
             integer_locals: &main_integer_locals,
             arena_state_slot: None,
+            class_keys_slots: HashMap::new(),
             i18n: &cross_module.i18n,
+            local_class_aliases: HashMap::new(),
+            local_id_to_name: HashMap::new(),
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1721,7 +1733,10 @@ fn compile_module_entry(
             pending_declares: Vec::new(),
             integer_locals: &init_integer_locals,
             arena_state_slot: None,
+            class_keys_slots: HashMap::new(),
             i18n: &cross_module.i18n,
+            local_class_aliases: HashMap::new(),
+            local_id_to_name: HashMap::new(),
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1948,7 +1963,10 @@ fn compile_static_method(
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         arena_state_slot: None,
+        class_keys_slots: HashMap::new(),
         i18n: &cross_module.i18n,
+        local_class_aliases: HashMap::new(),
+        local_id_to_name: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

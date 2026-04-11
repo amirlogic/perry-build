@@ -67,7 +67,51 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             Ok(())
         }
 
-        Stmt::Let { id, init, ty, .. } => {
+        Stmt::Let { id, name, init, ty, .. } => {
+            // `let C = SomeClass` aliases the local `C` to the class
+            // `SomeClass` for `new C()` site rerouting. The HIR lowers
+            // class identifiers referenced as values to `Expr::ClassRef`,
+            // so we just check whether the init is a ClassRef and stash
+            // the (let_name → class_name) mapping in `ctx.local_class_aliases`.
+            // The map is consulted by `lower_new` when its
+            // `ctx.classes.get(class_name)` lookup misses — without
+            // this, `new C()` falls back to the empty-object placeholder.
+            // Record the (id → name) mapping unconditionally so the
+            // class-alias chain resolution below (and any other site
+            // that needs id → name) can use it.
+            ctx.local_id_to_name.insert(*id, name.clone());
+            // Class alias detection. Two shapes:
+            //
+            //   (a) `let C = SomeClass` — init is `Expr::ClassRef("SomeClass")`
+            //       (the HIR's `lower.rs::ast::Expr::Ident` lifts class
+            //       names referenced as values to ClassRef). We register
+            //       `local_class_aliases["C"] = "SomeClass"`.
+            //
+            //   (b) `let B = A` where A is itself a class alias —
+            //       init is `Expr::LocalGet(other_id)`. We look up
+            //       other_id's name via `local_id_to_name`, then check
+            //       if that name is in `local_class_aliases`, and
+            //       propagate the resolved class name. This handles
+            //       chains like `let A = X; let B = A; let C = B; new C()`.
+            //
+            // Both cases let `lower_new("C", args)` reroute through
+            // `lower_new("X", args)` instead of falling back to the
+            // empty-object placeholder when the class name turns out to
+            // be a local-bound alias rather than a real class identifier.
+            match init.as_ref() {
+                Some(perry_hir::Expr::ClassRef(class_name)) => {
+                    ctx.local_class_aliases
+                        .insert(name.clone(), class_name.clone());
+                }
+                Some(perry_hir::Expr::LocalGet(other_id)) => {
+                    if let Some(other_name) = ctx.local_id_to_name.get(other_id).cloned() {
+                        if let Some(resolved) = ctx.local_class_aliases.get(&other_name).cloned() {
+                            ctx.local_class_aliases.insert(name.clone(), resolved);
+                        }
+                    }
+                }
+                _ => {}
+            }
             // Refine the declared type from the initializer when the
             // declared type is Any. The HIR's destructuring lowering
             // declares synthetic `__destruct_*` lets as `ty: Any` even
