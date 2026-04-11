@@ -46,6 +46,14 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // small for typical user programs (<1s of overhead) compared
         // to the runtime perf wins on tight loops.
         .arg("-O3")
+        // -ffast-math lets LLVM reassociate f64 ops so dependency
+        // chains like `sum = sum + 1` can be unrolled into independent
+        // accumulators (breaking the 3-cycle latency bottleneck on
+        // tight numeric loops). JS spec strictly requires IEEE 754
+        // semantics; this trades the strict NaN/inf/-0 behaviour for
+        // throughput, which is what V8/JSC do internally for hot paths
+        // anyway.
+        .arg("-ffast-math")
         .arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
