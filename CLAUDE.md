@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.142
+**Current Version:** 0.4.143
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.143 (llvm-backend)
+- feat: `test_gap_symbols` DIFF (18) → DIFF (10). Two coordinated fixes for computed-symbol-key object literals like `const o = { [symA]: 1, regular: 2 }`:
+  1. **HIR `lower::ast::Expr::Object` IIFE wrapper for non-static computed keys.** Previously the `_ => continue` arm in the `PropName::Computed` match silently dropped any computed key whose expression wasn't a string literal, number literal, or enum member access — so `{ [symProp]: 42 }` was just `{}`. The new branch lowers the key as a normal `Expr` and stashes `(key_expr, value_expr)` pairs in a `computed_post_init` vec. After processing all props, if any pairs exist, the lowering synthesizes an IIFE: `((__perry_obj_iife) => { __perry_obj_iife[k1] = v1; ...; return __perry_obj_iife; })({ static_props })`. The IIFE is built via `Expr::Closure` + `Expr::Call` + `Stmt::Expr(IndexSet)` + `Stmt::Return`, so the existing `IndexSet` LLVM dispatch (which already runtime-checks `js_is_symbol` thanks to v0.4.142's symbol path) routes the symbol-keyed writes through `js_object_set_symbol_property`. No new HIR variants — purely a structural transformation that any backend can already lower. Captures are computed via `collect_local_refs_stmt` minus the synthesized `__perry_obj_iife` parameter.
+  2. **`compute_max_local_id` in `crates/perry-transform/src/generator.rs` now walks expressions.** This was a pre-existing latent bug exposed by IIFE-style closures emitted into module init: `scan_stmt_for_max_local` only handled `Stmt::Let`/`If`/`While`/`For`/`Try`/`Switch` and never descended into expressions. So an `Stmt::Expr(Call { Closure { params: [Param { id: 5 }], ... } })` hid its parameter LocalId 5 from the scan. The generator transform then allocated `__gen_state`/`__gen_done`/`__gen_sent` starting from a stale max, colliding with the IIFE's `__o` parameter at id 5 — which silently corrupted both the IIFE body's `LocalGet(5)` and the generator's state-machine `LocalGet(5)`/`LocalSet(5)`, producing a SIGSEGV after the for-of-generator loop. Fix: extended `scan_stmt_for_max_local` to walk `Stmt::Expr`/`Return`/`Throw`/`If.condition`/`While.condition`/`DoWhile`/`Switch.discriminant`/`Labeled`/`Stmt::Let.init`, and added a new `scan_expr_for_max_local` that recurses into `Closure { params, body, captures }`, `Call`, `New`, `Binary`, `Compare`, `Logical`, `Conditional`, `PropertyGet/Set`, `IndexGet/Set`, `LocalGet`, `LocalSet`, `Array`, `Object`, `Sequence`, `Yield`, `Await`, `Unary`. Without this fix, ANY use of an IIFE in module init combined with a generator function elsewhere in the same module produced silent miscompilation.
+- Regression sweep clean: `test_gap_object_methods`, `test_gap_proxy_reflect`, `test_edge_strings`, `test_edge_iteration`, `test_gap_weakref_finalization`, `test_gap_generators` all stay at 0 markers.
+- Remaining 10 markers in `test_gap_symbols` are well-known symbol semantic features outside this commit's scope: `Symbol.toPrimitive` (4 markers — `+currency` / template literal coercion needs unary-plus + `String(obj)` to consult `obj[Symbol.toPrimitive]`), `Symbol.hasInstance` (1 marker — `4 instanceof EvenChecker` needs `instanceof` to check `EvenChecker[Symbol.hasInstance]`), `Symbol.toStringTag` (1 marker — `Object.prototype.toString.call(col)` needs to read `col[Symbol.toStringTag]`).
 
 ### v0.4.142 (llvm-backend)
 - feat: `test_gap_symbols` DIFF (28) → DIFF (18). Symbol primitive support is now real instead of pretending to be an object pointer. Five coordinated runtime + codegen fixes:

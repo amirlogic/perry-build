@@ -50,14 +50,31 @@ fn scan_stmts_for_max_local(stmts: &[Stmt], max_id: &mut LocalId) {
 
 fn scan_stmt_for_max_local(stmt: &Stmt, max_id: &mut LocalId) {
     match stmt {
-        Stmt::Let { id, .. } => *max_id = (*max_id).max(*id),
-        Stmt::If { then_branch, else_branch, .. } => {
+        Stmt::Let { id, init, .. } => {
+            *max_id = (*max_id).max(*id);
+            if let Some(e) = init { scan_expr_for_max_local(e, max_id); }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => scan_expr_for_max_local(e, max_id),
+        Stmt::Return(e) => {
+            if let Some(e) = e { scan_expr_for_max_local(e, max_id); }
+        }
+        Stmt::If { condition, then_branch, else_branch } => {
+            scan_expr_for_max_local(condition, max_id);
             scan_stmts_for_max_local(then_branch, max_id);
             if let Some(eb) = else_branch { scan_stmts_for_max_local(eb, max_id); }
         }
-        Stmt::While { body, .. } => scan_stmts_for_max_local(body, max_id),
-        Stmt::For { init, body, .. } => {
+        Stmt::While { condition, body } => {
+            scan_expr_for_max_local(condition, max_id);
+            scan_stmts_for_max_local(body, max_id);
+        }
+        Stmt::DoWhile { body, condition } => {
+            scan_stmts_for_max_local(body, max_id);
+            scan_expr_for_max_local(condition, max_id);
+        }
+        Stmt::For { init, condition, update, body } => {
             if let Some(i) = init { scan_stmt_for_max_local(i, max_id); }
+            if let Some(c) = condition { scan_expr_for_max_local(c, max_id); }
+            if let Some(u) = update { scan_expr_for_max_local(u, max_id); }
             scan_stmts_for_max_local(body, max_id);
         }
         Stmt::Try { body, catch, finally } => {
@@ -65,9 +82,82 @@ fn scan_stmt_for_max_local(stmt: &Stmt, max_id: &mut LocalId) {
             if let Some(c) = catch { scan_stmts_for_max_local(&c.body, max_id); }
             if let Some(f) = finally { scan_stmts_for_max_local(f, max_id); }
         }
-        Stmt::Switch { cases, .. } => {
+        Stmt::Switch { discriminant, cases } => {
+            scan_expr_for_max_local(discriminant, max_id);
             for case in cases { scan_stmts_for_max_local(&case.body, max_id); }
         }
+        Stmt::Labeled { body, .. } => scan_stmt_for_max_local(body, max_id),
+        _ => {}
+    }
+}
+
+/// Walk an expression for any LocalIds it carries — Closure params/captures,
+/// LocalGet/LocalSet, and recursively into all sub-expressions. Without this
+/// scan, IIFE-style closures emitted into module init (or any
+/// `Expr::Call(Closure { params: [...], body: [...] }, args)` shape) hide
+/// their parameter LocalIds from `compute_max_local_id`, and the generator
+/// transform's freshly-allocated `__gen_state`/`__gen_done`/`__gen_sent`
+/// locals collide with them. The collision corrupts every LocalGet/LocalSet
+/// in either the IIFE body or the generator state machine and produces
+/// silent miscompilation or segfaults.
+fn scan_expr_for_max_local(expr: &Expr, max_id: &mut LocalId) {
+    match expr {
+        Expr::LocalGet(id) => *max_id = (*max_id).max(*id),
+        Expr::LocalSet(id, value) => {
+            *max_id = (*max_id).max(*id);
+            scan_expr_for_max_local(value, max_id);
+        }
+        Expr::Closure { params, body, captures, mutable_captures, .. } => {
+            for p in params { *max_id = (*max_id).max(p.id); }
+            for c in captures { *max_id = (*max_id).max(*c); }
+            for c in mutable_captures { *max_id = (*max_id).max(*c); }
+            scan_stmts_for_max_local(body, max_id);
+        }
+        Expr::Call { callee, args, .. } => {
+            scan_expr_for_max_local(callee, max_id);
+            for a in args { scan_expr_for_max_local(a, max_id); }
+        }
+        Expr::New { args, .. } => {
+            for a in args { scan_expr_for_max_local(a, max_id); }
+        }
+        Expr::Await(inner) | Expr::Unary { operand: inner, .. } => {
+            scan_expr_for_max_local(inner, max_id);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            scan_expr_for_max_local(left, max_id);
+            scan_expr_for_max_local(right, max_id);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            scan_expr_for_max_local(condition, max_id);
+            scan_expr_for_max_local(then_expr, max_id);
+            scan_expr_for_max_local(else_expr, max_id);
+        }
+        Expr::PropertyGet { object, .. } => scan_expr_for_max_local(object, max_id),
+        Expr::PropertySet { object, value, .. } => {
+            scan_expr_for_max_local(object, max_id);
+            scan_expr_for_max_local(value, max_id);
+        }
+        Expr::IndexGet { object, index } => {
+            scan_expr_for_max_local(object, max_id);
+            scan_expr_for_max_local(index, max_id);
+        }
+        Expr::IndexSet { object, index, value } => {
+            scan_expr_for_max_local(object, max_id);
+            scan_expr_for_max_local(index, max_id);
+            scan_expr_for_max_local(value, max_id);
+        }
+        Expr::Array(items) => {
+            for item in items { scan_expr_for_max_local(item, max_id); }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields { scan_expr_for_max_local(v, max_id); }
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs { scan_expr_for_max_local(e, max_id); }
+        }
+        Expr::Yield { value: Some(v), .. } => scan_expr_for_max_local(v, max_id),
         _ => {}
     }
 }

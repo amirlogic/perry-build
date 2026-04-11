@@ -8971,18 +8971,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 return Ok(Expr::ObjectSpread { parts });
             }
             let mut props = Vec::new();
+            // Computed keys whose value can't be folded to a string at HIR time
+            // (typically symbol-typed locals like `{ [symProp]: 42 }`). Deferred
+            // and emitted as IndexSet stmts inside an IIFE wrapper after the
+            // static-key Object literal is built.
+            let mut computed_post_init: Vec<(Expr, Expr)> = Vec::new();
             for prop in &obj.props {
                 match prop {
                     ast::PropOrSpread::Prop(prop) => {
                         match prop.as_ref() {
                             ast::Prop::KeyValue(kv) => {
-                                let key = match &kv.key {
-                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
-                                    ast::PropName::Num(n) => n.value.to_string(),
+                                enum KeyResolution {
+                                    Static(String),
+                                    Dynamic(Expr),
+                                    Skip,
+                                }
+                                let key_resolution: KeyResolution = match &kv.key {
+                                    ast::PropName::Ident(ident) => KeyResolution::Static(ident.sym.to_string()),
+                                    ast::PropName::Str(s) => KeyResolution::Static(s.value.as_str().unwrap_or("").to_string()),
+                                    ast::PropName::Num(n) => KeyResolution::Static(n.value.to_string()),
                                     ast::PropName::Computed(computed) => {
                                         // Handle computed property keys like [ChainName.ETHEREUM]
-                                        // Try to resolve enum member access to string keys
+                                        // Try to resolve enum member access to string keys first.
                                         match computed.expr.as_ref() {
                                             ast::Expr::Member(member) => {
                                                 if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
@@ -8990,25 +9000,48 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                     let member_name = prop.sym.to_string();
                                                     if let Some(value) = ctx.lookup_enum_member(&enum_name, &member_name) {
                                                         match value {
-                                                            EnumValue::String(s) => s.clone(),
-                                                            EnumValue::Number(n) => n.to_string(),
+                                                            EnumValue::String(s) => KeyResolution::Static(s.clone()),
+                                                            EnumValue::Number(n) => KeyResolution::Static(n.to_string()),
                                                         }
                                                     } else {
-                                                        continue;
+                                                        // Non-enum member access: lower as a dynamic expression.
+                                                        match lower_expr(ctx, computed.expr.as_ref()) {
+                                                            Ok(e) => KeyResolution::Dynamic(e),
+                                                            Err(_) => KeyResolution::Skip,
+                                                        }
                                                     }
                                                 } else {
-                                                    continue;
+                                                    match lower_expr(ctx, computed.expr.as_ref()) {
+                                                        Ok(e) => KeyResolution::Dynamic(e),
+                                                        Err(_) => KeyResolution::Skip,
+                                                    }
                                                 }
                                             }
-                                            ast::Expr::Lit(ast::Lit::Str(s)) => s.value.as_str().unwrap_or("").to_string(),
-                                            ast::Expr::Lit(ast::Lit::Num(n)) => n.value.to_string(),
-                                            _ => continue,
+                                            ast::Expr::Lit(ast::Lit::Str(s)) => KeyResolution::Static(s.value.as_str().unwrap_or("").to_string()),
+                                            ast::Expr::Lit(ast::Lit::Num(n)) => KeyResolution::Static(n.value.to_string()),
+                                            // Identifier or any other expression — lower it
+                                            // and defer to post-init IndexSet so symbol-typed
+                                            // locals like `[symProp]` flow through the
+                                            // IndexSet symbol dispatch path.
+                                            _ => match lower_expr(ctx, computed.expr.as_ref()) {
+                                                Ok(e) => KeyResolution::Dynamic(e),
+                                                Err(_) => KeyResolution::Skip,
+                                            },
                                         }
                                     }
-                                    _ => continue,
+                                    _ => KeyResolution::Skip,
                                 };
-                                let value = lower_expr(ctx, &kv.value)?;
-                                props.push((key, value));
+                                match key_resolution {
+                                    KeyResolution::Skip => continue,
+                                    KeyResolution::Static(key) => {
+                                        let value = lower_expr(ctx, &kv.value)?;
+                                        props.push((key, value));
+                                    }
+                                    KeyResolution::Dynamic(key_expr) => {
+                                        let value = lower_expr(ctx, &kv.value)?;
+                                        computed_post_init.push((key_expr, value));
+                                    }
+                                }
                             }
                             ast::Prop::Shorthand(ident) => {
                                 // Shorthand property: { help } → { help: help }
@@ -9146,7 +9179,75 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     _ => {}
                 }
             }
-            Ok(Expr::Object(props))
+            // No computed-key post-init: emit a plain object literal.
+            if computed_post_init.is_empty() {
+                return Ok(Expr::Object(props));
+            }
+            // Has computed keys: synthesize an IIFE wrapper that builds the
+            // object with static props, then runs IndexSet for each computed
+            // key, then returns the object. The IndexSet branch in the LLVM
+            // backend already runtime-dispatches to
+            // `js_object_set_symbol_property` when the key is a symbol — so
+            // `{ [symProp]: 42, x: 1 }` flows through the symbol side-table
+            // automatically.
+            //
+            // Lowered shape:
+            //   ((__o) => {
+            //       __o[k1] = v1;
+            //       __o[k2] = v2;
+            //       return __o;
+            //   })({ static_props })
+            let iife_func_id = ctx.fresh_func();
+            let scope_mark = ctx.enter_scope();
+            let param_id = ctx.define_local("__perry_obj_iife".to_string(), Type::Any);
+            let param = Param {
+                id: param_id,
+                name: "__perry_obj_iife".to_string(),
+                ty: Type::Any,
+                default: None,
+                is_rest: false,
+            };
+            let mut body: Vec<Stmt> = Vec::with_capacity(computed_post_init.len() + 1);
+            for (key_expr, value_expr) in computed_post_init {
+                body.push(Stmt::Expr(Expr::IndexSet {
+                    object: Box::new(Expr::LocalGet(param_id)),
+                    index: Box::new(key_expr),
+                    value: Box::new(value_expr),
+                }));
+            }
+            body.push(Stmt::Return(Some(Expr::LocalGet(param_id))));
+            ctx.exit_scope(scope_mark);
+            // Capture analysis: any LocalIds referenced inside the body that
+            // weren't defined here (i.e. the symbol locals from the outer scope).
+            let mut all_refs = Vec::new();
+            let mut visited_closures = std::collections::HashSet::new();
+            for stmt in &body {
+                collect_local_refs_stmt(stmt, &mut all_refs, &mut visited_closures);
+            }
+            let mut captures: Vec<LocalId> = all_refs
+                .into_iter()
+                .filter(|id| *id != param_id)
+                .collect();
+            captures.sort();
+            captures.dedup();
+            captures = ctx.filter_module_level_captures(captures);
+            let static_obj = Expr::Object(props);
+            let closure = Expr::Closure {
+                func_id: iife_func_id,
+                params: vec![param],
+                return_type: Type::Any,
+                body,
+                captures,
+                mutable_captures: Vec::new(),
+                captures_this: false,
+                enclosing_class: None,
+                is_async: false,
+            };
+            Ok(Expr::Call {
+                callee: Box::new(closure),
+                args: vec![static_obj],
+                type_args: vec![],
+            })
         }
         ast::Expr::This(_) => {
             // Always use Expr::This - the codegen will handle it with ThisContext
