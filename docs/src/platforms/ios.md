@@ -67,11 +67,14 @@ iOS apps use `UIApplicationMain` with a deferred creation pattern:
 ```typescript
 import { App, Text, VStack } from "perry/ui";
 
-App("My iOS App", () =>
-  VStack([
+App({
+  title: "My iOS App",
+  width: 400,
+  height: 800,
+  body: VStack(16, [
     Text("Hello, iPhone!"),
-  ])
-);
+  ]),
+});
 ```
 
 The `App()` call triggers `UIApplicationMain`, and your render function is called via `PerryAppDelegate` once the app is ready.

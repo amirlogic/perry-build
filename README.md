@@ -273,19 +273,20 @@ Perry includes a declarative UI system (`perry/ui`) that compiles directly to na
 ```typescript
 import { App, VStack, HStack, Text, Button, State } from 'perry/ui';
 
-const count = new State(0);
+const count = State(0);
 
-App(
-  VStack(
-    Text('Counter').fontSize(24).bold(),
-    Text('').bindText(count, n => `Count: ${n}`),
-    HStack(
-      Button('Decrement', () => count.set(count.get() - 1)),
-      Button('Increment', () => count.set(count.get() + 1)),
-    ),
-  ),
-  { title: 'My App', width: 400, height: 300 }
-);
+App({
+  title: 'My App',
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`Count: ${count.value}`),
+    HStack(8, [
+      Button('Decrement', () => count.set(count.value - 1)),
+      Button('Increment', () => count.set(count.value + 1)),
+    ]),
+  ]),
+});
 ```
 
 **9 platforms from one codebase:**
