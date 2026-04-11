@@ -731,6 +731,77 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
 }
 
+/// Try to fold an `Expr::Call { callee: PropertyGet { object, property }, args }`
+/// into an `Expr::Array<Method>` HIR variant for known array methods. Used by
+/// the optional-chain Call lowering, which constructs `Expr::Call` directly
+/// (bypassing the regular `lower_expr` array fast-path detection that would
+/// otherwise catch `obj.map(cb)` etc. on an AST `MemberExpr` callee).
+///
+/// Returns `Some(rewritten_expr)` when the callee is a PropertyGet on a known
+/// array method name and the arity matches; returns `None` otherwise so the
+/// caller can fall back to the generic `Expr::Call` form.
+pub(crate) fn try_fold_array_method_call(call: Expr) -> Expr {
+    let (callee, args) = match call {
+        Expr::Call { callee, args, .. } => (callee, args),
+        other => return other,
+    };
+    let (object, property) = match *callee {
+        Expr::PropertyGet { object, property } => (object, property),
+        other => {
+            return Expr::Call {
+                callee: Box::new(other),
+                args,
+                type_args: Vec::new(),
+            };
+        }
+    };
+    // Helper to rebuild the original Call if we don't want to fold.
+    let rebuild = |obj: Box<Expr>, prop: String, args: Vec<Expr>| Expr::Call {
+        callee: Box::new(Expr::PropertyGet { object: obj, property: prop }),
+        args,
+        type_args: Vec::new(),
+    };
+    match property.as_str() {
+        "map" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayMap { array: object, callback: Box::new(cb) }
+        }
+        "filter" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayFilter { array: object, callback: Box::new(cb) }
+        }
+        "forEach" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayForEach { array: object, callback: Box::new(cb) }
+        }
+        "find" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayFind { array: object, callback: Box::new(cb) }
+        }
+        "findIndex" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayFindIndex { array: object, callback: Box::new(cb) }
+        }
+        "findLast" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayFindLast { array: object, callback: Box::new(cb) }
+        }
+        "findLastIndex" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayFindLastIndex { array: object, callback: Box::new(cb) }
+        }
+        "some" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArraySome { array: object, callback: Box::new(cb) }
+        }
+        "every" if args.len() >= 1 => {
+            let cb = args.into_iter().next().unwrap();
+            Expr::ArrayEvery { array: object, callback: Box::new(cb) }
+        }
+        _ => rebuild(object, property, args),
+    }
+}
+
 /// Names of well-known `Object.<name>` static methods. Used by the typeof
 /// fast path so `typeof Object.groupBy === "function"` evaluates to true
 /// at compile time.
@@ -10369,11 +10440,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             type_args: Vec::new(),
                         }
                     } else {
-                        Expr::Call {
+                        // Try to fold known array methods (`.map`/`.filter`/etc.)
+                        // into their dedicated HIR variants here, since the regular
+                        // `lower_expr` Call array fast-path is on the AST CallExpr
+                        // path and never sees the synthetic Expr::Call we build
+                        // for `obj?.method(args)`.
+                        try_fold_array_method_call(Expr::Call {
                             callee: Box::new(callee_expr),
                             args,
                             type_args: Vec::new(),
-                        }
+                        })
                     };
 
                     // Wrap in conditional: check_expr == null ? undefined : call_expr

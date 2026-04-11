@@ -1147,6 +1147,19 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let handle = blk.call(I64, runtime_fn, &[(I64, &arr_handle)]);
                     return Ok(nanbox_pointer_inline(blk, &handle));
                 }
+                // `Array.fromAsync(input)` — Node 22+ static method.
+                // Dispatched here because the receiver is a GlobalGet
+                // (matches the same pattern as Promise.all). The property
+                // name `fromAsync` is unique to Array so there's no
+                // conflict with Promise.
+                "fromAsync" => {
+                    if args.is_empty() {
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                    }
+                    let input = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    return Ok(blk.call(DOUBLE, "js_array_from_async", &[(DOUBLE, &input)]));
+                }
                 _ => {}
             }
         }

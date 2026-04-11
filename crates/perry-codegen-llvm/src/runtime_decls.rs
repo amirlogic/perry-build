@@ -1462,9 +1462,12 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     // object grouping items by their string key. See
     // `crates/perry-runtime/src/object.rs::js_object_group_by`.
     //
-    // NOTE: `Array.fromAsync` is partially started — `lower.rs::is_known
-    // _array_static_method` lists "fromAsync" so `typeof Array.fromAsync`
-    // folds to "function", but no HIR variant or runtime decl exists yet.
-    // It needs its own commit.
+    // `Array.fromAsync(input)` — Node 22+. Dispatched at the LLVM
+    // codegen level in `lower_call.rs` when the receiver is a global
+    // and the property is `fromAsync`. The runtime function returns a
+    // NaN-boxed Promise pointer; for arrays it forwards to
+    // `js_promise_all`, for async iterators it chains `.next()` calls
+    // through `array_from_async_step`.
     module.declare_function("js_object_group_by", DOUBLE, &[DOUBLE, I64]);
+    module.declare_function("js_array_from_async", DOUBLE, &[DOUBLE]);
 }
