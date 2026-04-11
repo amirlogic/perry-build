@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.144
+**Current Version:** 0.4.148
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,21 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.148 (llvm-backend)
+- feat: `test_gap_node_crypto_buffer` DIFF (54) → **MATCH**. Full Node-style Buffer/crypto surface now works in the LLVM backend. Coordinated changes across runtime, codegen, and HIR:
+  1. **Buffer instance method dispatch** — `crates/perry-runtime/src/object.rs` gains `dispatch_buffer_method(addr, name, args, n)` and routes `js_native_call_method` straight to it for any `is_registered_buffer(raw_ptr)` receiver. The dispatcher handles the full numeric read/write family (`readUInt8`/`readUInt16BE`/...`/readDoubleLE`/`readBigInt64BE`/etc), `writeUInt8`/.../`writeBigInt64BE`, `swap16`/`swap32`/`swap64`, `indexOf`/`lastIndexOf`/`includes` (string + buffer needles), `slice`/`subarray`/`fill`/`equals`/`compare`/`toString(enc)`/`length`. New runtime helpers in `crates/perry-runtime/src/buffer.rs` back each method via `unbox_buffer_ptr` (handles both POINTER_TAG and raw heap pointers). Buffer dispatch fires BEFORE the GcHeader scan (buffers have no GcHeader, so the old path could read random bytes and accidentally match GC_TYPE_OBJECT).
+  2. **`crypto.getRandomValues(buf)`** — `crates/perry-hir/src/lower.rs` lowers it to a synthetic `buf.$$cryptoFillRandom()` instance call; the runtime dispatcher routes the synthetic method to `js_buffer_fill_random` which fills bytes in-place via `rand::thread_rng().fill_bytes`.
+  3. **`Buffer.compare(a, b)`** — lowered to `a.compare(b)` instance call, reusing the `dispatch_buffer_method` "compare" arm that calls `js_buffer_compare` (returns -1/0/1 from `slice::cmp`).
+  4. **`Buffer.from([1, 2, 3])` array literal path** — `crates/perry-codegen-llvm/src/expr.rs` `Expr::BufferFrom` now calls `js_buffer_from_value(value_i64, enc)` instead of `js_buffer_from_string` so array literals (NaN-tagged f64 array pointers) sniff the right runtime path. `js_buffer_from_array` learns to decode INT32_TAG and raw-double array elements via `(val as i64) & 0xFF` instead of `val as u32 & 0xFF` (which read NaN-bit garbage for f64-encoded integers).
+  5. **`new Uint8Array(N)` numeric arg** — `Expr::Uint8ArrayNew` codegen now folds compile-time integer/Number args to a direct `js_buffer_alloc(n, 0)` call instead of treating the number as an array pointer (which read 16 bytes from address 0x10 and produced garbage).
+  6. **HIR routing fix** — `lower.rs::ast::Expr::Call` no longer lowers `buf.indexOf/includes/slice` to `Expr::ArrayIndexOf`/`ArrayIncludes`/`ArraySlice` when the receiver type is `Named("Uint8Array"|"Buffer"|"Uint8ClampedArray")`. New `is_buffer_type` branch in the array-method ambiguity ladder skips the array fast path so the methods reach the runtime buffer dispatcher.
+  7. **Type inference** — `crates/perry-hir/src/lower_types.rs::infer_call_return_type` recognizes `Buffer.from/alloc/allocUnsafe/concat` and `crypto.randomBytes/scryptSync/pbkdf2Sync` and refines the local type to `Type::Named("Uint8Array")` so subsequent `buf[i]` uses `Expr::Uint8ArrayGet` (byte-indexed `js_buffer_get`) instead of the f64-array IndexGet path. `crypto.randomUUID()` refines to `String`.
+  8. **Digest chain → string** — `crates/perry-codegen-llvm/src/type_analysis.rs` `is_crypto_digest_chain` walks the nested `crypto.createHash(alg).update(data).digest(enc)` PropertyGet→Call shape. `refine_type_from_init` and `is_string_expr` use it so `const hmac = crypto.createHmac(...).update(...).digest('hex'); hmac === hmac2` routes through `js_string_equals` instead of bit-comparing two distinct allocations.
+  9. **`lower_call.rs` Uint8Array exception** — the native dispatch fallback was previously skipped for any `Named(...)` receiver; the new exception keeps `Uint8Array`/`Buffer`/`Uint8ClampedArray` on the dispatch path so `js_native_call_method` reaches `dispatch_buffer_method`.
+  10. **`BufferConcat`** — `Expr::BufferConcat` codegen calls `js_buffer_concat(arr_handle)` instead of being a passthrough that just returned the array.
+  11. **`bigint_value_to_i64`** — accepts both BIGINT_TAG and POINTER_TAG-encoded BigInt pointers (the codegen folds `Expr::BigInt(...)` through `nanbox_pointer_inline`, not BIGINT_TAG), so `writeBigInt64BE(1234567890123456789n, 0)` actually writes the value instead of zero.
+- Regression sweep clean: test_edge_buffer_from_encoding, test_cli_simulation stay at MATCH; test_crypto/test_require diffs are pre-existing (Node lacks Perry's `crypto.*` globals; UUID nondeterminism).
 
 ### v0.4.147 (llvm-backend)
 - feat: `test_gap_symbols` DIFF (4) → **MATCH**. `Symbol.hasInstance` and `Symbol.toStringTag` now work. `4 instanceof EvenChecker` returns `true` via the user's static method; `Object.prototype.toString.call(new MyCollection())` returns `[object MyCollection]` via the getter. Four coordinated changes:

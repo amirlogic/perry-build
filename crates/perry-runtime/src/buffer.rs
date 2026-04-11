@@ -1206,11 +1206,15 @@ pub extern "C" fn js_buffer_write_biguint64_le(buf_ptr: f64, value: f64, offset:
 fn bigint_value_to_i64(value: f64) -> i64 {
     let bits = value.to_bits();
     let top16 = bits >> 48;
-    if top16 == 0x7FFA {
+    // BigInt pointers can carry either BIGINT_TAG (0x7FFA) or — when the
+    // codegen folds them through the generic `nanbox_pointer_inline` path
+    // (Expr::BigInt) — POINTER_TAG (0x7FFD). Both encode the lower 48 bits
+    // as the heap address. Detect either and use `clean_bigint_ptr` to
+    // strip and validate the address before reading the limb.
+    if top16 >= 0x7FF8 {
         let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::bigint::BigIntHeader;
         let cleaned = crate::bigint::clean_bigint_ptr(ptr);
         if cleaned.is_null() { return 0; }
-        // Read the lowest limb (i64 fits in one u64 limb).
         unsafe { (*cleaned).limbs[0] as i64 }
     } else if value.is_finite() {
         value as i64

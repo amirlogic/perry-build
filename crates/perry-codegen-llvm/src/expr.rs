@@ -4384,7 +4384,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- BufferConcat stub --------
-        Expr::BufferConcat(operand) => lower_expr(ctx, operand),
+        // -------- BufferConcat --------
+        // `Buffer.concat([buf1, buf2, ...])`. Lower the array of buffer
+        // pointers and pass to `js_buffer_concat`. The runtime walks the
+        // array, summing lengths and copying bytes into a fresh buffer.
+        Expr::BufferConcat(operand) => {
+            let arr_box = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let buf_handle = blk.call(I64, "js_buffer_concat", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
+        }
 
         // -------- StaticPluginResolve stub --------
         Expr::StaticPluginResolve(_) => Ok(double_literal(0.0)),
