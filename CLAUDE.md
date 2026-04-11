@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.5
+**Current Version:** 0.5.6
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
+- **fix**: `crates/perry-stdlib/src/sqlite.rs:54` was using `hex::encode(b)` to format SQLite `Blob` columns as hex strings, but the `hex` crate dep in `perry-stdlib`'s `Cargo.toml` is gated behind the `crypto` Cargo feature. Auto-optimize rebuilds that enabled only `database-sqlite` (e.g. mango: `better-sqlite3` + `mongodb` + fetch, no crypto) failed with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate hex` and fell back to the prebuilt full stdlib, leaving every user binary 100KB+ larger than necessary. Replaced with a hand-rolled nibble loop (`const HEX: &[u8; 16] = b"0123456789abcdef"; for &byte in b { out.push(HEX[(byte >> 4) as usize]); out.push(HEX[(byte & 0x0f) as usize]); }`) so sqlite no longer depends on hex. Surgical fix — no Cargo.toml or auto-optimize logic changes. Mango now goes through the auto-optimize rebuild path: prebuilt-fallback 5.18 MB → optimized 5.01 MB (~168 KB / 3.4% savings, mostly from features the user doesn't import being stripped). Original fix done as a worktree-isolated subagent task; the agent's commit was based on a stale `llvm-backend` HEAD so the sqlite.rs change was applied manually here on top of v0.5.5.
 
 ### v0.5.5 (llvm-backend) — `alloca_entry` sweep
 - **fix**: 7 cross-block alloca sites in `expr.rs` / `lower_call.rs` / `stmt.rs` migrated to `LlFunction.alloca_entry()` to close the latent SSA dominance hazards flagged in v0.5.2's followup list. Migrated: catch-clause exception binding (capturable by nested closures in the catch body), `super()`-inlined parent ctor params (capturable by closures inside the parent ctor body), `forEach` loop counter (spans cond/body/exit successor blocks), `Await` result slot (spans check/wait/settled/done/merge blocks; can be lowered inside a nested if-arm), `NewClass` `this_slot` (pushed on `this_stack` for the entire inlined ctor body with nested closures capturing `this`), and the inlined-ctor param slots in two places. Left alone with comment: `js_array_splice out_slot` (single-block scratch, dominance-safe by construction). Mango compiles + links cleanly. Original sweep done as a worktree-isolated subagent task because main was being concurrently edited; cherry-picked back here.

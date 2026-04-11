@@ -2,6 +2,55 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
+
+The fourth followup from the v0.5.1 mango compile sweep. Closes the last item in the v0.5.1 followup list: "auto-optimize perry-stdlib rebuild fails with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate 'hex'`. Falls back to prebuilt — optimized rebuild path is broken."
+
+### Root cause
+
+`crates/perry-stdlib/src/sqlite.rs:54` was calling `hex::encode(b)` to format SQLite `Blob` column values as hex strings inside `sqlite_value_to_jsvalue`. The `hex` crate is a regular dep in `perry-stdlib`'s `Cargo.toml`, but it's gated behind the `crypto` Cargo feature (`hex = { version = "0.4", optional = true }` + `crypto = ["dep:hex", ...]`). The `sqlite.rs` module itself is gated behind the `database-sqlite` feature.
+
+When `crates/perry/src/commands/compile.rs::build_optimized_libs` rebuilds `perry-stdlib` with only the user's actually-needed features, programs that use `database-sqlite` but not `crypto` (mango imports `better-sqlite3` + `mongodb` + fetch, no crypto) end up with `sqlite.rs` compiled but `hex` not pulled in. The compile fails. Auto-optimize catches the failure and falls back to the prebuilt full stdlib (`auto-optimize: cargo build failed (exit exit status: 101), using prebuilt libraries`), so the user's build still succeeds — but they get the 16 MB+ prebuilt artifact instead of the optimized one.
+
+### The fix
+
+Replaced `hex::encode(b)` with a hand-rolled nibble loop, ~8 lines of straightforward Rust:
+
+```rust
+const HEX: &[u8; 16] = b"0123456789abcdef";
+let mut out = Vec::with_capacity(b.len() * 2);
+for &byte in b {
+    out.push(HEX[(byte >> 4) as usize]);
+    out.push(HEX[(byte & 0x0f) as usize]);
+}
+let ptr = js_string_from_bytes(out.as_ptr(), out.len() as u32);
+```
+
+Surgical fix — no `Cargo.toml` changes, no auto-optimize logic changes, no new feature coupling. The alternatives considered were:
+
+- **Add `hex` as an unconditional dep.** Bloats minimal-feature builds with a dep they don't use; the whole point of the gating is to avoid that.
+- **Add `hex` to `database-sqlite`'s feature list.** Couples two unrelated subsystems (sqlite shouldn't pull in a hex encoder; that's a crypto concern).
+- **Hand-roll the encoder.** Smallest blast radius. Hex encoding is trivial — there's nothing to be gained from depending on a crate for it.
+
+### Verified
+
+`cd /Users/amlug/projects/mango && perry compile src/app.ts -o /tmp/Mango-hex-fix`:
+
+```
+auto-optimize: rebuilding runtime+stdlib (panic=unwind, features=database-mongodb,database-sqlite,http-client)
+auto-optimize: built .../libperry_runtime.a (27.8 MB)
+auto-optimize: built .../libperry_stdlib.a (101.9 MB)
+Wrote executable: /tmp/Mango-hex-fix
+```
+
+No `cargo build failed`, no `error[E0433]`. The auto-optimize rebuild succeeds and produces the optimized stdlib.
+
+Mango binary size delta: **5.18 MB → 5.01 MB (~168 KB / 3.4% smaller)**. The savings are modest because mango pulls in most of the stdlib already (mongodb, sqlite, fetch); programs with a smaller surface will see proportionally bigger reductions.
+
+### Process note
+
+This fix was originally executed by a worktree-isolated `general-purpose` Opus subagent (`/Users/amlug/projects/perry/perry/.claude/worktrees/agent-a9e75e4d`, branch `worktree-agent-a9e75e4d`, commit `4850e53`). The agent's worktree was based on an older `llvm-backend` HEAD (`216ed15`, before the v0.5.0 hard cutover), so cherry-picking the commit directly would have brought in stale `Cargo.toml` and `Cargo.lock` state. The `sqlite.rs` change was applied manually here on top of v0.5.5 to avoid that.
+
 ## v0.5.5 (llvm-backend) — `alloca_entry` sweep
 
 The third followup from the v0.5.1 mango compile sweep. Closes the latent SSA dominance hazards from "Other alloca call sites in expr.rs / lower_call.rs / stmt.rs:419 (for-of counters, intermediate result slots, MathMin/Max temp arrays) were NOT migrated" — the v0.5.2 followup item.
