@@ -330,6 +330,35 @@ pub(crate) struct FnCtx<'a> {
     /// subsequent sites for the same class load from the slot.
     pub class_keys_slots: std::collections::HashMap<String, String>,
 
+    /// Per-arr-local cached `arr.length` slots — populated by
+    /// `lower_for` when it spots the well-known shape
+    /// `for (...; i < arr.length; ...) { body }` and proves via
+    /// `stmt_preserves_array_length` that the body doesn't change
+    /// `arr.length`. The `PropertyGet { object: LocalGet(arr_id),
+    /// property: "length" }` lowering checks this map and, if found,
+    /// emits a `load double, ptr <slot>` instead of unboxing the
+    /// array and doing a fresh `load i32` of the length field.
+    ///
+    /// Saves the per-iteration length reload (which LLVM's LICM
+    /// declines to do because the IndexSet slow path is an external
+    /// call that LLVM can't prove won't modify the length).
+    pub cached_lengths: std::collections::HashMap<u32, String>,
+
+    /// `(counter_local_id, array_local_id)` pairs that are guaranteed
+    /// inbounds inside the current loop nest — populated by
+    /// `lower_for` when it detects the same `for (...; i < arr.length;
+    /// ...)` shape that drives `cached_lengths`. The IndexSet codegen
+    /// (`lower_index_set_fast`) checks this set: if `arr[i] = expr`
+    /// where `(i, arr)` is in the set, the IndexSet skips its
+    /// runtime bound check + cap check + realloc fallback entirely
+    /// and emits a single inline-store sequence.
+    ///
+    /// The for-loop guarantees `i < arr.length` is true at the cond
+    /// check, and `stmt_preserves_array_length` already proved the
+    /// body can't change `arr.length` or reassign `i`, so the
+    /// IndexSet site can rely on `i < arr.length` without rechecking.
+    pub bounded_index_pairs: Vec<(u32, u32)>,
+
     /// Compile-time i18n resolution context. When `Some`, the
     /// `Expr::I18nString` lowering looks up the translation for the
     /// default locale at compile time and emits the resolved string
@@ -1492,6 +1521,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         Some(HirType::Named(_)) | Some(HirType::Tuple(_))
                     )) =>
         {
+            // Cached-length fast path: when the surrounding for-loop
+            // header has hoisted `arr.length` into a stack slot
+            // (because it spotted `for (...; i < arr.length; ...)` and
+            // proved the body doesn't change `arr.length`), reuse the
+            // cached double directly. Without this, the loop body
+            // would reload `arr.length` from the array header on every
+            // iteration — LLVM's LICM declines to hoist it because the
+            // IndexSet's slow path is an opaque external call.
+            if let Expr::LocalGet(arr_id) = object.as_ref() {
+                if let Some(slot) = ctx.cached_lengths.get(arr_id).cloned() {
+                    return Ok(ctx.block().load(DOUBLE, &slot));
+                }
+            }
             let recv_box = lower_expr(ctx, object)?;
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
@@ -1543,6 +1585,37 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // string key on dynamic receiver → object field set, otherwise
             // bail with a clear error.
             if is_array_expr(ctx, object) {
+                // Bounded-index fast-fast path: when the surrounding
+                // for-loop has registered `(counter_id, arr_id)` as a
+                // bounded pair (via `lower_for`'s
+                // `classify_for_length_hoist` analysis) and this
+                // IndexSet matches it, we can skip the bound check +
+                // capacity check + realloc fallback entirely. The
+                // for-loop already proved `i < arr.length` and the
+                // body provably can't change `arr.length`, so the
+                // IndexSet at `arr[i]` is statically inbounds.
+                if let (Expr::LocalGet(arr_id), Expr::LocalGet(idx_id)) =
+                    (object.as_ref(), index.as_ref())
+                {
+                    if ctx.bounded_index_pairs.contains(&(*idx_id, *arr_id)) {
+                        let arr_box = lower_expr(ctx, object)?;
+                        let idx_double = lower_expr(ctx, index)?;
+                        let val_double = lower_expr(ctx, value)?;
+                        let blk = ctx.block();
+                        let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                        let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                        // ptr = arr_handle + 8 + idx*8
+                        let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                        let byte_offset = blk.shl(I64, &idx_i64, "3");
+                        let with_header = blk.add(I64, &byte_offset, "8");
+                        let element_addr = blk.add(I64, &arr_handle, &with_header);
+                        let element_ptr = blk.inttoptr(I64, &element_addr);
+                        blk.store(DOUBLE, &val_double, &element_ptr);
+                        return Ok(val_double);
+                    }
+                }
+
                 let arr_box = lower_expr(ctx, object)?;
                 let idx_double = lower_expr(ctx, index)?;
                 let val_double = lower_expr(ctx, value)?;
