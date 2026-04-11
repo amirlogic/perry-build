@@ -983,22 +983,32 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // dispatch (separate stderr for warn/error, dir's depth
             // option, table's tabular layout) lives in a future
             // phase that ports the Cranelift dispatch table.
-            // Zero-arg console.* calls (groupEnd, clear, etc.) — just
-            // dispatch to the runtime helper and return undefined.
-            // Don't print 0.0 as that shows up as literal "0" lines.
+            // Zero-arg console.* calls — handle the truly nullary
+            // methods (groupEnd, clear) and the dataless variants of
+            // log/info/warn/error/debug (which print nothing). Methods
+            // with meaningful zero-arg semantics (count, countReset,
+            // time, timeEnd, timeLog with the implicit "default" label)
+            // intentionally fall through to the dedicated handler below.
             if args.is_empty() {
                 match property.as_str() {
                     "groupEnd" => {
                         ctx.block().call_void("js_console_group_end", &[]);
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
                     }
                     "clear" => {
                         ctx.block().call_void("js_console_clear", &[]);
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+                    }
+                    "count" | "countReset" | "time" | "timeEnd" | "timeLog" => {
+                        // Fall through to the dedicated handler below
+                        // which calls the runtime with the implicit
+                        // "default" label.
                     }
                     _ => {
-                        // Other zero-arg calls like console.log() print nothing.
+                        // log/info/warn/error/debug/etc. — print nothing.
+                        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
                     }
                 }
-                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             // console.group / groupCollapsed with a label — push
             // indent level and print the label.
@@ -1058,6 +1068,70 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 };
                 blk.call_void(runtime_fn, &[(I64, &handle)]);
                 return Ok("0.0".to_string());
+            }
+            // console.assert(cond[, ...messages]) — runtime helper
+            // checks the condition and only prints "Assertion failed: msg"
+            // when cond is falsy. Without this dedicated dispatch, the call
+            // fell through to the multi-arg console.log path which
+            // printed both cond and messages unconditionally ("true should
+            // not appear" / "false assertion failed message").
+            //
+            // Two shapes:
+            //   1. 0–1 message args → js_console_assert(cond, msg_ptr)
+            //   2. 2+ message args  → bundle into array, call
+            //      js_console_assert_spread(cond, arr_ptr) which formats
+            //      each element with format_jsvalue and joins with spaces.
+            if property == "assert" {
+                let cond_v = if args.is_empty() {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+                } else {
+                    lower_expr(ctx, &args[0])?
+                };
+                if args.len() <= 2 {
+                    let msg_handle = if args.len() == 2 {
+                        let msg_v = lower_expr(ctx, &args[1])?;
+                        let blk = ctx.block();
+                        blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &msg_v)])
+                    } else {
+                        "0".to_string()
+                    };
+                    ctx.block()
+                        .call_void("js_console_assert", &[(DOUBLE, &cond_v), (I64, &msg_handle)]);
+                } else {
+                    // Multi-arg messages: bundle args[1..] into a heap
+                    // array and call the spread variant.
+                    let cap = ((args.len() - 1) as u32).to_string();
+                    let mut current_arr = ctx
+                        .block()
+                        .call(I64, "js_array_alloc", &[(I32, &cap)]);
+                    for arg in args.iter().skip(1) {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        current_arr = blk.call(
+                            I64,
+                            "js_array_push_f64",
+                            &[(I64, &current_arr), (DOUBLE, &v)],
+                        );
+                    }
+                    ctx.block().call_void(
+                        "js_console_assert_spread",
+                        &[(DOUBLE, &cond_v), (I64, &current_arr)],
+                    );
+                }
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            // console.dir(obj[, options]) — Node prints just the formatted
+            // object, ignoring the options arg (Perry doesn't honor depth /
+            // colors / showHidden yet). Without this, the multi-arg dispatch
+            // would print both the obj and the options object side by side.
+            if property == "dir" && !args.is_empty() {
+                let v = lower_expr(ctx, &args[0])?;
+                ctx.block().call_void("js_console_log_dynamic", &[(DOUBLE, &v)]);
+                // Lower remaining args for side effects only.
+                for a in args.iter().skip(1) {
+                    let _ = lower_expr(ctx, a)?;
+                }
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             // Single-arg fast path: just print directly.
             if args.len() == 1 {

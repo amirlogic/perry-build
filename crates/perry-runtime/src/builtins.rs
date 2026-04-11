@@ -1559,7 +1559,7 @@ pub extern "C" fn js_console_group_end() {
 
 // === console.assert ===
 //
-// Prints "Assertion failed" + the message string when the condition is false.
+// Prints "Assertion failed" + the message args when the condition is false.
 
 #[no_mangle]
 pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
@@ -1582,13 +1582,53 @@ pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
     }
 }
 
+/// `console.assert(cond, ...messages)` — multi-arg form. The codegen
+/// bundles all the message args (everything after the cond) into a
+/// heap array and passes the raw array pointer here. We format the
+/// messages by calling `format_jsvalue` on each element and joining
+/// with spaces, mirroring Node's `util.format` behavior for simple
+/// inputs (numbers, strings, objects).
+#[no_mangle]
+pub extern "C" fn js_console_assert_spread(cond: f64, args_arr_handle: i64) {
+    use crate::value::js_is_truthy;
+    if js_is_truthy(cond) != 0 { return; }
+
+    let arr_ptr = (args_arr_handle & 0x0000_FFFF_FFFF_FFFF) as *const crate::array::ArrayHeader;
+    if arr_ptr.is_null() {
+        eprintln!("Assertion failed");
+        return;
+    }
+    unsafe {
+        let len = (*arr_ptr).length as usize;
+        if len == 0 {
+            eprintln!("Assertion failed");
+            return;
+        }
+        let elements = (arr_ptr as *const u8)
+            .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+        let mut parts: Vec<String> = Vec::with_capacity(len);
+        for i in 0..len {
+            let v = *elements.add(i);
+            parts.push(crate::builtins::format_jsvalue(v, 0));
+        }
+        eprintln!("Assertion failed: {}", parts.join(" "));
+    }
+}
+
 // === console.clear ===
 //
-// Best-effort: emit ANSI clear sequence on stdout.
+// Best-effort: emit ANSI clear sequence on stdout — but ONLY when stdout
+// is an actual TTY. When stdout is piped or redirected to a file, Node
+// makes `console.clear()` a no-op (no escape sequence written), so emitting
+// it unconditionally would diff against Node by injecting `\x1b[2J\x1b[H`
+// into captured output.
 
 #[no_mangle]
 pub extern "C" fn js_console_clear() {
-    print!("\x1b[2J\x1b[H");
+    use std::io::IsTerminal as _;
+    if std::io::stdout().is_terminal() {
+        print!("\x1b[2J\x1b[H");
+    }
 }
 
 // === console.table ===

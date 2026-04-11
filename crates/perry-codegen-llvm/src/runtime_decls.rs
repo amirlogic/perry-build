@@ -1384,6 +1384,7 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
 
     // ========== Console ==========
     module.declare_function("js_console_assert", VOID, &[DOUBLE, I64]);
+    module.declare_function("js_console_assert_spread", VOID, &[DOUBLE, I64]);
     module.declare_function("js_console_group", VOID, &[I64]);
 
     // ========== Fetch ==========
