@@ -78,6 +78,22 @@ codegen-units = 16
 strip = false
 codegen-units = 16
 
+[profile.release.package.perry-ui-ios]
+strip = false
+codegen-units = 16
+
+[profile.release.package.perry-ui-tvos]
+strip = false
+codegen-units = 16
+
+[profile.release.package.perry-ui-android]
+strip = false
+codegen-units = 16
+
+[profile.release.package.perry-ui-watchos]
+strip = false
+codegen-units = 16
+
 [profile.release.package.perry-stdlib]
 opt-level = "s"       # Optimize for size in stdlib
 
