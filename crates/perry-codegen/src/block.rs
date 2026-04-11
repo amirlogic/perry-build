@@ -82,40 +82,69 @@ impl LlBlock {
     }
 
     // -------- Arithmetic (double) --------
+    //
+    // We emit `reassoc contract` fast-math flags on every float op. These
+    // are the two LLVM FMFs that unlock the optimizations we actually want
+    // on tight numeric loops:
+    //
+    //   - `reassoc`: lets LLVM reorder `(a + b) + c → a + (b + c)`, which
+    //     is what the loop-vectorizer needs to break a serial accumulator
+    //     chain into 4 parallel accumulators. Without it, `sum += 1` in a
+    //     100M-iter loop runs at the 3-cycle fadd latency (~100ms); with
+    //     it, LLVM unrolls 8x + vectorizes 2-wide + splits into 4 parallel
+    //     vector accumulators → ~12ms, beating Node (~60ms) and Bun by 4x.
+    //   - `contract`: allow fused multiply-add (FMA). A single FMA is 2
+    //     ops in 1 instruction (and 1 rounding step), which speeds up any
+    //     `x * y + z` pattern, which is common in matrix and vector math.
+    //
+    // We deliberately DON'T emit the full `fast` flag set (`nnan ninf nsz
+    // arcp contract afn reassoc`). Those would change NaN/Inf/signed-zero
+    // semantics in ways JS programs can observe — e.g. `Math.max(-0, 0)`
+    // is -0 in JS but could flip with `nsz`. `reassoc` alone can produce
+    // different results when an explicit Infinity is summed in, but Perry
+    // already uses `-ffast-math` at the clang step (see commit 083ce16),
+    // so this is consistent with the project's existing stance: trade
+    // strict IEEE behaviour for throughput.
+    //
+    // The clang `-ffast-math` flag does NOT retroactively apply to ops
+    // already in an `.ll` input file — the FMFs must be on each
+    // instruction. That's why adding them at the IR-builder layer is
+    // load-bearing; passing `-ffast-math` at the clang step alone was a
+    // no-op for our emitted IR.
 
     pub fn fadd(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = fadd double {}, {}", r, a, b));
+        self.emit(format!("{} = fadd reassoc contract double {}, {}", r, a, b));
         r
     }
 
     pub fn fsub(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = fsub double {}, {}", r, a, b));
+        self.emit(format!("{} = fsub reassoc contract double {}, {}", r, a, b));
         r
     }
 
     pub fn fmul(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = fmul double {}, {}", r, a, b));
+        self.emit(format!("{} = fmul reassoc contract double {}, {}", r, a, b));
         r
     }
 
     pub fn fdiv(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = fdiv double {}, {}", r, a, b));
+        self.emit(format!("{} = fdiv reassoc contract double {}, {}", r, a, b));
         r
     }
 
     pub fn frem(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = frem double {}, {}", r, a, b));
+        self.emit(format!("{} = frem reassoc contract double {}, {}", r, a, b));
         r
     }
 
     pub fn fneg(&mut self, a: &str) -> String {
         let r = self.reg();
-        self.emit(format!("{} = fneg double {}", r, a));
+        self.emit(format!("{} = fneg reassoc contract double {}", r, a));
         r
     }
 
@@ -458,7 +487,7 @@ mod tests {
         let mut b = fresh();
         let r = b.fadd("1.0", "2.0");
         assert_eq!(r, "%r1");
-        assert_eq!(b.to_ir(), "entry.0:\n  %r1 = fadd double 1.0, 2.0");
+        assert_eq!(b.to_ir(), "entry.0:\n  %r1 = fadd reassoc contract double 1.0, 2.0");
     }
 
     #[test]
