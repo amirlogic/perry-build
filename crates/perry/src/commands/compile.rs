@@ -58,11 +58,12 @@ pub struct CompileArgs {
     #[arg(long, default_value = "executable")]
     pub output_type: String,
 
-    /// Codegen backend: cranelift (default, stable) or llvm (experimental).
-    /// The llvm backend is under active development — it supports only a
-    /// tiny subset of Perry's HIR and is intended for perf/size/RAM
-    /// comparison experiments, not production use.
-    #[arg(long, default_value = "cranelift")]
+    /// Codegen backend: llvm (default, production) or cranelift (deprecated).
+    /// The LLVM backend is the primary build path. Cranelift remains
+    /// available during a grace period for regression reports but will be
+    /// removed in a future release — passing `--backend cranelift`
+    /// explicitly now emits a deprecation warning.
+    #[arg(long, default_value = "llvm")]
     pub backend: String,
 
     /// Bundle TypeScript extensions from directory.
@@ -4202,6 +4203,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     });
 
     let use_llvm_backend = args.backend == "llvm";
+    // Phase K soft cutover: LLVM is now the default backend. Warn when
+    // the user explicitly passed `--backend cranelift` so they know the
+    // path is on its way out. The warning is a one-liner to stderr so
+    // it doesn't pollute stdout output (scripts that capture compile
+    // output stay clean).
+    if args.backend == "cranelift" {
+        eprintln!(
+            "warning: --backend cranelift is deprecated and will be removed \
+             in a future release. LLVM is the default backend as of \
+             Perry 0.4.139. Please report any LLVM regressions at \
+             https://github.com/PerryTS/perry/issues."
+        );
+    }
     // Phase J: detect bitcode-link mode. The actual .bc paths aren't known
     // yet (build_optimized_libs runs after compilation), but we decide the
     // mode here so the per-module codegen can emit .ll instead of .o.
