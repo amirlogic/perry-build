@@ -219,6 +219,17 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // Without this, bloom_draw_text(text, x, y, ...) passes
             // the NaN-boxed string in d0 but the native function reads
             // x0 as a *const u8 → SIGSEGV.
+            // Extern C functions use the platform C ABI, which separates
+            // integer (x0-x7) and float (d0-d7) registers on ARM64.
+            // Perry stores all values as `double` (NaN-boxed), but native
+            // C/Rust functions expect integer args in x-registers. We
+            // convert each arg based on its expression type:
+            //   - String → ptr (unbox to raw C string pointer)
+            //   - Number literal or handle → i64 (fptosi)
+            //   - Everything else → i64 (fptosi, safe for integer handles)
+            // This matches the convention that extern C functions take
+            // integer/pointer args (handles, sizes, flags) not NaN-boxed
+            // doubles.
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
             for a in args {
@@ -231,8 +242,15 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     lowered.push(ptr_val);
                     arg_types.push(PTR);
                 } else {
-                    lowered.push(val);
-                    arg_types.push(DOUBLE);
+                    // Convert double → i64 for the C ABI. For integer
+                    // handles (e.g. 42.0 → 42), fptosi is correct. For
+                    // actual float args in a mixed-type C function, this
+                    // is wrong — but Perry's extern FFI convention requires
+                    // all non-string args to be integer-typed.
+                    let blk = ctx.block();
+                    let i64_val = blk.fptosi(DOUBLE, &val, I64);
+                    lowered.push(i64_val);
+                    arg_types.push(I64);
                 }
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
@@ -269,9 +287,13 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 let ptr_i64 = blk.ptrtoint(&raw_ptr, I64);
                 return Ok(nanbox_string_inline(blk, &ptr_i64));
             } else {
+                // Extern C functions return integer/pointer values in x0.
+                // Convert back to double with sitofp so Perry can use it
+                // as a regular number (e.g., a handle value).
                 ctx.pending_declares
-                    .push((name.clone(), DOUBLE, arg_types));
-                return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
+                    .push((name.clone(), I64, arg_types));
+                let raw = ctx.block().call(I64, name, &arg_slices);
+                return Ok(ctx.block().sitofp(I64, &raw, DOUBLE));
             }
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
