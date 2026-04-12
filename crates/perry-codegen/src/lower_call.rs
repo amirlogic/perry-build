@@ -259,7 +259,14 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // like width/height/color).
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
-            for a in args {
+            // Determine if this function takes a handle as its first arg.
+            // Most extern C functions follow the pattern: first arg is a
+            // pointer/handle (i64), remaining args are floats (f64) or strings.
+            // Exceptions: _create functions often take all-float args.
+            let first_arg_is_handle = args.len() > 0
+                && is_integer_handle_arg(&args[0])
+                && !name.contains("_create");
+            for (i, a) in args.iter().enumerate() {
                 let val = lower_expr(ctx, a)?;
                 if is_string_expr(ctx, a) {
                     // Unbox NaN-boxed string to raw C string pointer.
@@ -268,14 +275,14 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let ptr_val = blk.inttoptr(I64, &raw_ptr);
                     lowered.push(ptr_val);
                     arg_types.push(PTR);
-                } else if is_integer_handle_arg(a) {
-                    // Handle/pointer arg: convert to i64 for x-register.
+                } else if i == 0 && first_arg_is_handle {
+                    // First arg is a handle/pointer → i64 for x0.
                     let blk = ctx.block();
                     let i64_val = blk.fptosi(DOUBLE, &val, I64);
                     lowered.push(i64_val);
                     arg_types.push(I64);
                 } else {
-                    // Float arg: keep as double for d-register.
+                    // Float arg or subsequent args → double for d-register.
                     lowered.push(val);
                     arg_types.push(DOUBLE);
                 }
