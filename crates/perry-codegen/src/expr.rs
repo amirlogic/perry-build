@@ -223,6 +223,8 @@ pub(crate) struct FnCtx<'a> {
     /// map, `compile_new` falls back to the slower
     /// `js_object_alloc_class_with_keys` path.
     pub class_keys_globals: &'a std::collections::HashMap<String, String>,
+    /// Imported class constructor names: class_name → (ctor_fn_name, param_count).
+    pub imported_class_ctors: &'a std::collections::HashMap<String, (String, usize)>,
     /// Per-function param signature: `(declared_param_count,
     /// has_rest_param)`. Used by FuncRef call sites to know whether
     /// to bundle trailing arguments into a rest array.

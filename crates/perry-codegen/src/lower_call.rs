@@ -1563,6 +1563,11 @@ pub(crate) fn lower_new(
     // The runtime allocates at least 8 inline slots regardless, so this
     // mostly matters for shapes >8 fields.
     let mut field_count = class.fields.len() as u32;
+    // Imported classes have fields: Vec::new() (stub). Use a generous
+    // minimum so the constructor has enough space to write fields.
+    if field_count == 0 && class.constructor.is_none() {
+        field_count = 16; // enough for most imported classes
+    }
     let mut parent = class.extends_name.as_deref();
     while let Some(parent_name) = parent {
         if let Some(p) = ctx.classes.get(parent_name).copied() {
@@ -1925,6 +1930,21 @@ pub(crate) fn lower_new(
             } else {
                 break;
             }
+        }
+        // If no parent constructor was found (imported class with no
+        // inlineable constructor body), call the cross-module constructor.
+        if let Some((ctor_name, _param_count)) = ctx.imported_class_ctors.get(class_name).cloned() {
+            // Pass `this` as NaN-boxed double (same as compile_method's this_arg).
+            let mut ctor_args: Vec<(crate::types::LlvmType, &str)> = Vec::with_capacity(1 + lowered_args.len());
+            ctor_args.push((DOUBLE, &obj_box));
+            let ctor_param_types: Vec<crate::types::LlvmType> = std::iter::once(DOUBLE)
+                .chain(lowered_args.iter().map(|_| DOUBLE))
+                .collect();
+            for la in &lowered_args {
+                ctor_args.push((DOUBLE, la.as_str()));
+            }
+            ctx.pending_declares.push((ctor_name.clone(), crate::types::VOID, ctor_param_types));
+            ctx.block().call_void(&ctor_name, &ctor_args);
         }
     }
 

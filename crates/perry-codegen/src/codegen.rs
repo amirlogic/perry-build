@@ -186,6 +186,10 @@ pub(crate) struct CrossModuleCtx {
     /// allocator. See `js_object_alloc_class_inline_keys` in
     /// `perry-runtime/src/object.rs`.
     pub class_keys_globals: std::collections::HashMap<String, String>,
+    /// Imported class constructor function names. Maps class_name →
+    /// full constructor symbol (e.g. "Editor" → "hone_editor_...__Editor_constructor").
+    /// Populated from `opts.imported_classes`.
+    pub imported_class_ctors: std::collections::HashMap<String, (String, usize)>,
     /// Compile-time i18n table for resolving `Expr::I18nString` against
     /// the project's default locale. `None` when i18n is not configured.
     /// Built from `opts.i18n_table` once at the top of `compile_module`
@@ -435,6 +439,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         imported_func_param_counts: opts.imported_func_param_counts,
         imported_func_return_types: opts.imported_func_return_types,
         class_keys_globals: class_keys_globals_map,
+        imported_class_ctors: opts.imported_classes.iter().map(|ic| {
+            let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+            let ctor_name = format!("{}__{}_constructor", ic.source_prefix, ic.name);
+            (effective_name.to_string(), (ctor_name, ic.constructor_param_count))
+        }).collect(),
         // Per-module i18n lowering context. Built from `opts.i18n_table`
         // when i18n is configured; `None` otherwise. The
         // `Expr::I18nString` lowering pulls the right translation row at
@@ -586,6 +595,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 scoped_method_name(&module_prefix, &c.name, &m.name),
             );
         }
+        // Constructor: register as a method so compile_method can find it.
+        // Emitted for ALL classes (even without explicit constructors)
+        // so cross-module `new` can call the constructor.
+        {
+            let ctor_method_name = format!("{}_constructor", c.name);
+            method_names.insert(
+                (c.name.clone(), ctor_method_name.clone()),
+                format!("{}__{}_constructor", module_prefix, c.name),
+            );
+        }
         // Getters: register under the property name with a `__get_`
         // prefix to avoid colliding with a regular method of the same
         // name. The dispatch site for `obj.prop` checks the getter
@@ -675,7 +694,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             sanitize(src),
             sanitize(&ic.name),
         );
-        let mut ctor_params: Vec<crate::types::LlvmType> = vec![I64];
+        let mut ctor_params: Vec<crate::types::LlvmType> = vec![DOUBLE];
         for _ in 0..ic.constructor_param_count {
             ctor_params.push(DOUBLE);
         }
@@ -916,6 +935,35 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             renamed.name = format!("__set_{}", prop);
             compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
+        }
+        // Emit standalone constructor for cross-module use.
+        // Compiled like a method: takes (i64 this, double arg0, ...) → void.
+        // The constructor name matches the import declaration:
+        // `<prefix>__<class>_constructor`.
+        {
+            let ctor_body = class.constructor.as_ref()
+                .map(|c| (c.params.clone(), c.body.clone(), c.captures.clone()))
+                .unwrap_or_else(|| (Vec::new(), Vec::new(), Vec::new()));
+            let ctor_as_method = perry_hir::Function {
+                id: 0,
+                name: format!("{}_constructor", class.name),
+                type_params: Vec::new(),
+                params: ctor_body.0,
+                return_type: perry_types::Type::Void,
+                body: ctor_body.1,
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                captures: ctor_body.2,
+                decorators: Vec::new(),
+            };
+            compile_method(
+                &mut llmod, class, &ctor_as_method, &func_names, &mut strings,
+                &class_table, &method_names, &module_globals,
+                &opts.import_function_prefixes, &enum_table,
+                &static_field_globals, &class_ids, &func_signatures,
+                &module_boxed_vars, &closure_rest_params, &cross_module,
+            ).with_context(|| format!("lowering constructor for '{}'", class.name))?;
         }
         // Static methods compile as plain functions named
         // `perry_static_<modprefix>__<class>__<method>` — no `this`
@@ -1218,6 +1266,7 @@ fn compile_function(
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
         boxed_vars,
         closure_rest_params,
@@ -1452,6 +1501,7 @@ fn compile_closure(
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
         boxed_vars: closure_boxed_vars,
         closure_rest_params,
@@ -1580,6 +1630,7 @@ fn compile_method(
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
         boxed_vars: method_boxed_vars,
         closure_rest_params,
@@ -1711,6 +1762,7 @@ fn compile_module_entry(
             static_field_globals,
             class_ids,
             class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
             func_signatures,
             boxed_vars: main_boxed_vars,
             closure_rest_params: &closure_rest_params,
@@ -1814,6 +1866,7 @@ fn compile_module_entry(
             static_field_globals,
             class_ids,
             class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
             func_signatures,
             boxed_vars: init_boxed_vars,
             closure_rest_params: &closure_rest_params,
@@ -2074,6 +2127,7 @@ fn compile_static_method(
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
+            imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
         boxed_vars: module_boxed_vars.clone(),
         closure_rest_params,
