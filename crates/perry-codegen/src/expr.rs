@@ -1908,6 +1908,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if matches!(object.as_ref(), Expr::GlobalGet(_)) {
                 return Ok(double_literal(0.0));
             }
+            // Imported exported-variable access: `Key.DOWN`, `FILTER.X`.
+            // ExternFuncRef used as a PropertyGet object means an
+            // imported const — call the getter function to load the
+            // actual object value, then do the property access on it.
+            // Without this, the codegen uses the address of the
+            // ClosureHeader global (wrong memory) instead of the
+            // object stored in the module's export global.
+            if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                if let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() {
+                    let getter = format!("perry_fn_{}__{}", source_prefix, name);
+                    ctx.pending_declares
+                        .push((getter.clone(), DOUBLE, vec![]));
+                    let obj_val = ctx.block().call(DOUBLE, &getter, &[]);
+                    // Now do property access on the actual object.
+                    let key_idx = ctx.strings.intern(property);
+                    let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                    let blk = ctx.block();
+                    let obj_bits = blk.bitcast_double_to_i64(&obj_val);
+                    let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                    let key_box = blk.load(DOUBLE, &key_handle_global);
+                    let key_bits = blk.bitcast_double_to_i64(&key_box);
+                    let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                    return Ok(blk.call(
+                        DOUBLE,
+                        "js_object_get_field_by_name_f64",
+                        &[(I64, &obj_handle), (I64, &key_handle)],
+                    ));
+                }
+            }
             // Getter dispatch: if the receiver is a known class and
             // the property is registered as a getter, call the
             // synthesized __get_<property> method instead of doing a
