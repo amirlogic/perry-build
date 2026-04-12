@@ -1688,8 +1688,26 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 } else {
                     None
                 };
+                // Use the fast inlined IndexSet path only when the
+                // receiver is a local that's actually in ctx.locals
+                // (stack slot). Module-level arrays accessed from inside
+                // a function are in ctx.module_globals instead — for
+                // those we fall through to the generic js_array_set_f64
+                // call because lower_index_set_fast needs a local slot
+                // to write back a potentially-reallocated pointer.
                 if let Some(id) = local_id {
-                    lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
+                    if ctx.locals.contains_key(&id) {
+                        lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
+                    } else {
+                        let blk = ctx.block();
+                        let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                        let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                        blk.call_void(
+                            "js_array_set_f64",
+                            &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                        );
+                    }
                 } else {
                     let blk = ctx.block();
                     let arr_bits = blk.bitcast_double_to_i64(&arr_box);
