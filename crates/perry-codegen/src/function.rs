@@ -111,6 +111,13 @@ impl LlFunction {
         r
     }
 
+    /// Push a store instruction into the entry-block alloca section.
+    /// Used to initialize allocas to a safe default (e.g. TAG_UNDEFINED)
+    /// at the top of the function, before any user code runs.
+    pub fn entry_allocas_push_store(&mut self, ty: crate::types::LlvmType, val: &str, ptr: &str) {
+        self.entry_allocas.push(format!("  store {} {}, ptr {}", ty, val, ptr));
+    }
+
     /// Emit a one-time function-entry init sequence: allocate a `ptr`
     /// slot, call `func_name()` (no args), store the result in the
     /// slot, return the slot pointer name. Used by the inline bump

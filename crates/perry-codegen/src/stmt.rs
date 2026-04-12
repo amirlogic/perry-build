@@ -208,6 +208,16 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             // this local, because the alloca block doesn't dominate the
             // closure-capture site.
             let slot = ctx.func.alloca_entry(DOUBLE);
+            // Initialize to TAG_UNDEFINED so that if a try/catch path
+            // skips the real init, reads from this slot produce undefined
+            // (which runtime functions handle safely) rather than 0.0
+            // (which looks like a null pointer when NaN-unboxed).
+            {
+                let undef = crate::nanbox::double_literal(f64::from_bits(
+                    crate::nanbox::TAG_UNDEFINED,
+                ));
+                ctx.func.entry_allocas_push_store(DOUBLE, &undef, &slot);
+            }
             ctx.locals.insert(*id, slot.clone());
             ctx.local_types.insert(*id, refined_ty);
             if let Some(init_expr) = init {
