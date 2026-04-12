@@ -679,6 +679,15 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
     registry.as_ref().and_then(|r| r.get(&class_id).copied())
 }
 
+/// Check if a pointer is a valid heap object (safe to dereference GcHeader).
+/// On macOS ARM64, heap allocations from mmap are > 0x100000000 (4GB).
+/// Values below that are likely INT32_TAG extracts, small handles, or null.
+#[inline(always)]
+fn is_valid_obj_ptr(ptr: *const u8) -> bool {
+    let addr = ptr as usize;
+    addr > 0x100000 && (addr >> 48) == 0
+}
+
 /// Object header - precedes the fields in memory
 #[repr(C)]
 pub struct ObjectHeader {
@@ -1183,7 +1192,7 @@ pub unsafe extern "C" fn js_object_copy_own_fields(dst_i64: i64, src_f64: f64) {
 #[no_mangle]
 pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32) -> JSValue {
     let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return JSValue::undefined(); } (b & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader } else { obj } };
-    if obj.is_null() || (obj as usize) < 0x10000 { return JSValue::undefined(); }
+    if obj.is_null() || (obj as usize) < 0x1000000 { return JSValue::undefined(); }
     unsafe {
         // Bounds check: check inline fields first, then overflow map
         let fc = (*obj).field_count;
@@ -1216,7 +1225,7 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
 #[no_mangle]
 pub extern "C" fn js_object_set_field(obj: *mut ObjectHeader, field_index: u32, value: JSValue) {
     let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return; } (b & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader } else { obj } };
-    if obj.is_null() || (obj as usize) < 0x10000 { return; }
+    if obj.is_null() || (obj as usize) < 0x1000000 { return; }
     unsafe {
         // Bounds check: guard against out-of-range field writes that corrupt adjacent
         // arena allocations. js_object_alloc_with_shape uses max(field_count, 8) physical
@@ -1249,7 +1258,7 @@ pub extern "C" fn js_object_set_field(obj: *mut ObjectHeader, field_index: u32, 
 /// Get the class ID of an object
 #[no_mangle]
 pub extern "C" fn js_object_get_class_id(obj: *const ObjectHeader) -> u32 {
-    if obj.is_null() || (obj as usize) < 0x1000 {
+    if obj.is_null() || (obj as usize) < 0x100000 {
         return 0;
     }
     unsafe { (*obj).class_id }
@@ -1304,7 +1313,7 @@ pub extern "C" fn js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u
 /// invariants set up by `Object.defineProperty`.
 #[no_mangle]
 pub extern "C" fn js_object_set_field_by_index(obj: *mut ObjectHeader, key: *const crate::string::StringHeader, field_index: u32, value: f64) {
-    if obj.is_null() || (obj as usize) < 0x10000 { return; }
+    if obj.is_null() || (obj as usize) < 0x1000000 { return; }
     unsafe {
         // Frozen objects reject all writes.
         let gc = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
@@ -1526,7 +1535,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             obj
         }
     };
-    if obj.is_null() || (obj as usize) < 0x10000 {
+    if obj.is_null() || (obj as usize) < 0x1000000 {
         return JSValue::undefined();
     }
     unsafe {
@@ -1593,6 +1602,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             return JSValue::undefined();
         }
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if !is_valid_obj_ptr(obj as *const u8) { return JSValue::undefined(); }
         let gc_type = (*gc_header).obj_type;
         // Error objects: route the common instance properties (message,
         // name, stack, cause) through the dedicated error accessors.
@@ -1936,7 +1946,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             obj
         }
     };
-    if obj.is_null() || (obj as usize) < 0x10000 {
+    if obj.is_null() || (obj as usize) < 0x1000000 {
         // Small non-null value — could be a stripped handle (after ensure_i64 stripped NaN-box tag)
         if !obj.is_null() && (obj as usize) > 0 {
             unsafe {
@@ -1963,6 +1973,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let gc_type = (*gc_header).obj_type;
         if gc_type != crate::gc::GC_TYPE_OBJECT && gc_type != crate::gc::GC_TYPE_CLOSURE {
+        if !is_valid_obj_ptr(obj as *const u8) { return; }
             // Not a heap object/closure — only accept object_type == 1 (OBJECT_TYPE_REGULAR)
             let object_type = (*obj).object_type;
             if object_type != crate::error::OBJECT_TYPE_REGULAR {
@@ -2655,6 +2666,7 @@ pub unsafe extern "C" fn js_native_call_method(
         if (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT {
             if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
                 return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+        if !is_valid_obj_ptr(obj as *const u8) { return 0.0; }
             }
 
             // Scan object fields for a callable property (closure stored via IndexSet)
@@ -2803,6 +2815,7 @@ pub unsafe extern "C" fn js_native_call_method(
             // Check for native module namespace
             if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
                 return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+        if !is_valid_obj_ptr(obj as *const u8) { return 0.0; }
             }
 
             // Field name scan on this object
@@ -2936,6 +2949,7 @@ pub unsafe extern "C" fn js_native_call_method(
         if gc_type != crate::gc::GC_TYPE_OBJECT {
             // Only accept object_type == 1 (OBJECT_TYPE_REGULAR)
             let object_type = (*obj).object_type;
+        if !is_valid_obj_ptr(obj as *const u8) { return 0.0; }
             if object_type != crate::error::OBJECT_TYPE_REGULAR {
                 let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
                 return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
@@ -3383,7 +3397,7 @@ unsafe fn get_module_name_from_namespace(namespace_obj: f64) -> &'static str {
         return "";
     }
     let obj = jsval.as_pointer::<ObjectHeader>();
-    if obj.is_null() || (obj as usize) < 0x1000 {
+    if obj.is_null() || (obj as usize) < 0x100000 {
         return "";
     }
     let module_field = js_object_get_field(obj as *mut _, 0);
@@ -3909,7 +3923,7 @@ pub extern "C" fn js_object_has_own(obj_value: f64, key_value: f64) -> f64 {
     const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
     unsafe {
         let obj = extract_obj_ptr(obj_value);
-        if obj.is_null() || (obj as usize) < 0x10000 {
+        if obj.is_null() || (obj as usize) < 0x1000000 {
             return f64::from_bits(TAG_FALSE);
         }
         let key_str = crate::builtins::js_string_coerce(key_value);
@@ -4044,7 +4058,7 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
 /// so the property is enumerable-filterable and discoverable by `getOwnPropertyNames`
 /// even when the value is undefined or the property is an accessor (no underlying slot).
 unsafe fn ensure_key_in_keys_array(obj: *mut ObjectHeader, key: *const crate::StringHeader) {
-    if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
+    if obj.is_null() || (obj as usize) < 0x1000000 || key.is_null() {
         return;
     }
     // If no keys array exists, create one with this key.
@@ -4188,7 +4202,7 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
 
 /// Helper: does `key` appear in `obj.keys_array`?
 unsafe fn own_key_present(obj: *mut ObjectHeader, key: *const crate::StringHeader) -> bool {
-    if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
+    if obj.is_null() || (obj as usize) < 0x1000000 || key.is_null() {
         return false;
     }
     let keys = (*obj).keys_array;
