@@ -92,6 +92,10 @@ Perry switched from Cranelift to LLVM as its sole code generation backend in v0.
 
 The LLVM v0.5.0 column represents the state immediately after the Cranelift-to-LLVM cutover, before any optimization work. The v0.5.12 column is the current state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, and loop-invariant length hoisting.
 
+### A note on compile times
+
+Cranelift is often praised for fast compilation, and it is — but the difference is smaller than you'd expect. Perry previously used Cranelift and switched to LLVM in v0.5.0. Compile times increased by only ~20-50ms (8-19%), because the bulk of Perry's compile time is SWC parsing, HIR lowering, and linking — not the codegen backend. On a typical file LLVM adds about 25ms over Cranelift while producing code that runs up to 24x faster. A worthwhile trade.
+
 Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, cargo).
 
 ## Binary Size
