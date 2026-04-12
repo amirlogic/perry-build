@@ -6499,11 +6499,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "0".to_string()
             };
             // js_child_process_exec_sync(cmd: i64, opts: i64) -> i64 (string handle)
-            let result = ctx.block().call(
+            // Runtime returns null on error; guard against it by
+            // replacing null with an empty string so `.length` reads 0
+            // instead of crashing.
+            let raw = ctx.block().call(
                 I64,
                 "js_child_process_exec_sync",
                 &[(I64, &cmd_str), (I64, &opts_str)],
             );
+            let is_null = ctx.block().icmp_eq(I64, &raw, "0");
+            let empty = ctx.block().call(
+                I64,
+                "js_string_from_bytes",
+                &[(PTR, "null"), (I32, "0")],
+            );
+            let blk = ctx.block();
+            let result = blk.select(crate::types::I1, &is_null, I64, &empty, &raw);
             Ok(nanbox_string_inline(ctx.block(), &result))
         }
 

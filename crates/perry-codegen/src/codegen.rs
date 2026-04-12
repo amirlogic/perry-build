@@ -1080,6 +1080,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         hir.name,
         strings.len()
     );
+    // Save .ll files when PERRY_SAVE_LL=<dir> is set
+    if let Ok(save_dir) = std::env::var("PERRY_SAVE_LL") {
+        let filename = format!("{}/{}.ll", save_dir, module_prefix);
+        let _ = std::fs::write(&filename, &ll_text);
+    }
     if opts.emit_ir_only {
         Ok(ll_text.into_bytes())
     } else {
