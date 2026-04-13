@@ -870,7 +870,7 @@ pub extern "C" fn js_promise_race(promises_arr: *const crate::array::ArrayHeader
             js_promise_resolve(result_promise, unsafe { (*promise_ptr).value });
             return result_promise;
         } else if matches!(state, PromiseState::Rejected) {
-            js_promise_reject(result_promise, unsafe { (*promise_ptr).value });
+            js_promise_reject(result_promise, unsafe { (*promise_ptr).reason });
             return result_promise;
         }
 
