@@ -1364,7 +1364,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let handle = blk.call(I64, "js_promise_rejected", &[(DOUBLE, &reason)]);
                     return Ok(nanbox_pointer_inline(blk, &handle));
                 }
-                "all" | "race" | "allSettled" => {
+                "all" | "race" | "allSettled" | "any" => {
                     if args.is_empty() {
                         return Ok(double_literal(0.0));
                     }
@@ -1374,9 +1374,18 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let runtime_fn = match property.as_str() {
                         "all" => "js_promise_all",
                         "race" => "js_promise_race",
+                        "any" => "js_promise_any",
                         _ => "js_promise_all_settled",
                     };
                     let handle = blk.call(I64, runtime_fn, &[(I64, &arr_handle)]);
+                    return Ok(nanbox_pointer_inline(blk, &handle));
+                }
+                "withResolvers" => {
+                    // Promise.withResolvers<T>() returns { promise, resolve, reject }.
+                    // We create a pending promise and return an object with
+                    // the promise + resolve/reject closures.
+                    let blk = ctx.block();
+                    let handle = blk.call(I64, "js_promise_with_resolvers", &[]);
                     return Ok(nanbox_pointer_inline(blk, &handle));
                 }
                 // `Array.fromAsync(input)` — Node 22+ static method.

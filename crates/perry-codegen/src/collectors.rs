@@ -1548,6 +1548,18 @@ fn i64_body(cx: &mut I64Cx<'_>, ss: &[Stmt]) {
         match s {
             Stmt::Return(Some(e)) => { let v = i64_val(cx, e); cx.f.block_mut(cx.cur).unwrap().ret(I64, &v); }
             Stmt::Return(None) => { cx.f.block_mut(cx.cur).unwrap().ret(I64, "0"); }
+            Stmt::Let { id, init: Some(e), .. } => {
+                let v = i64_val(cx, e);
+                let slot = cx.f.block_mut(cx.cur).unwrap().alloca(I64);
+                cx.f.block_mut(cx.cur).unwrap().store(I64, &v, &slot);
+                cx.locals.insert(*id, slot);
+            }
+            Stmt::Let { id, init: None, .. } => {
+                let slot = cx.f.block_mut(cx.cur).unwrap().alloca(I64);
+                cx.f.block_mut(cx.cur).unwrap().store(I64, "0", &slot);
+                cx.locals.insert(*id, slot);
+            }
+            Stmt::Expr(e) => { let _ = i64_val(cx, e); }
             Stmt::If { condition, then_branch, else_branch } => {
                 let cond = i64_cond(cx, condition);
                 let _ = cx.f.create_block("i64.then");

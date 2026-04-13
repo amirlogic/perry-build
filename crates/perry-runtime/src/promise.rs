@@ -310,6 +310,9 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
     // Process pending thread results (from perry/thread spawn)
     ran += crate::thread::js_thread_process_pending();
 
+    // Drain queued microtasks (from queueMicrotask() calls).
+    crate::builtins::js_drain_queued_microtasks();
+
     // Then process the task queue
     loop {
         let task = TASK_QUEUE.with(|q| q.borrow_mut().pop());
@@ -574,7 +577,7 @@ pub extern "C" fn js_value_is_promise(value: f64) -> i32 {
     if tag != POINTER_TAG {
         return 0;
     }
-    let ptr_usize = (bits & POINTER_MASK) as usize;
+    let ptr_usize = (bits & crate::value::POINTER_MASK) as usize;
     if ptr_usize < 0x10000 {
         return 0;
     }
@@ -1216,4 +1219,81 @@ pub fn scan_promise_roots(mark: &mut dyn FnMut(f64)) {
             mark(value);
         }
     });
+}
+
+/// Promise.withResolvers<T>() — returns an object with { promise, resolve, reject }.
+/// The resolve/reject are closures that settle the promise when called.
+#[no_mangle]
+pub extern "C" fn js_promise_with_resolvers() -> *mut crate::object::ObjectHeader {
+    
+    use crate::object::{js_object_alloc_with_shape, ObjectHeader};
+    use crate::closure::js_closure_alloc;
+
+    // Create the pending promise.
+    let promise = js_promise_new();
+    let promise_box = crate::value::js_nanbox_pointer(promise as i64);
+
+    // Create resolve closure that resolves this promise.
+    let resolve_fn = js_closure_alloc(
+        with_resolvers_resolve_handler as *const u8,
+        1, // 1 capture: the promise pointer
+    );
+    unsafe {
+        crate::closure::js_closure_set_capture_f64(resolve_fn, 0, promise_box);
+    }
+    let resolve_box = crate::value::js_nanbox_pointer(resolve_fn as i64);
+
+    // Create reject closure.
+    let reject_fn = js_closure_alloc(
+        with_resolvers_reject_handler as *const u8,
+        1,
+    );
+    unsafe {
+        crate::closure::js_closure_set_capture_f64(reject_fn, 0, promise_box);
+    }
+    let reject_box = crate::value::js_nanbox_pointer(reject_fn as i64);
+
+    // Build the { promise, resolve, reject } object.
+    // Use a 3-field object with packed keys "promise\0resolve\0reject\0".
+    let packed = b"promise\0resolve\0reject\0";
+    let obj = js_object_alloc_with_shape(
+        0xFFF0_0001, // unique shape id
+        3,
+        packed.as_ptr(),
+        packed.len() as u32,
+    );
+
+    // Store the three fields.
+    unsafe {
+        let fields = (obj as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut f64;
+        *fields.add(0) = promise_box;  // .promise
+        *fields.add(1) = resolve_box;  // .resolve
+        *fields.add(2) = reject_box;   // .reject
+    }
+
+    obj
+}
+
+extern "C" fn with_resolvers_resolve_handler(
+    closure: *const crate::closure::ClosureHeader,
+    value: f64,
+) -> f64 {
+    unsafe {
+        let promise_box = crate::closure::js_closure_get_capture_f64(closure, 0);
+        let promise_ptr = (f64::to_bits(promise_box) & crate::value::POINTER_MASK) as *mut Promise;
+        js_promise_resolve(promise_ptr, value);
+    }
+    f64::from_bits(crate::value::TAG_UNDEFINED)
+}
+
+extern "C" fn with_resolvers_reject_handler(
+    closure: *const crate::closure::ClosureHeader,
+    value: f64,
+) -> f64 {
+    unsafe {
+        let promise_box = crate::closure::js_closure_get_capture_f64(closure, 0);
+        let promise_ptr = (f64::to_bits(promise_box) & crate::value::POINTER_MASK) as *mut Promise;
+        js_promise_reject(promise_ptr, value);
+    }
+    f64::from_bits(crate::value::TAG_UNDEFINED)
 }

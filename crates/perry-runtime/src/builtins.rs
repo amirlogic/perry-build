@@ -2281,13 +2281,38 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
 // queueMicrotask
 // ============================================================
 
-/// queueMicrotask(callback) — calls the closure immediately (simplified)
-/// In a full implementation this would schedule on the microtask queue,
-/// but Perry's current event loop processes microtasks synchronously.
+/// queueMicrotask(callback) — schedule a closure on the microtask queue.
+/// The closure runs during the next `js_promise_run_microtasks()` drain,
+/// AFTER the current synchronous code completes. Previously this called
+/// the closure immediately, which broke the JS spec ordering:
+///   queueMicrotask(() => log("micro"));
+///   log("sync");
+/// should print "sync" then "micro", not "micro" then "sync".
 #[no_mangle]
 pub extern "C" fn js_queue_microtask(callback: i64) {
+    QUEUED_MICROTASKS.with(|q| {
+        q.borrow_mut().push(callback);
+    });
+}
+
+thread_local! {
+    static QUEUED_MICROTASKS: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Drain queued microtasks. Called by `js_promise_run_microtasks`.
+#[no_mangle]
+pub extern "C" fn js_drain_queued_microtasks() {
     use crate::closure::js_closure_call0;
-    unsafe {
-        js_closure_call0(callback as *const crate::closure::ClosureHeader);
+    loop {
+        let task = QUEUED_MICROTASKS.with(|q| {
+            let mut queue = q.borrow_mut();
+            if queue.is_empty() { None } else { Some(queue.remove(0)) }
+        });
+        match task {
+            Some(cb) => unsafe {
+                js_closure_call0(cb as *const crate::closure::ClosureHeader);
+            },
+            None => break,
+        }
     }
 }
