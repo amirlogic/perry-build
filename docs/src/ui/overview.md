@@ -21,6 +21,15 @@ App({
 perry app.ts -o app && ./app
 ```
 
+## Mental Model
+
+Perry's UI follows the same model as SwiftUI and Flutter: you compose native widgets using stack-based layout containers (`VStack`, `HStack`, `ZStack`), control alignment and distribution, and style widgets directly via method calls. If you're coming from web development, the key shift is:
+
+- **Layout** is controlled by stack alignment, distribution, and spacers — not CSS properties. See [Layout](layout.md).
+- **Styling** is applied directly to widgets — not through stylesheets. See [Styling](styling.md).
+- **Absolute positioning** uses overlays (`widgetAddOverlay` + `widgetSetOverlayFrame`) — not `position: absolute/relative`.
+- **Design tokens** come from the `perry-styling` package. See [Theming](theming.md).
+
 ## App Lifecycle
 
 Every Perry UI app starts with `App()`:
@@ -121,6 +130,12 @@ import {
   // Layout
   VStack, HStack, ZStack, ScrollView, Spacer, Divider,
   NavigationStack, LazyVStack, Form, Section,
+  VStackWithInsets, HStackWithInsets, SplitView, splitViewAddChild,
+
+  // Layout control
+  stackSetAlignment, stackSetDistribution, stackSetDetachesHidden,
+  widgetMatchParentWidth, widgetMatchParentHeight, widgetSetHugging,
+  widgetAddOverlay, widgetSetOverlayFrame,
 
   // State
   State, ForEach,

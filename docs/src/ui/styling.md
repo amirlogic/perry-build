@@ -2,6 +2,26 @@
 
 Perry widgets support native styling properties that map to each platform's styling system.
 
+## Coming from CSS
+
+Perry's layout model is closer to SwiftUI or Flutter than CSS. If you're coming from web development, here's how concepts translate:
+
+| CSS | Perry |
+|-----|-------|
+| `display: flex; flex-direction: column` | `VStack(spacing, [...])` |
+| `display: flex; flex-direction: row` | `HStack(spacing, [...])` |
+| `justify-content` | `stackSetDistribution(stack, mode)` + `Spacer()` |
+| `align-items` | `stackSetAlignment(stack, value)` |
+| `position: absolute` | `widgetAddOverlay` + `widgetSetOverlayFrame` |
+| `width: 100%` | `widgetMatchParentWidth(widget)` |
+| `padding: 10px 20px` | `setEdgeInsets(10, 20, 10, 20)` |
+| `gap: 16px` | `VStack(16, [...])` — first argument is the gap |
+| CSS variables / design tokens | `perry-styling` package ([Theming](theming.md)) |
+| `opacity` | `setOpacity(value)` |
+| `border-radius` | `setCornerRadius(value)` |
+
+See [Layout](layout.md) for full details on alignment, distribution, overlays, and split views.
+
 ## Colors
 
 ```typescript
@@ -136,6 +156,29 @@ App({
   body: container,
 });
 ```
+
+## Composing Styles
+
+Reduce repetition by creating helper functions:
+
+```typescript
+import { VStackWithInsets, Text, widgetAddChild } from "perry/ui";
+
+function card(children: any[]) {
+  const c = VStackWithInsets(12, 16, 16, 16, 16);
+  c.setCornerRadius(12);
+  c.setBackgroundColor("#FFFFFF");
+  c.setBorderColor("#E5E5E5");
+  c.setBorderWidth(1);
+  for (const child of children) widgetAddChild(c, child);
+  return c;
+}
+
+// Usage
+card([Text("Title"), Text("Body text")]);
+```
+
+For larger apps, use the `perry-styling` package to define design tokens in JSON and generate a typed theme file. See [Theming](theming.md) for the full workflow.
 
 ## Next Steps
 

@@ -300,25 +300,32 @@ perry compile src/index.ts -o server && ./server
 
 ## Native UI
 
-Perry includes a declarative UI system (`perry/ui`) that compiles directly to native platform widgets — no WebView, no Electron:
+Perry includes a declarative UI system (`perry/ui`) that compiles directly to native platform widgets — no WebView, no Electron. The programming model is SwiftUI-like: compose native widgets with stack-based layout, alignment, and distribution — not CSS/HTML.
 
 ```typescript
-import { App, VStack, HStack, Text, Button, State } from 'perry/ui';
+import {
+  App, VStack, HStack, Text, Button, Spacer, SplitView, splitViewAddChild,
+  stackSetAlignment, stackSetDistribution, widgetAddChild, widgetMatchParentWidth,
+} from 'perry/ui';
 
-const count = State(0);
+// Sidebar + content layout with a split view
+const sidebar = VStack(8, [Text("Projects"), Text("Settings"), Spacer()]);
+sidebar.setEdgeInsets(12, 12, 12, 12);
+sidebar.setBackgroundColor("#F5F5F5");
 
-App({
-  title: 'My App',
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text(`Count: ${count.value}`),
-    HStack(8, [
-      Button('Decrement', () => count.set(count.value - 1)),
-      Button('Increment', () => count.set(count.value + 1)),
-    ]),
-  ]),
-});
+const header = HStack(8, [Text("Dashboard"), Spacer(), Button("New", () => {})]);
+const actions = HStack(8, [Button("Cancel", () => {}), Button("Save", () => {})]);
+stackSetDistribution(actions, 1); // FillEqually — both buttons get equal width
+
+const content = VStack(16, [header, Text("Welcome back!"), Spacer(), actions]);
+content.setEdgeInsets(20, 20, 20, 20);
+stackSetAlignment(content, 5); // Leading — children align left
+
+const split = SplitView();
+splitViewAddChild(split, sidebar);
+splitViewAddChild(split, content);
+
+App({ title: 'My App', width: 800, height: 500, body: split });
 ```
 
 **9 platforms from one codebase:**
@@ -335,7 +342,7 @@ App({
 | Web | DOM (JS codegen) | `--target web` |
 | WebAssembly | DOM (WASM) | `--target wasm` |
 
-**127+ UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section, CameraView), layouts (VStack, HStack), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL, audio capture).
+**127+ UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section, CameraView, SplitView), layout control (alignment, distribution, match-parent, content hugging, overlay positioning, edge insets), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL, audio capture).
 
 ---
 
