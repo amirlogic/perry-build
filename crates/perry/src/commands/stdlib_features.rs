@@ -22,7 +22,7 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         "fastify" => &["http-server"],
 
         // ── HTTP client (reqwest) ─────────────────────────────────────
-        "node-fetch" => &["http-client"],
+        "axios" | "node-fetch" => &["http-client"],
 
         // ── WebSocket ─────────────────────────────────────────────────
         "ws" => &["websocket"],

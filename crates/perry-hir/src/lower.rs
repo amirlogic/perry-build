@@ -2651,6 +2651,7 @@ fn lower_module_decl(
                                                             ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
+                                                            ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
@@ -3541,6 +3542,24 @@ fn lower_stmt(
                             for s in &stmts {
                                 if let Stmt::Let { id, .. } = s {
                                     ctx.var_hoisted_ids.insert(*id);
+                                }
+                            }
+                        }
+                        // Track awaited native module calls as native instances
+                        // so property accesses (response.status, response.data) route
+                        // through NativeMethodCall dispatch instead of generic PropertyGet.
+                        for s in &stmts {
+                            if let Stmt::Let { name, init: Some(Expr::Await(inner)), .. } = s {
+                                if let Expr::NativeMethodCall { module: mod_name, method, .. } = inner.as_ref() {
+                                    let class_name = match (mod_name.as_str(), method.as_str()) {
+                                        ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                        ("mongodb", "connect") => Some("MongoClient"),
+                                        ("pg", "connect") => Some("Client"),
+                                        _ => None,
+                                    };
+                                    if let Some(cn) = class_name {
+                                        ctx.register_native_instance(name.clone(), mod_name.clone(), cn.to_string());
+                                    }
                                 }
                             }
                         }

@@ -972,7 +972,11 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_axios_get", I64, &[I64]);
     module.declare_function("js_axios_post", I64, &[I64, I64]);
     module.declare_function("js_axios_put", I64, &[I64, I64]);
+    module.declare_function("js_axios_patch", I64, &[I64, I64]);
     module.declare_function("js_axios_request", I64, &[I64]);
+    module.declare_function("js_axios_response_status", DOUBLE, &[I64]);
+    module.declare_function("js_axios_response_status_text", I64, &[I64]);
+    module.declare_function("js_axios_response_data", I64, &[I64]);
 
     // ========== sharp / image ==========
     module.declare_function("js_sharp_blur", I64, &[I64, DOUBLE]);

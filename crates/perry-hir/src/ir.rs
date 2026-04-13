@@ -40,6 +40,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     "bcrypt",
     // Note: ioredis NOT in NATIVE_MODULES - native class tracking happens via class name detection
     // in lower.rs. Adding it here would make imports skip JS module loading.
+    "axios",
     "node-fetch",
     "ws",
     "zlib",

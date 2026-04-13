@@ -39,7 +39,6 @@ pub unsafe extern "C" fn js_axios_get(url_ptr: *const StringHeader) -> *mut Prom
             return promise;
         }
     };
-
     spawn_for_promise(promise as *mut u8, async move {
         let client = reqwest::Client::new();
         match client.get(&url).send().await {

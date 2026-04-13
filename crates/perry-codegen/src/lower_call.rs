@@ -2987,6 +2987,40 @@ fn lower_fetch_native_method(
         }
     }
 
+    // ── axios: static method calls (axios.get/post/put/delete/patch) ──
+    // Must be before the receiver guard — these are receiver-less calls.
+    if module == "axios" && object.is_none() {
+        let url_box = if !args.is_empty() { lower_expr(ctx, &args[0])? } else {
+            double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+        };
+        let blk = ctx.block();
+        let url_handle = unbox_to_i64(blk, &url_box);
+        match method {
+            "get" => {
+                let promise = blk.call(I64, "js_axios_get", &[(I64, &url_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "delete" => {
+                let promise = blk.call(I64, "js_axios_delete", &[(I64, &url_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "post" | "put" | "patch" => {
+                let body_box = if args.len() > 1 { lower_expr(ctx, &args[1])? } else {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+                };
+                let body_handle = unbox_to_i64(ctx.block(), &body_box);
+                let rt_fn = match method {
+                    "post" => "js_axios_post",
+                    "put" => "js_axios_put",
+                    _ => "js_axios_patch",
+                };
+                let promise = ctx.block().call(I64, rt_fn, &[(I64, &url_handle), (I64, &body_handle)]);
+                return Ok(Some(nanbox_pointer_inline(ctx.block(), &promise)));
+            }
+            _ => {}
+        }
+    }
+
     // Everything below needs a receiver.
     let Some(recv) = object else {
         return Ok(None);
@@ -3175,6 +3209,34 @@ fn lower_fetch_native_method(
                 return Ok(Some(nanbox_pointer_inline(blk, &promise)));
             }
             _ => return Ok(None),
+        }
+    }
+
+    // ── axios: response property access (response.status, .data, .statusText, .headers) ──
+    if module == "axios" {
+        if let Some(recv) = object {
+            let recv_handle = lower_expr(ctx, recv)?;
+            let blk = ctx.block();
+            // The awaited axios response is a Handle (i64) stored in f64 bits
+            // via f64::from_bits(handle as u64). Use bitcast, not fptosi —
+            // fptosi interprets the f64 as a number (5e-324 for handle=1)
+            // and truncates to 0.
+            let h_i64 = blk.bitcast_double_to_i64(&recv_handle);
+            match method {
+                "status" => {
+                    let status = blk.call(DOUBLE, "js_axios_response_status", &[(I64, &h_i64)]);
+                    return Ok(Some(status));
+                }
+                "statusText" => {
+                    let str_ptr = blk.call(I64, "js_axios_response_status_text", &[(I64, &h_i64)]);
+                    return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+                }
+                "data" => {
+                    let str_ptr = blk.call(I64, "js_axios_response_data", &[(I64, &h_i64)]);
+                    return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+                }
+                _ => {}
+            }
         }
     }
 
