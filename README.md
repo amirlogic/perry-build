@@ -4,7 +4,7 @@
 
 Perry is a native TypeScript compiler written in Rust. It takes your TypeScript and compiles it straight to native executables — no Node.js, no Electron, no browser engine. Just fast, small binaries that run anywhere.
 
-**Current Version:** 0.5.12 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
+**Current Version:** 0.5.17 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
 
 ```bash
 perry compile src/main.ts -o myapp
