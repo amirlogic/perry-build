@@ -555,7 +555,14 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 "lastIndexOf" if args.len() == 1 => true,
                 _ => false,
             };
-            if is_string_only_method && !is_array_expr(ctx, object) {
+            // Don't route buffer/Uint8Array methods through the string path —
+            // buffers have a different header layout and their indexOf/includes
+            // go through dispatch_buffer_method via js_native_call_method.
+            let is_buffer = matches!(
+                crate::type_analysis::static_type_of(ctx, object),
+                Some(perry_types::Type::Named(ref n)) if n == "Uint8Array" || n == "Buffer"
+            );
+            if is_string_only_method && !is_array_expr(ctx, object) && !is_buffer {
                 return lower_string_method(ctx, object, property, args);
             }
         }

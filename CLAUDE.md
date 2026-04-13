@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.12
+**Current Version:** 0.5.13
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.13 (llvm-backend) — Buffer.indexOf/includes dispatch fix
+- **fix**: `Buffer.indexOf()` and `Buffer.includes()` were incorrectly routed through the string method path in codegen, because the `is_string_only_method` guard didn't exclude `Uint8Array`/`Buffer` types. Added a `static_type_of` check that skips the string dispatch when the receiver is typed as `Uint8Array` or `Buffer`, letting these methods fall through to `dispatch_buffer_method` via `js_native_call_method` as intended.
+- **cleanup**: removed leftover debug `eprintln!` in `js_buffer_index_of`.
 
 ### v0.5.12 (llvm-backend) — perry/ui widget dispatch — mango renders its full UI
 - **feat**: follow-up to v0.5.10 which landed only `App({...})`. This commit adds the rest of the perry/ui surface to `lower_native_method_call` via a table-driven dispatcher (`PERRY_UI_TABLE` of `UiSig { method, runtime, args, ret }` entries using `UiArgKind::{Widget,Str,F64,Closure,I64Raw}` / `UiReturnKind::{Widget,F64,Void}`). ~40 widget methods covered in one pass: `Text` / `TextField` / `TextArea` / `Spacer` / `Divider` / `ScrollView` constructors; `menuCreate` / `menuAddItem` / `menuBarCreate` / `menuBarAttach` / `menuBarAddMenu`; text setters (`textSetFontSize` / `textSetColor` / `textSetString` / `textSetFontFamily` / `textSetFontWeight` / `textSetWraps`); button setters (`buttonSetBordered` / `buttonSetTextColor` / `buttonSetTitle`); widget mutators (`widgetAddChild` / `widgetClearChildren` / `widgetSetHidden` / `widgetSetWidth` / `widgetSetHeight` / `widgetSetHugging` / `widgetMatchParentWidth` / `widgetMatchParentHeight` / `widgetSetBackgroundColor` / `widgetSetBackgroundGradient` / `setCornerRadius`); stack mutators (`stackSetAlignment` / `stackSetDistribution`); `scrollviewSetChild`; `textfieldSetString` / `textareaSetString`. Runtime fns lazy-declared via `ctx.pending_declares`.
