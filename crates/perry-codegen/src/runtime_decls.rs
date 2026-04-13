@@ -629,8 +629,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // 1 if it points at a GC_TYPE_PROMISE allocation else 0.
     module.declare_function("js_value_is_promise", I32, &[DOUBLE]);
     module.declare_function("js_promise_run_microtasks", I32, &[]);
-    // js_stdlib_process_pending intentionally not declared — see
-    // the await-loop comment in expr.rs for the dead-strip rationale.
+    // Drain stdlib's tokio async queue (fetch, DB, etc.). Lives in
+    // perry-runtime as a thin function-pointer trampoline so it's
+    // safe to call even when perry-stdlib is not linked (no-op).
+    module.declare_function("js_run_stdlib_pump", VOID, &[]);
     module.declare_function("js_sleep_ms", VOID, &[DOUBLE]);
     module.declare_function("js_throw", VOID, &[DOUBLE]);
 

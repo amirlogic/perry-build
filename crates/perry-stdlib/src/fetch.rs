@@ -51,7 +51,9 @@ struct FetchResponse {
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
+    // NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001) unboxes to 0x1
+    // after POINTER_MASK. Treat any pointer below page size as invalid.
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
     let len = (*ptr).length as usize;

@@ -8,7 +8,7 @@ use crate::common::{register_handle, get_handle, spawn_for_promise, Handle};
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
     let len = (*ptr).length as usize;

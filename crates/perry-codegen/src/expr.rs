@@ -5513,6 +5513,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // await loop busy-waits forever.
             ctx.current_block = wait_idx;
             ctx.block().call_void("js_promise_run_microtasks", &[]);
+            // Drain the stdlib's tokio async queue — fetch, database
+            // queries, and other async stdlib operations queue their
+            // results via queue_promise_resolution and need this pump
+            // to actually resolve the promises on the main thread.
+            ctx.block().call_void("js_run_stdlib_pump", &[]);
             let _ = ctx.block().call(I32, "js_timer_tick", &[]);
             let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
             let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
