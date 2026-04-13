@@ -908,6 +908,11 @@ fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) 
                     record_var(decl, ctx);
                 }
             }
+            ast::Stmt::Decl(ast::Decl::Using(using_decl)) => {
+                for decl in &using_decl.decls {
+                    record_var(decl, ctx);
+                }
+            }
             // Function declarations — descend into the body so `const
             // ref = new WeakRef(x)` inside a function is still tracked
             // and `ref.deref()` lowers to `Expr::WeakRefDeref` instead
@@ -3557,6 +3562,43 @@ fn lower_stmt(
                 ast::Decl::TsTypeAlias(alias_decl) => {
                     let alias = lower_type_alias_decl(ctx, alias_decl, false)?;
                     module.type_aliases.push(alias);
+                }
+                ast::Decl::Using(using_decl) => {
+                    // `using x = expr` / `await using x = expr` — TC39 Explicit
+                    // Resource Management. Lower as const bindings. Disposal at
+                    // block-scope exit is not yet automated — the variables are
+                    // accessible but [Symbol.dispose/asyncDispose] isn't called.
+                    // Treat as a const var declaration.
+                    let fake_var = ast::VarDecl {
+                        span: using_decl.span,
+                        kind: ast::VarDeclKind::Const,
+                        declare: false,
+                        decls: using_decl.decls.clone(),
+                        ctxt: Default::default(),
+                    };
+                    let mutable = false;
+                    let is_var = false;
+                    for decl in &fake_var.decls {
+                        if let Some(init) = &decl.init {
+                            match &decl.name {
+                                ast::Pat::Ident(bind_ident) => {
+                                    let name = bind_ident.sym.to_string();
+                                    let init_expr = lower_expr(ctx, init)?;
+                                    let ty = Type::Any;
+                                    let id = ctx.fresh_local();
+                                    ctx.locals.push((name.clone(), id, ty.clone()));
+                                    module.init.push(Stmt::Let {
+                                        id,
+                                        name,
+                                        ty,
+                                        mutable,
+                                        init: Some(init_expr),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 ast::Decl::TsModule(ts_module) => {
                     // namespace X { ... } — lower as a synthetic class with static members
