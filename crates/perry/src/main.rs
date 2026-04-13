@@ -98,6 +98,9 @@ enum Commands {
 
     /// App Store management (release notes, metadata)
     Appstore(commands::appstore::AppStoreArgs),
+
+    /// Generate TypeScript type stubs for Perry built-in modules
+    Types(commands::types::TypesArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -114,7 +117,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "appstore" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "appstore" | "types" | "help"
         ) {
             return false;
         }
@@ -248,6 +251,9 @@ fn main_inner() -> Result<()> {
         }
         Commands::Appstore(args) => {
             commands::appstore::run(args)
+        }
+        Commands::Types(args) => {
+            commands::types::run(args, cli.format, use_color)
         }
     };
 

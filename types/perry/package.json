@@ -1,0 +1,6 @@
+{
+  "name": "perry",
+  "version": "0.5.18",
+  "private": true,
+  "description": "Type declarations for Perry built-in modules"
+}

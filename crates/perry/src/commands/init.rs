@@ -43,12 +43,31 @@ const DEFAULT_GITIGNORE: &str = r#"# Perry build outputs
 dist/
 *.o
 
-# Node modules (if using for type checking)
+# Generated type stubs (regenerate with `perry types`)
+.perry/types/
+
+# Node modules
 node_modules/
 
 # IDE
 .vscode/
 .idea/
+"#;
+
+const DEFAULT_TSCONFIG: &str = r#"{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "paths": {
+      "perry/*": ["./.perry/types/perry/*/index.d.ts"]
+    }
+  },
+  "include": ["src"]
+}
 "#;
 
 pub fn run(args: InitArgs, format: OutputFormat, _use_color: bool) -> Result<()> {
@@ -117,6 +136,24 @@ pub fn run(args: InitArgs, format: OutputFormat, _use_color: bool) -> Result<()>
             OutputFormat::Json => {}
         }
     }
+
+    // Create tsconfig.json
+    let tsconfig_path = project_path.join("tsconfig.json");
+    if !tsconfig_path.exists() {
+        fs::write(&tsconfig_path, DEFAULT_TSCONFIG)?;
+        match format {
+            OutputFormat::Text => println!("  Created tsconfig.json"),
+            OutputFormat::Json => {}
+        }
+    } else {
+        match format {
+            OutputFormat::Text => println!("  Skipped tsconfig.json (already exists)"),
+            OutputFormat::Json => {}
+        }
+    }
+
+    // Write Perry type stubs into .perry/types/perry/
+    super::types::write_perry_type_stubs(&project_path, !matches!(format, OutputFormat::Text))?;
 
     match format {
         OutputFormat::Text => {

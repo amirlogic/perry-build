@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.17
+**Current Version:** 0.5.18
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.18 — TypeScript type stubs for built-in modules (closes #27, #24)
+- **feat**: `.d.ts` type declarations for all 4 built-in modules (`perry/ui`, `perry/thread`, `perry/i18n`, `perry/system`). `perry init` now generates a `tsconfig.json` with `paths` mapping and writes stubs to `.perry/types/`, so `tsc --noEmit` and IDE autocomplete work out of the box. New `perry types` command regenerates stubs for existing projects. Canonical sources in `types/perry/`, embedded via `include_str!()`.
 
 ### v0.5.17 (llvm-backend) — scalar replacement of non-escaping objects + Static Hermes benchmarks
 - **perf**: escape analysis identifies `let p = new Point(x, y)` where `p` never escapes (only PropertyGet/PropertySet uses); fields are decomposed into stack allocas that LLVM promotes to registers — zero heap allocation. `object_create` 10ms→4ms (2.5x), `binary_trees` 9ms→3ms (3x), peak RSS 97MB→5MB. Perry now beats Node.js on all 15 benchmarks.
