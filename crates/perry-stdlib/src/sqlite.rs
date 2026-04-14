@@ -264,12 +264,15 @@ pub unsafe extern "C" fn js_sqlite_stmt_run(
 
 /// stmt.get(...params) -> Row | undefined
 ///
-/// Get a single row from a query.
+/// Get a single row from a query. Returns f64 (NaN-boxed bits) instead
+/// of JSValue to avoid SysV AMD64 ABI mismatch on x86_64 (JSValue's
+/// `#[repr(transparent)] u64` returns in RAX but LLVM reads from XMM0
+/// when the call site declares a `double` return).
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_stmt_get(
     stmt_handle: Handle,
     params_arr: *const ArrayHeader,
-) -> JSValue {
+) -> f64 {
     let sqlite_params = params_from_array(params_arr);
 
     if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
@@ -301,7 +304,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
                                 js_object_set_field(obj, idx as u32, sqlite_value_to_jsvalue(&value));
                             }
 
-                            return JSValue::object_ptr(obj as *mut u8);
+                            return f64::from_bits(JSValue::object_ptr(obj as *mut u8).bits());
                         }
                     }
                 }
@@ -309,7 +312,7 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
         }
     }
 
-    JSValue::undefined()
+    f64::from_bits(JSValue::undefined().bits())
 }
 
 /// stmt.all(...params) -> Row[]

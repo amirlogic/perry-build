@@ -56,7 +56,13 @@ impl MysqlPoolConnectionHandle {
 /// # Safety
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
-pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
+pub unsafe extern "C" fn js_mysql2_create_pool(config_f: f64) -> Handle {
+    // Take f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch:
+    // JSValue is `#[repr(transparent)] u64` (integer register), but the
+    // LLVM call site declares the arg as `double` (XMM register). On ARM64
+    // these aliases (d0/x0 same phys reg) so the bug is invisible, but on
+    // x86_64 they're distinct registers and the pointer bits never arrive.
+    let config = JSValue::from_bits(config_f.to_bits());
     let mysql_config = parse_mysql_config(config);
     let url = mysql_config.to_url();
 

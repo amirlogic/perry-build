@@ -119,7 +119,10 @@ impl SmtpTransportHandle {
 /// # Safety
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
-pub unsafe extern "C" fn js_nodemailer_create_transport(config: JSValue) -> f64 {
+pub unsafe extern "C" fn js_nodemailer_create_transport(config_f: f64) -> f64 {
+    // Take f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch
+    // (see js_mysql2_create_pool for details).
+    let config = JSValue::from_bits(config_f.to_bits());
     let smtp_config = parse_smtp_config(config);
     let handle = register_handle(SmtpTransportHandle::new(smtp_config));
     handle as f64

@@ -26,7 +26,10 @@ impl PgPoolHandle {
 /// # Safety
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
-pub unsafe extern "C" fn js_pg_create_pool(config: JSValue) -> *mut Promise {
+pub unsafe extern "C" fn js_pg_create_pool(config_f: f64) -> *mut Promise {
+    // Take f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch
+    // (see js_mysql2_create_pool for details).
+    let config = JSValue::from_bits(config_f.to_bits());
     let promise = js_promise_new();
 
     // Parse the config

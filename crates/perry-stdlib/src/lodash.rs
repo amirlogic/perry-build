@@ -223,27 +223,36 @@ pub unsafe extern "C" fn js_lodash_fill(
 /// _.first / _.head(array) -> element
 ///
 /// Get the first element.
+/// Returns f64 (NaN-boxed bits) instead of JSValue to avoid SysV AMD64
+/// ABI mismatch: JSValue's `#[repr(transparent)] u64` returns in RAX
+/// (integer register) but the LLVM call site reads the result as double
+/// from XMM0 on x86_64.
 #[no_mangle]
-pub unsafe extern "C" fn js_lodash_first(arr_ptr: *mut ArrayHeader) -> JSValue {
-    if arr_ptr.is_null() || js_array_length(arr_ptr) == 0 {
-        return JSValue::undefined();
-    }
-    js_array_get(arr_ptr, 0)
+pub unsafe extern "C" fn js_lodash_first(arr_ptr: *mut ArrayHeader) -> f64 {
+    let v = if arr_ptr.is_null() || js_array_length(arr_ptr) == 0 {
+        JSValue::undefined()
+    } else {
+        js_array_get(arr_ptr, 0)
+    };
+    f64::from_bits(v.bits())
 }
 
 /// _.last(array) -> element
 ///
 /// Get the last element.
 #[no_mangle]
-pub unsafe extern "C" fn js_lodash_last(arr_ptr: *mut ArrayHeader) -> JSValue {
-    if arr_ptr.is_null() {
-        return JSValue::undefined();
-    }
-    let len = js_array_length(arr_ptr);
-    if len == 0 {
-        return JSValue::undefined();
-    }
-    js_array_get(arr_ptr, len - 1)
+pub unsafe extern "C" fn js_lodash_last(arr_ptr: *mut ArrayHeader) -> f64 {
+    let v = if arr_ptr.is_null() {
+        JSValue::undefined()
+    } else {
+        let len = js_array_length(arr_ptr);
+        if len == 0 {
+            JSValue::undefined()
+        } else {
+            js_array_get(arr_ptr, len - 1)
+        }
+    };
+    f64::from_bits(v.bits())
 }
 
 /// _.flatten(array) -> array
@@ -816,8 +825,12 @@ pub unsafe extern "C" fn js_lodash_range(start: f64, end: f64, step: f64) -> *mu
 }
 
 /// _.isEmpty(value) -> boolean
+/// Takes f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch
+/// (JSValue is `#[repr(transparent)] u64` → integer register, but the
+/// LLVM call site declares double → XMM register on x86_64).
 #[no_mangle]
-pub unsafe extern "C" fn js_lodash_is_empty(value: JSValue) -> i32 {
+pub unsafe extern "C" fn js_lodash_is_empty(value_f: f64) -> i32 {
+    let value = JSValue::from_bits(value_f.to_bits());
     if value.is_null() || value.is_undefined() {
         return 1;
     }
@@ -836,13 +849,15 @@ pub unsafe extern "C" fn js_lodash_is_empty(value: JSValue) -> i32 {
 
 /// _.isNil(value) -> boolean
 #[no_mangle]
-pub extern "C" fn js_lodash_is_nil(value: JSValue) -> i32 {
+pub extern "C" fn js_lodash_is_nil(value_f: f64) -> i32 {
+    let value = JSValue::from_bits(value_f.to_bits());
     if value.is_null() || value.is_undefined() { 1 } else { 0 }
 }
 
 /// _.size(collection) -> number
 #[no_mangle]
-pub unsafe extern "C" fn js_lodash_size(collection: JSValue) -> f64 {
+pub unsafe extern "C" fn js_lodash_size(collection_f: f64) -> f64 {
+    let collection = JSValue::from_bits(collection_f.to_bits());
     if collection.is_pointer() {
         let ptr = collection.as_pointer() as *const ArrayHeader;
         if !ptr.is_null() {
