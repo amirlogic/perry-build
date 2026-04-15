@@ -213,6 +213,15 @@ impl LlModule {
             ir.push_str("attributes #1 = { noinline optnone }\n");
         }
 
+        // Issue #52: `!0 = !{}` metadata node referenced by
+        // `load_invariant` (via `!invariant.load !0`). LLVM's GVN + LICM
+        // hoist loads tagged with `!invariant.load` out of their
+        // enclosing loops when the loop body can't write to the same
+        // address; without this, the per-access Buffer / Array length
+        // reload stays pinned inside every bounds check even when the
+        // buffer is loop-invariant.
+        ir.push_str("\n!0 = !{}\n");
+
         ir
     }
 }

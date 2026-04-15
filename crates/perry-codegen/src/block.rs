@@ -262,6 +262,26 @@ impl LlBlock {
         r
     }
 
+    /// (Issue #52) Load tagged with `!invariant.load !0`. LLVM's GVN +
+    /// LICM are allowed to hoist these loads out of any enclosing loop —
+    /// the contract is that the loaded memory does not change between
+    /// observable executions of the instruction. Use ONLY for values
+    /// that are genuinely loop-invariant (e.g. a Buffer's `length`
+    /// field, which stays pinned for the lifetime of the buffer since
+    /// `Buffer.alloc(N)` never grows/shrinks).
+    ///
+    /// Misuse corrupts output silently: LLVM will cache the first
+    /// value and reuse it across iterations even if the underlying
+    /// memory changes.
+    pub fn load_invariant(&mut self, ty: LlvmType, ptr: &str) -> String {
+        let r = self.reg();
+        self.emit(format!(
+            "{} = load {}, ptr {}, !invariant.load !0",
+            r, ty, ptr
+        ));
+        r
+    }
+
     pub fn store(&mut self, ty: LlvmType, val: &str, ptr: &str) {
         self.emit(format!("store {} {}, ptr {}", ty, val, ptr));
     }
@@ -335,6 +355,18 @@ impl LlBlock {
     ///
     /// Uses `@perry_null_guard_zero` — a module-global i32 initialized
     /// to 0 that serves as a safe dereference target.
+    ///
+    /// (Issue #52) The length load is tagged `!invariant.load` — once
+    /// resolved, an Array/Buffer's length field at offset 0 of the
+    /// header is only mutated by in-place array-growth paths
+    /// (IndexSet with realloc, `push`/`splice`). The tag lets LLVM's
+    /// LICM hoist the load out of any read-only loop even when the
+    /// intervening code contains calls the optimizer can't prove
+    /// length-preserving. Writers (`IndexSet` slow path, `push`, etc.)
+    /// use the plain `store`/`load` sequence on the same field, so
+    /// they don't invalidate the invariant-tagged load *for this
+    /// particular SSA value* — LLVM's memory SSA tracks the
+    /// tag per-load, not per-address.
     pub fn safe_load_i32_from_ptr(&mut self, handle: &str) -> String {
         use crate::types::{I32, I64};
         let is_bad = self.icmp_ult(I64, handle, "4096");
@@ -345,7 +377,7 @@ impl LlBlock {
             self.emit(format!("{} = select i1 {}, ptr @perry_null_guard_zero, ptr {}", r, is_bad, handle_ptr));
             r
         };
-        self.load(I32, &safe_ptr)
+        self.load_invariant(I32, &safe_ptr)
     }
 
     pub fn ptrtoint(&mut self, val: &str, to_ty: LlvmType) -> String {
