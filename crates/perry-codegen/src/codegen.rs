@@ -224,6 +224,8 @@ pub(crate) struct CrossModuleCtx {
     pub clamp3_functions: std::collections::HashSet<u32>,
     /// Functions with clampU8 pattern (1 param, clamp to [0, 255]).
     pub clamp_u8_functions: std::collections::HashSet<u32>,
+    /// Functions that always return integer (all returns end with `| 0` etc).
+    pub returns_int_functions: std::collections::HashSet<u32>,
     /// (Issue #50) Module-level `const` 2D int arrays folded into flat
     /// `[N x i32]` LLVM constants. Maps local_id → info. Populated by
     /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
@@ -565,6 +567,10 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             .collect(),
         clamp_u8_functions: hir.functions.iter()
             .filter(|f| crate::collectors::detect_clamp_u8(f))
+            .map(|f| f.id)
+            .collect(),
+        returns_int_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::returns_integer(f))
             .map(|f| f.id)
             .collect(),
         flat_const_arrays: {
@@ -1375,6 +1381,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &module_boxed_vars,
         &closure_rest_params,
         &cross_module,
+        &opts.output_type,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -1482,7 +1489,7 @@ fn compile_function(
     // Pre-walk: which locals are provably integer-valued? Used by
     // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
     let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-        .union(&cross_module.clamp_u8_functions).copied().collect();
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
     let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     // Pre-walk: which `let x = new Class(...)` locals never escape?
@@ -1735,7 +1742,7 @@ fn compile_closure(
     let closure_boxed_vars = module_boxed_vars.clone();
 
     let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-        .union(&cross_module.clamp_u8_functions).copied().collect();
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
     let integer_locals = crate::collectors::collect_integer_locals(body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
@@ -1892,7 +1899,7 @@ fn compile_method(
     let method_boxed_vars = module_boxed_vars.clone();
 
     let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-        .union(&cross_module.clamp_u8_functions).copied().collect();
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
     let integer_locals = crate::collectors::collect_integer_locals(&method.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
@@ -2021,8 +2028,11 @@ fn compile_module_entry(
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
+    output_type: &str,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
+
+    let is_dylib = output_type == "dylib";
 
     if is_entry {
         // Pre-declare each non-entry module's init function as an
@@ -2033,7 +2043,17 @@ fn compile_module_entry(
             llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
         }
 
-        let main = llmod.define_function("main", I32, vec![]);
+        // For dylib output, emit `void perry_module_init()` instead of
+        // `int main()`. The host process calls this once after dlopen to
+        // initialize the GC, string pools, module globals (including GC
+        // root registration), and run top-level statements. Without this,
+        // module-level Maps/Arrays would never be registered as GC roots
+        // and the first GC cycle after connect() would free them (issue #54).
+        let main = if is_dylib {
+            llmod.define_function("perry_module_init", VOID, vec![])
+        } else {
+            llmod.define_function("main", I32, vec![])
+        };
         let _ = main.create_block("entry");
         {
             let blk = main.block_mut(0).unwrap();
@@ -2058,7 +2078,7 @@ fn compile_module_entry(
 
         let main_boxed_vars = module_boxed_vars.clone();
         let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-            .union(&cross_module.clamp_u8_functions).copied().collect();
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
         let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &main_boxed_vars, module_globals,
@@ -2139,61 +2159,69 @@ fn compile_module_entry(
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
         if !ctx.block().is_terminated() {
-            // Event loop: keep running while there are active event
-            // sources (timers, intervals, WS servers, pending stdlib
-            // async ops). Without this, event-driven servers (WS,
-            // setInterval-based) exit immediately after init.
-            //
-            // Structure:
-            //   loop_header: check if any source is active → body or exit
-            //   loop_body:   tick all queues, sleep 10ms, jump to header
-            //   loop_exit:   ret 0
-            let header_idx = ctx.new_block("event_loop.header");
-            let body_idx = ctx.new_block("event_loop.body");
-            let exit_idx = ctx.new_block("event_loop.exit");
-            let header_label = ctx.block_label(header_idx);
-            let body_label = ctx.block_label(body_idx);
-            let exit_label = ctx.block_label(exit_idx);
+            if is_dylib {
+                // Dylib: no event loop — the host manages its own event
+                // loop and calls perry_fn_* entry points as needed. Just
+                // return after running top-level statements (which set up
+                // module-level state like Maps, class registrations, etc.).
+                ctx.block().ret_void();
+            } else {
+                // Event loop: keep running while there are active event
+                // sources (timers, intervals, WS servers, pending stdlib
+                // async ops). Without this, event-driven servers (WS,
+                // setInterval-based) exit immediately after init.
+                //
+                // Structure:
+                //   loop_header: check if any source is active → body or exit
+                //   loop_body:   tick all queues, sleep 10ms, jump to header
+                //   loop_exit:   ret 0
+                let header_idx = ctx.new_block("event_loop.header");
+                let body_idx = ctx.new_block("event_loop.body");
+                let exit_idx = ctx.new_block("event_loop.exit");
+                let header_label = ctx.block_label(header_idx);
+                let body_label = ctx.block_label(body_idx);
+                let exit_label = ctx.block_label(exit_idx);
 
-            // Initial microtask flush (4 rounds) before entering the
-            // event loop — handles fire-and-forget .then() chains that
-            // don't need the full event loop.
-            for _ in 0..4 {
+                // Initial microtask flush (4 rounds) before entering the
+                // event loop — handles fire-and-forget .then() chains that
+                // don't need the full event loop.
+                for _ in 0..4 {
+                    let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+                    let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                }
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                ctx.block().br(&header_label);
+
+                // loop_header: check if there's any reason to keep running
+                ctx.current_block = header_idx;
+                let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
+                let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
+                let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
+                let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
+                let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
+                let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
+                let any = ctx.block().or(I32, &any1, &any2);
+                let zero = "0".to_string();
+                let cmp = ctx.block().icmp_ne(I32, &any, &zero);
+                ctx.block().cond_br(&cmp, &body_label, &exit_label);
+
+                // loop_body: tick everything, sleep, loop
+                ctx.current_block = body_idx;
                 let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
                 let _ = ctx.block().call(I32, "js_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                let ten_ms = "10.0".to_string();
+                ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
+                ctx.block().br(&header_label);
+
+                // loop_exit: done
+                ctx.current_block = exit_idx;
+                ctx.block().ret(I32, "0");
             }
-            ctx.block().call_void("js_run_stdlib_pump", &[]);
-            ctx.block().br(&header_label);
-
-            // loop_header: check if there's any reason to keep running
-            ctx.current_block = header_idx;
-            let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
-            let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
-            let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
-            let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
-            let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
-            let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
-            let any = ctx.block().or(I32, &any1, &any2);
-            let zero = "0".to_string();
-            let cmp = ctx.block().icmp_ne(I32, &any, &zero);
-            ctx.block().cond_br(&cmp, &body_label, &exit_label);
-
-            // loop_body: tick everything, sleep, loop
-            ctx.current_block = body_idx;
-            let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
-            let _ = ctx.block().call(I32, "js_timer_tick", &[]);
-            let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
-            let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
-            ctx.block().call_void("js_run_stdlib_pump", &[]);
-            let ten_ms = "10.0".to_string();
-            ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
-            ctx.block().br(&header_label);
-
-            // loop_exit: done
-            ctx.current_block = exit_idx;
-            ctx.block().ret(I32, "0");
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
@@ -2236,7 +2264,7 @@ fn compile_module_entry(
 
         let init_boxed_vars = module_boxed_vars.clone();
         let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-            .union(&cross_module.clamp_u8_functions).copied().collect();
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
         let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &init_boxed_vars, module_globals,
@@ -2519,7 +2547,7 @@ fn compile_static_method(
         .collect();
 
     let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
-        .union(&cross_module.clamp_u8_functions).copied().collect();
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
     let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let static_boxed_vars = module_boxed_vars.clone();
