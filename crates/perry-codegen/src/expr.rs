@@ -4364,15 +4364,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // the branch-based path's "return 0" semantics are rarely observed
             // in practice).
             let a = lower_expr(ctx, array)?;
-            let i = lower_expr(ctx, index)?;
+            // Check upfront whether index is i32-lowerable (no clones —
+            // borrows released before lower_expr_as_i32 borrows mutably).
+            let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let idx_i32 = if idx_is_i32 {
+                lower_expr_as_i32(ctx, index)?
+            } else {
+                let i = lower_expr(ctx, index)?;
+                ctx.block().fptosi(DOUBLE, &i, I32)
+            };
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
-            let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
             let len_i32 = blk.safe_load_i32_from_ptr(&handle);
             let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
-            // Emit llvm.assume so LLVM knows the check passes. This lets
-            // it drop the compare from the loop body and emit unconditional
-            // loads that the vectorizer can handle.
             blk.emit_raw(format!(
                 "call void @llvm.assume(i1 {})", in_bounds
             ));
@@ -4385,16 +4389,26 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().sitofp(I32, &result_i32, DOUBLE))
         }
         Expr::Uint8ArraySet { array, index, value } => {
-            // Inline `buf[idx] = v` — branchless via @llvm.assume (mirrors
-            // Uint8ArrayGet). Eliminates the branch+merge diamond that
-            // blocked vectorization in tight encoder / input-gen loops.
+            // Inline `buf[idx] = v` — branchless via @llvm.assume.
+            // Uses i32 fast path for both index and value when possible,
+            // eliminating double↔int conversions in tight byte-write loops.
             let a = lower_expr(ctx, array)?;
-            let i = lower_expr(ctx, index)?;
-            let v = lower_expr(ctx, value)?;
+            let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let val_is_i32 = can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let idx_i32 = if idx_is_i32 {
+                lower_expr_as_i32(ctx, index)?
+            } else {
+                let i = lower_expr(ctx, index)?;
+                ctx.block().fptosi(DOUBLE, &i, I32)
+            };
+            let val_i32 = if val_is_i32 {
+                lower_expr_as_i32(ctx, value)?
+            } else {
+                let v = lower_expr(ctx, value)?;
+                ctx.block().fptosi(DOUBLE, &v, I32)
+            };
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
-            let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
-            let val_i32 = blk.fptosi(DOUBLE, &v, I32);
             let len_i32 = blk.safe_load_i32_from_ptr(&handle);
             let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
             blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
@@ -4404,7 +4418,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let byte_ptr = blk.inttoptr(I64, &byte_addr);
             let byte_val = blk.trunc(I32, &val_i32, I8);
             blk.store(I8, &byte_val, &byte_ptr);
-            Ok(v)
+            // Return the stored value as a double (for expression contexts).
+            Ok(ctx.block().sitofp(I32, &val_i32, DOUBLE))
         }
 
         // `new Int32Array([1,2,3])` etc. — generic typed array constructor.
@@ -7345,7 +7360,9 @@ pub(crate) fn can_lower_expr_as_i32(
         Expr::LocalGet(id) => i32_slots.contains_key(id) || integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
         Expr::Binary { op, left, right }
-            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) =>
         {
             can_lower_expr_as_i32(left, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
                 && can_lower_expr_as_i32(right, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
@@ -7386,7 +7403,9 @@ pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String>
             }
         }
         Expr::Binary { op, left, right }
-            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) =>
         {
             let l = lower_expr_as_i32(ctx, left)?;
             let r = lower_expr_as_i32(ctx, right)?;
@@ -7395,6 +7414,12 @@ pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String>
                 BinaryOp::Add => blk.add(I32, &l, &r),
                 BinaryOp::Sub => blk.sub(I32, &l, &r),
                 BinaryOp::Mul => blk.mul(I32, &l, &r),
+                BinaryOp::BitAnd => blk.and(I32, &l, &r),
+                BinaryOp::BitOr => blk.or(I32, &l, &r),
+                BinaryOp::BitXor => blk.xor(I32, &l, &r),
+                BinaryOp::Shl => blk.shl(I32, &l, &r),
+                BinaryOp::Shr => blk.ashr(I32, &l, &r),
+                BinaryOp::UShr => blk.lshr(I32, &l, &r),
                 _ => unreachable!(),
             })
         }
