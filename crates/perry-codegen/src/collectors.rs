@@ -1401,6 +1401,19 @@ fn is_flat_const_indexget(
     }
 }
 
+/// Return `true` if `e` is a top-level bitwise Binary expression — per JS spec
+/// these always produce an int32 result. Used by `collect_integer_let_ids` to
+/// seed const Lets whose init is e.g. `(h >>> 16) & 0xffff` (inlined imul32
+/// body variables).
+fn is_bitwise_expr(e: &perry_hir::Expr) -> bool {
+    use perry_hir::{BinaryOp, Expr};
+    matches!(
+        e,
+        Expr::Binary { op: BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr, .. }
+    )
+}
+
 fn collect_integer_let_ids(
     stmts: &[perry_hir::Stmt],
     out: &mut HashSet<u32>,
@@ -1411,10 +1424,20 @@ fn collect_integer_let_ids(
     use perry_hir::{Expr, Stmt};
     for s in stmts {
         match s {
-            Stmt::Let { id, init: Some(init), .. }
+            Stmt::Let { id, init: Some(init), mutable, .. }
                 if matches!(init, Expr::Integer(_))
                     || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids)
                     || is_clamp_call(init, clamp_fn_ids)
+                    // Seed immutable (const) Lets whose init is a bitwise expression.
+                    // Bitwise ops always produce int32 per JS spec. Safe for const
+                    // because they never get i32 counter slots (only mutable locals do).
+                    || (!mutable && is_bitwise_expr(init))
+                    // Seed mutable Lets with `(expr) | 0` init. The `| 0` applies
+                    // ToInt32 which always produces a value in [-2^31, 2^31-1], so
+                    // fptosi on the double result is defined behavior. NOTE: we do NOT
+                    // seed `(expr) >>> 0` (ToUint32) because the result can exceed
+                    // INT32_MAX, causing fptosi UB.
+                    || (*mutable && matches!(init, Expr::Binary { op: perry_hir::BinaryOp::BitOr, right, .. } if matches!(right.as_ref(), Expr::Integer(0))))
  =>
             {
                 out.insert(*id);

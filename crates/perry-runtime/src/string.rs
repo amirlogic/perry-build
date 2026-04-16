@@ -293,9 +293,30 @@ fn is_ascii_string(s: *const StringHeader) -> bool {
 pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeader) -> *mut StringHeader {
     let blen_a = if is_valid_string_ptr(a) { unsafe { (*a).byte_len } } else { 0 };
     let blen_b = if is_valid_string_ptr(b) { unsafe { (*b).byte_len } } else { 0 };
+    let total_blen = blen_a + blen_b;
+
+    // Intern fast path: if result is short enough, check the intern table
+    // before allocating. Repeated property-name concatenations like
+    // "field_" + j return the existing interned pointer — zero allocation.
+    if total_blen > 0 && total_blen <= INTERN_MAX_BYTE_LEN {
+        unsafe {
+            let hash = fnv1a_concat(a, blen_a, b, blen_b);
+            let slot = (hash as usize) & INTERN_TABLE_MASK;
+            let entry = &INTERN_TABLE[slot];
+            if entry.string_ptr != 0 && entry.hash == hash {
+                let existing = entry.string_ptr as *const StringHeader;
+                if is_valid_string_ptr(existing)
+                    && (*existing).byte_len == total_blen
+                    && concat_content_matches(a, blen_a, b, blen_b, existing)
+                {
+                    return existing as *mut StringHeader;
+                }
+            }
+        }
+    }
+
     let u16len_a = if is_valid_string_ptr(a) { unsafe { (*a).utf16_len } } else { 0 };
     let u16len_b = if is_valid_string_ptr(b) { unsafe { (*b).utf16_len } } else { 0 };
-    let total_blen = blen_a + blen_b;
 
     let total_size = std::mem::size_of::<StringHeader>() + total_blen as usize;
 
@@ -321,10 +342,41 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
     }
 }
 
+/// Cached small-integer string table (0..=255). Initialized lazily on
+/// first access. Avoids gc_malloc + format! for commonly repeated
+/// number-to-string conversions (loop counters, property name suffixes).
+const SMALL_INT_CACHE_SIZE: usize = 256;
+static mut SMALL_INT_CACHE: [*mut StringHeader; SMALL_INT_CACHE_SIZE] =
+    [std::ptr::null_mut(); SMALL_INT_CACHE_SIZE];
+
 /// Convert a number (f64) to a string
 /// Returns a new string representing the number
 #[no_mangle]
 pub extern "C" fn js_number_to_string(value: f64) -> *mut StringHeader {
+    // Fast path: small non-negative integers use a cached string table.
+    if value.fract() == 0.0 && value >= 0.0 && value < SMALL_INT_CACHE_SIZE as f64 {
+        let idx = value as usize;
+        unsafe {
+            let cached = SMALL_INT_CACHE[idx];
+            if !cached.is_null() {
+                return cached;
+            }
+        }
+        // Allocate and cache
+        let s = format!("{}", value as u64);
+        let ptr = js_string_from_bytes(s.as_bytes().as_ptr(), s.len() as u32);
+        unsafe {
+            // Mark as shared so it's never mutated in-place
+            (*ptr).refcount = 0;
+            SMALL_INT_CACHE[idx] = ptr;
+            // Mark as interned so GC roots it via the intern scanner
+            let gc_header = (ptr as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+            (*gc_header).gc_flags |= crate::gc::GC_FLAG_PINNED;
+        }
+        return ptr;
+    }
+
     // Format the number as a string per JS semantics.
     let s = if value.is_nan() {
         "NaN".to_string()
@@ -1404,6 +1456,146 @@ pub extern "C" fn js_btoa(value: f64) -> *const StringHeader {
     let s = string_as_str(str_ptr);
     let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
     js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32)
+}
+
+// ---------------------------------------------------------------------------
+// Property-name string interning
+// ---------------------------------------------------------------------------
+
+/// Intern table entry. Each slot holds one interned string.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct InternEntry {
+    hash: u64,        // FNV-1a content hash
+    string_ptr: usize, // pointer to StringHeader (0 = empty slot)
+}
+
+const INTERN_TABLE_SIZE: usize = 8192;
+const INTERN_TABLE_MASK: usize = INTERN_TABLE_SIZE - 1;
+
+/// Maximum byte length for strings eligible for interning.
+const INTERN_MAX_BYTE_LEN: u32 = 64;
+
+#[no_mangle]
+static mut INTERN_TABLE: [InternEntry; INTERN_TABLE_SIZE] =
+    [InternEntry { hash: 0, string_ptr: 0 }; INTERN_TABLE_SIZE];
+
+/// Intern a property-name string. Returns the canonical pointer for
+/// the given content. `hash` is the pre-computed FNV-1a hash.
+#[no_mangle]
+pub extern "C" fn js_string_intern(
+    key: *const StringHeader,
+    hash: u64,
+) -> *const StringHeader {
+    if key.is_null() || !is_valid_string_ptr(key) {
+        return key;
+    }
+    unsafe {
+        let byte_len = (*key).byte_len;
+        if byte_len > INTERN_MAX_BYTE_LEN {
+            return key;
+        }
+
+        let slot = (hash as usize) & INTERN_TABLE_MASK;
+        let entry = &mut INTERN_TABLE[slot];
+
+        if entry.string_ptr != 0 && entry.hash == hash {
+            let existing = entry.string_ptr as *const StringHeader;
+            if is_valid_string_ptr(existing)
+                && (*existing).byte_len == byte_len
+                && intern_content_equals(key, existing, byte_len)
+            {
+                return existing;
+            }
+        }
+
+        // Miss or collision — insert (evict on collision)
+        entry.hash = hash;
+        entry.string_ptr = key as usize;
+
+        // Mark as interned in GcHeader
+        let gc_header = (key as *const u8)
+            .sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+        (*gc_header).gc_flags |= crate::gc::GC_FLAG_INTERNED;
+
+        // Force shared — never mutate interned strings in-place
+        (*(key as *mut StringHeader)).refcount = 0;
+
+        key
+    }
+}
+
+/// Byte-level content comparison for intern table lookups.
+#[inline(always)]
+unsafe fn intern_content_equals(a: *const StringHeader, b: *const StringHeader, byte_len: u32) -> bool {
+    let data_a = (a as *const u8).add(std::mem::size_of::<StringHeader>());
+    let data_b = (b as *const u8).add(std::mem::size_of::<StringHeader>());
+    std::slice::from_raw_parts(data_a, byte_len as usize)
+        == std::slice::from_raw_parts(data_b, byte_len as usize)
+}
+
+/// Compute FNV-1a hash incrementally over concatenated content a||b
+/// without allocating the result. Caller guarantees both pointers are
+/// valid when their respective lengths are >0.
+#[inline(always)]
+unsafe fn fnv1a_concat(a: *const StringHeader, a_len: u32, b: *const StringHeader, b_len: u32) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    if a_len > 0 {
+        let data = (a as *const u8).add(std::mem::size_of::<StringHeader>());
+        for i in 0..a_len as usize {
+            h ^= *data.add(i) as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    if b_len > 0 {
+        let data = (b as *const u8).add(std::mem::size_of::<StringHeader>());
+        for i in 0..b_len as usize {
+            h ^= *data.add(i) as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// Check if concat(a, b) matches the content of an existing interned string.
+/// Caller guarantees pointers are valid when their respective lengths are >0.
+#[inline(always)]
+unsafe fn concat_content_matches(
+    a: *const StringHeader, a_len: u32,
+    b: *const StringHeader, b_len: u32,
+    existing: *const StringHeader,
+) -> bool {
+    let ex_data = (existing as *const u8).add(std::mem::size_of::<StringHeader>());
+    if a_len > 0 {
+        let a_data = (a as *const u8).add(std::mem::size_of::<StringHeader>());
+        if std::slice::from_raw_parts(a_data, a_len as usize)
+            != std::slice::from_raw_parts(ex_data, a_len as usize)
+        {
+            return false;
+        }
+    }
+    if b_len > 0 {
+        let b_data = (b as *const u8).add(std::mem::size_of::<StringHeader>());
+        if std::slice::from_raw_parts(b_data, b_len as usize)
+            != std::slice::from_raw_parts(ex_data.add(a_len as usize), b_len as usize)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// GC root scanner for the intern table.
+pub fn scan_intern_table_roots(mark: &mut dyn FnMut(f64)) {
+    unsafe {
+        for entry in INTERN_TABLE.iter() {
+            if entry.string_ptr != 0 {
+                let nanboxed = 0x7FFF_0000_0000_0000u64
+                    | (entry.string_ptr as u64 & 0x0000_FFFF_FFFF_FFFFu64);
+                mark(f64::from_bits(nanboxed));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

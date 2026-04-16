@@ -397,7 +397,7 @@ fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
 #[repr(C)]
 struct TransitionEntry {
     prev_keys: usize,    // offset 0
-    key_hash: u64,       // offset 8
+    key_ptr: usize,      // offset 8 — interned string pointer (pointer identity)
     next_keys: usize,    // offset 16
     slot_idx: u32,       // offset 24
     _pad: u32,           // offset 28, pad to 32 bytes
@@ -412,7 +412,7 @@ const TRANSITION_CACHE_MASK: usize = TRANSITION_CACHE_SIZE - 1;
 /// lookups against this symbol (write PIC).
 #[no_mangle]
 static mut TRANSITION_CACHE_GLOBAL: [TransitionEntry; TRANSITION_CACHE_SIZE] =
-    [TransitionEntry { prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0, _pad: 0 }; TRANSITION_CACHE_SIZE];
+    [TransitionEntry { prev_keys: 0, key_ptr: 0, next_keys: 0, slot_idx: 0, _pad: 0 }; TRANSITION_CACHE_SIZE];
 
 /// FNV-1a content hash for a property-name string.
 /// Exported as `perry_key_content_hash` for the codegen write-PIC to
@@ -442,32 +442,33 @@ fn key_content_hash_impl(key: *const crate::StringHeader) -> u64 {
 }
 
 #[inline(always)]
-fn transition_cache_slot(prev_keys: usize, key_hash: u64) -> usize {
+fn transition_cache_slot(prev_keys: usize, key_ptr: usize) -> usize {
     let mixed = ((prev_keys >> 3) as u64).wrapping_mul(0x9E3779B97F4A7C15)
-        ^ key_hash.wrapping_mul(0xC6BC279692B5C323);
+        ^ ((key_ptr >> 3) as u64).wrapping_mul(0xC6BC279692B5C323);
     (mixed as usize) & (TRANSITION_CACHE_SIZE - 1)
 }
 
+/// Transition cache lookup using interned string pointer identity.
 #[inline(always)]
-fn transition_cache_lookup(prev_keys: usize, key: *const crate::StringHeader) -> Option<(usize, u32)> {
-    let kh = key_content_hash(key);
-    let slot = transition_cache_slot(prev_keys, kh);
+fn transition_cache_lookup(prev_keys: usize, interned_key: *const crate::StringHeader) -> Option<(usize, u32)> {
+    let kp = interned_key as usize;
+    let slot = transition_cache_slot(prev_keys, kp);
     let entry = unsafe { TRANSITION_CACHE_GLOBAL[slot] };
-    if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_hash == kh {
+    if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_ptr == kp {
         Some((entry.next_keys, entry.slot_idx))
     } else {
         None
     }
 }
 
-fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, next_keys: usize, slot_idx: u32) {
+fn transition_cache_insert(prev_keys: usize, interned_key: *const crate::StringHeader, next_keys: usize, slot_idx: u32) {
     if next_keys == 0 {
         return;
     }
-    let kh = key_content_hash(key);
-    let slot = transition_cache_slot(prev_keys, kh);
+    let kp = interned_key as usize;
+    let slot = transition_cache_slot(prev_keys, kp);
     unsafe {
-        TRANSITION_CACHE_GLOBAL[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx, _pad: 0 };
+        TRANSITION_CACHE_GLOBAL[slot] = TransitionEntry { prev_keys, key_ptr: kp, next_keys, slot_idx, _pad: 0 };
     }
     // Mark the target as shape-shared so any future extension on the
     // original owning object clones before mutating. Without this flag,
@@ -2325,13 +2326,29 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
 
         let prev_keys_usize = keys as usize;
 
-        // FAST PATH: shape-transition cache.
+        // Resolve to interned pointer for transition cache (pointer identity).
+        // If the key is already interned (GC_FLAG_INTERNED set — e.g. from
+        // js_string_concat intern hit), skip the FNV-1a hash entirely.
+        let interned_key = if !key.is_null() && (key as usize) > 0x10000 {
+            let gc_hdr = (key as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+                as *const crate::gc::GcHeader;
+            if (*gc_hdr).gc_flags & crate::gc::GC_FLAG_INTERNED != 0 {
+                key // already interned
+            } else {
+                let kh = key_content_hash(key);
+                crate::string::js_string_intern(key, kh)
+            }
+        } else {
+            key
+        };
+
+        // FAST PATH: shape-transition cache with interned string pointer identity.
         if !key.is_null()
             && !is_frozen
             && !is_sealed_or_no_extend
             && !GLOBAL_DESCRIPTORS_IN_USE.load(Ordering::Relaxed)
         {
-            if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, key) {
+            if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, interned_key) {
                 // Defensive: strip a raw-null POINTER_TAG value the same
                 // way the slow overflow path below does, so a bogus
                 // 0x7FFD_0000_0000_0000 store doesn't leak into an
@@ -2395,7 +2412,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // that starts with `{}` and sets the same first key hits the
             // fast path above instead of allocating a fresh 4-elem
             // keys_array here.
-            transition_cache_insert(0, key, new_keys as usize, 0);
+            transition_cache_insert(0, interned_key, new_keys as usize, 0);
             return;
         }
 
@@ -2538,7 +2555,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // The cached target is stamped `GC_FLAG_SHAPE_SHARED` by
             // `transition_cache_insert`, which triggers clone-on-extend
             // on either object if someone later appends past this key.
-            transition_cache_insert(prev_keys_usize, key, new_keys as usize, new_index as u32);
+            transition_cache_insert(prev_keys_usize, interned_key, new_keys as usize, new_index as u32);
             return;
         }
         // First, add the key to the keys array (may reallocate)
@@ -2553,7 +2570,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             (*obj).field_count = new_index as u32 + 1;
         }
         // Record the shape transition — see above for semantics.
-        transition_cache_insert(prev_keys_usize, key, new_keys as usize, new_index as u32);
+        transition_cache_insert(prev_keys_usize, interned_key, new_keys as usize, new_index as u32);
     }
 }
 

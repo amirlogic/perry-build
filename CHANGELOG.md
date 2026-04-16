@@ -2,6 +2,58 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.48 — `sdiv` for `(int / const) | 0` + `@llvm.assume` bounds in Uint8ArrayGet
+- `BitOr(Div(a, b), Integer(0))` now emits `sdiv i32` directly when both operands are int-lowerable (LLVM converts to `smulh + asr`, ~2 cycles vs ~10 for fdiv).
+- `Uint8ArrayGet` bounds check replaced with `call void @llvm.assume(i1 in_bounds)` — eliminates the branch+phi diamond, making the inner loop single-BB for the vectorizer.
+- image_conv: 0.69s → 0.61s. Gap tests: 15 PASS.
+
+## v0.5.47 — `Buffer.indexOf(byte)` / `Buffer.includes(byte)` with numeric argument (closes #56)
+- Added INT32_TAG and plain-double branches to `js_buffer_index_of` so numeric byte arguments search for the byte value instead of returning -1/false.
+
+## v0.5.46 — PIC miss handler fix + zero-copy JSON parsing (closes #55)
+- `js_object_get_field_ic_miss` now checks `alloc_limit` before reading inline memory — fields in the overflow map fall through to the slow path (fixes >8 dynamic fields).
+- `parse_string_bytes` returns `ParsedStr::Borrowed(&[u8])` for non-escaped strings (zero-copy), `ParsedStr::Owned(Vec<u8>)` only for `\` escapes.
+- `parse_object` builds incrementally (no intermediate Vec). Fixed double-RefCell-borrow crash in `js_string_from_bytes`.
+- JSON pipeline: Perry 180ms vs Node 140ms (1.3× gap, was 547×).
+
+## v0.5.45 — JSON.parse key interning + transition-cache shape sharing
+- `parse_object` uses thread-local `PARSE_KEY_CACHE` to intern key strings — first record allocates N keys, subsequent records 0.
+- Objects built via `js_object_set_field_by_name` (transition cache) so all records from the same schema share their `keys_array` pointer, enabling PIC hits.
+- 20-record pipeline: Perry 12ms vs Node 4ms (3× gap, was 547×).
+
+## v0.5.44 — Monomorphic inline cache for PropertyGet (closes #51)
+- Per-site `[2 x i64]` globals (`@perry_ic_N`) cache `(keys_array_ptr, slot_index)`. Fast path: load obj→keys_array (offset 16), compare cached → direct field load at obj+24+slot*8.
+- Miss: `js_object_get_field_ic_miss` does full lookup + primes cache. Guards for non-regular objects and `ACCESSORS_IN_USE`.
+
+## v0.5.43 — Wire int-analysis ↔ flat-const bridge
+- `collect_integer_let_ids` accepts `let k = krow[j]` (flat-const IndexGet) as integer init. `can_lower_expr_as_i32` + `lower_expr_as_i32` accept `LocalGet(k)` for integer locals.
+- image_conv 3840×2160 Gaussian blur: 1.95s → 0.66s (-66%), now within 2.7× of Zig.
+
+## v0.5.42 — `!invariant.load` metadata on Array/Buffer length loads (closes #52)
+- `LlBlock::safe_load_i32_from_ptr` tags header i32 loads with `!invariant.load`, enabling LLVM GVN + LICM to hoist length reloads out of read-only loops.
+
+## v0.5.41 — Flat `[N x i32]` constants for module-level `const` 2D int arrays (closes #50)
+- Module compile scans for `const X = [[int, ...], ...]` with rectangular int-literal shape and no mutation. Emits `[rows*cols x i32]` constant into `.rodata`.
+- IndexGet intercepts inline `X[i][j]` and aliased `const krow = X[i]; krow[j]` patterns → direct `getelementptr inbounds`.
+- Synthetic 100M-iter table lookup: 108ms (vs Node 185ms).
+
+## v0.5.40 — Accumulator-pattern int-arithmetic fast path (closes #49)
+- `collect_integer_locals` recognizes `acc = acc + int_expr` (and `-`/`*`) as int-stable via fixed-point iteration.
+- LocalSet fast path emits entire rhs as `add/sub/mul i32` chain when target has i32 slot and all leaves are int-sourced.
+- Sum-of-bytes benchmark (1M × 100 iters): 272ms → 63ms (-77%).
+
+## v0.5.39 — Int32-stable local specialization (closes #48)
+- Extended `collect_integer_locals` to accept `(expr) | 0` / `>>> 0` / pure-bitwise, allocating parallel i32 alloca.
+- Fixed `boxed_vars` bug: `Expr::Update` arm inserted unconditionally instead of only via closure body walk.
+
+## v0.5.38 — Inline Buffer/Uint8Array bracket-access (closes #47)
+- `Uint8ArrayGet`/`Uint8ArraySet` in codegen emit `ldrb`/`strb` with bounds compare instead of calling `js_buffer_get`/`js_buffer_set`.
+- image_conv: 2.19s → 1.98s (-10%); tight sum loop: 275ms → 243ms (-12%).
+
+## v0.5.37 — `JSON.parse` GC-root stack (closes #46)
+- Thread-local GC-root stack for in-progress `parse_array`/`parse_object` frames. Roots the input `StringHeader` so parser input pointer can't dangle.
+- Fixes mid-parse `gc_malloc` sweeping live parse state.
+
 ## v0.5.36 — Buffer-typed param `src[i]` reads/writes bytes (closes #42)
 - **fix**: `function f(src: Buffer) { return src[0]; }` returned a tiny denormal f64 like `7.9e-308` — the NaN-boxed pointer bits of `src` misread as the raw element value. Top-level `buf[0]` worked because `Buffer.alloc(n)` is refined to `Type::Named("Uint8Array")` in `lower_types.rs`, which the computed-member lowering special-cases into the byte-indexed `Uint8ArrayGet` path. But an explicitly-declared `Buffer` parameter lands in `ctx.locals` with `Type::Named("Buffer")`, and the two call sites in `crates/perry-hir/src/lower.rs` (IndexGet at ~9055, IndexSet at ~9345) only matched `"Uint8Array"` — so `src[i]` fell through to the generic f64-element `IndexGet`, and `src[i] = v` fell through to `IndexSet` that zero-filled past the buffer header boundary.
 - Both sites now accept `n == "Uint8Array" || n == "Buffer"`. `Buffer` is Node's subclass of `Uint8Array` — identical memory layout in Perry's runtime — so the dispatch change is semantically safe. Verified against the #42 repro (25 MB buffer pass-through with `Buffer.alloc(n)` in callee): `src[0]=0`, `dst[0]=0`, `out[0]=0`, no corruption.

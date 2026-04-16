@@ -459,19 +459,27 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
 
-    // Root the input StringHeader for the duration of the parse. The parser
-    // holds `input: &[u8]` pointing INTO the string's data region — a pointer
-    // the conservative stack scan / valid-pointer-set won't match (it only
-    // indexes user pointers at `header + sizeof(GcHeader)`). Without this root
-    // the input string could be swept mid-parse and `bytes` would dangle.
+    // Suppress GC for the duration of the parse. Parse is synchronous and
+    // roots all intermediates in PARSE_ROOTS, so no collection is needed
+    // until we're done. This eliminates O(n*m) overhead from mid-parse GC
+    // cycles walking an ever-growing live set (issue #59).
+    crate::gc::gc_suppress();
+
     let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
 
     let mut parser = DirectParser::new(bytes);
     let result = parser.parse_value();
-    // Also root the final result while we evaluate the error path; a throw
-    // below (which allocates its message via gc_malloc) must not sweep the
-    // just-parsed top-level value.
     parse_root_push(result);
+
+    // Re-enable GC. Bump the malloc trigger so the freshly-created parse
+    // tree (which is still live) doesn't cause an immediate expensive GC
+    // on the next allocation.
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    // Clear key intern cache — cached pointers could dangle after GC.
+    PARSE_KEY_CACHE.with(|c| c.borrow_mut().clear());
 
     // If parser didn't consume meaningful input (result is null and input wasn't "null"),
     // the input was invalid JSON — throw SyntaxError
@@ -487,7 +495,6 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         }
     }
 
-    parse_root_restore(text_root);
     result
 }
 

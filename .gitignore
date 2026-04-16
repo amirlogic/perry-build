@@ -11,6 +11,8 @@ target/
 # Re-include the test source directories
 !test-files/
 !tests/
+!test-parity/
+!test-coverage/
 # But ignore compiled test binaries (no extension) inside them
 test-files/test_*
 test-files/test-*
@@ -78,6 +80,10 @@ menu-demo.ts
 
 # Private files
 private-*
+
+# Claude Code
+.claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # OS files
 .DS_Store

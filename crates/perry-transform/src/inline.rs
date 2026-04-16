@@ -67,18 +67,21 @@ pub fn inline_functions(module: &mut Module) {
     // wrong value from the class field.
     let module_max_id = find_max_local_id_in_module(module);
 
-    // Phase 4: Inline METHOD calls in init statements
-    // Only method calls are inlined here (not standalone functions), because method
-    // bodies access `this.field` via pointer indirection and never reference module-level
-    // variables. Standalone function inlining is still unsafe in init context because
-    // module-level variables are cached in locals during compile_init — an
-    // inlined function that reads a module variable modified by a prior call would see
-    // the stale cached value instead of the updated global slot.
+    // Phase 4: Inline calls in init statements.
+    // Method calls are always safe (they access `this.field` via pointer indirection).
+    // Standalone functions are safe ONLY if they are "pure" — i.e. they don't read or
+    // write module-level variables. Module-level variables are cached in locals during
+    // compile_init, so an inlined function that reads a module variable modified by a
+    // prior call would see the stale cached value. Pure functions (which only use their
+    // own parameters and body locals) avoid this problem entirely.
     {
-        let empty_func_candidates: HashMap<FuncId, Function> = HashMap::new();
+        let pure_func_candidates: HashMap<FuncId, Function> = func_candidates.iter()
+            .filter(|(_, f)| is_pure_function(f))
+            .map(|(id, f)| (*id, f.clone()))
+            .collect();
         let mut next_local_id = module_max_id + 1;
         let mut local_types: HashMap<LocalId, String> = HashMap::new();
-        inline_calls_in_stmts(&mut module.init, &empty_func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
+        inline_calls_in_stmts(&mut module.init, &pure_func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
     }
 
     // Phase 5: Inline calls in function bodies
@@ -339,6 +342,82 @@ fn body_contains_closure_capturing(stmts: &[Stmt], captured_ids: &std::collectio
     }
 
     stmts.iter().any(|s| check_stmt(s, captured_ids))
+}
+
+/// Check if a function is "pure" for init-inlining purposes: its body only
+/// references its own parameters and locally-declared variables.  No GlobalGet,
+/// GlobalSet, ExternFuncRef, or NativeMethodCall.  This makes it safe to inline
+/// into module init context where module-level variables are cached in locals.
+fn is_pure_function(func: &Function) -> bool {
+    let mut known_ids: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    for p in &func.params {
+        known_ids.insert(p.id);
+    }
+    // Collect all Let-declared IDs in the body
+    let body_ids = collect_body_local_ids(&func.body);
+    for id in body_ids {
+        known_ids.insert(id);
+    }
+
+    fn expr_is_pure(e: &Expr, known: &std::collections::HashSet<LocalId>) -> bool {
+        match e {
+            Expr::GlobalGet(_) | Expr::GlobalSet(_, _) => false,
+            Expr::ExternFuncRef { .. } => false,
+            Expr::NativeMethodCall { .. } => false,
+            Expr::LocalGet(id) | Expr::Update { id, .. } => known.contains(id),
+            Expr::LocalSet(id, val) => known.contains(id) && expr_is_pure(val, known),
+            Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. }
+            | Expr::Compare { left, right, .. } => {
+                expr_is_pure(left, known) && expr_is_pure(right, known)
+            }
+            Expr::Unary { operand, .. } => expr_is_pure(operand, known),
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                expr_is_pure(condition, known) && expr_is_pure(then_expr, known) && expr_is_pure(else_expr, known)
+            }
+            Expr::Call { callee, args, .. } => {
+                expr_is_pure(callee, known) && args.iter().all(|a| expr_is_pure(a, known))
+            }
+            Expr::Array(elems) => elems.iter().all(|e| expr_is_pure(e, known)),
+            Expr::IndexGet { object, index } => expr_is_pure(object, known) && expr_is_pure(index, known),
+            Expr::IndexSet { object, index, value } => {
+                expr_is_pure(object, known) && expr_is_pure(index, known) && expr_is_pure(value, known)
+            }
+            Expr::PropertyGet { object, .. } => expr_is_pure(object, known),
+            Expr::PropertySet { object, value, .. } => expr_is_pure(object, known) && expr_is_pure(value, known),
+            // Leaf expressions with no variable references are always pure
+            Expr::Integer(_) | Expr::Number(_) | Expr::Bool(_) | Expr::String(_)
+            | Expr::Null | Expr::Undefined | Expr::FuncRef(_) | Expr::This => true,
+            // For anything else we haven't explicitly handled, be conservative
+            _ => true,
+        }
+    }
+
+    fn stmt_is_pure(s: &Stmt, known: &std::collections::HashSet<LocalId>) -> bool {
+        match s {
+            Stmt::Let { init: Some(e), .. } => expr_is_pure(e, known),
+            Stmt::Let { init: None, .. } => true,
+            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => expr_is_pure(e, known),
+            Stmt::Return(None) => true,
+            Stmt::If { condition, then_branch, else_branch } => {
+                expr_is_pure(condition, known)
+                    && then_branch.iter().all(|s| stmt_is_pure(s, known))
+                    && else_branch.as_ref().map_or(true, |b| b.iter().all(|s| stmt_is_pure(s, known)))
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                expr_is_pure(condition, known) && body.iter().all(|s| stmt_is_pure(s, known))
+            }
+            Stmt::For { init, condition, update, body } => {
+                init.as_ref().map_or(true, |i| stmt_is_pure(i, known))
+                    && condition.as_ref().map_or(true, |c| expr_is_pure(c, known))
+                    && update.as_ref().map_or(true, |u| expr_is_pure(u, known))
+                    && body.iter().all(|s| stmt_is_pure(s, known))
+            }
+            Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => true,
+            _ => false, // conservative: reject Switch, Try, etc.
+        }
+    }
+
+    func.body.iter().all(|s| stmt_is_pure(s, &known_ids))
 }
 
 /// Check if statements have simple control flow suitable for inlining
@@ -628,7 +707,8 @@ fn inline_calls_in_stmts(
                     });
                     if has_nested_return {
                         // Can't safely convert early returns; skip inlining
-                        inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                        let hoisted = inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                        if !hoisted.is_empty() { new_stmts = Some(hoisted); }
                     } else {
                         // Convert trailing return to expression (discard result)
                         if let Some(last) = inlined_stmts.last_mut() {
@@ -646,24 +726,58 @@ fn inline_calls_in_stmts(
                         new_stmts = Some(inlined_stmts);
                     }
                 } else {
-                    inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                    let hoisted = inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                    if !hoisted.is_empty() {
+                        // Hoisted stmts from multi-stmt inlining inside expressions
+                        // (e.g., `h = imul32(h, p)` → Let setup stmts + modified expr)
+                        // Splice them before the current statement, keeping the stmt itself.
+                        let current = stmts.remove(i);
+                        let hoisted_len = hoisted.len();
+                        for (j, s) in hoisted.into_iter().enumerate() {
+                            stmts.insert(i + j, s);
+                        }
+                        stmts.insert(i + hoisted_len, current);
+                        i += hoisted_len + 1;
+                        continue;
+                    }
                 }
             }
             Stmt::Let { init: Some(expr), .. } => {
-                inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                let hoisted = inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                if !hoisted.is_empty() {
+                    let current = stmts.remove(i);
+                    let hoisted_len = hoisted.len();
+                    for (j, s) in hoisted.into_iter().enumerate() {
+                        stmts.insert(i + j, s);
+                    }
+                    stmts.insert(i + hoisted_len, current);
+                    i += hoisted_len + 1;
+                    continue;
+                }
             }
             Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
-                inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                let hoisted = inline_calls_in_expr(expr, func_candidates, method_candidates, local_types, next_local_id);
+                if !hoisted.is_empty() {
+                    let current = stmts.remove(i);
+                    let hoisted_len = hoisted.len();
+                    for (j, s) in hoisted.into_iter().enumerate() {
+                        stmts.insert(i + j, s);
+                    }
+                    stmts.insert(i + hoisted_len, current);
+                    i += hoisted_len + 1;
+                    continue;
+                }
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id);
+                let _hoisted = inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id);
+                // Note: hoisting from conditions is rare and complex; skip for now
                 inline_calls_in_stmts(then_branch, func_candidates, method_candidates, class_names, local_types, next_local_id);
                 if let Some(else_b) = else_branch {
                     inline_calls_in_stmts(else_b, func_candidates, method_candidates, class_names, local_types, next_local_id);
                 }
             }
             Stmt::While { condition, body } => {
-                inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id);
+                let _hoisted = inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id);
                 inline_calls_in_stmts(body, func_candidates, method_candidates, class_names, local_types, next_local_id);
             }
             Stmt::For { init, condition, update, body } => {
@@ -675,10 +789,10 @@ fn inline_calls_in_stmts(
                     }
                 }
                 if let Some(cond) = condition {
-                    inline_calls_in_expr(cond, func_candidates, method_candidates, local_types, next_local_id);
+                    let _hoisted = inline_calls_in_expr(cond, func_candidates, method_candidates, local_types, next_local_id);
                 }
                 if let Some(upd) = update {
-                    inline_calls_in_expr(upd, func_candidates, method_candidates, local_types, next_local_id);
+                    let _hoisted = inline_calls_in_expr(upd, func_candidates, method_candidates, local_types, next_local_id);
                 }
                 inline_calls_in_stmts(body, func_candidates, method_candidates, class_names, local_types, next_local_id);
             }
@@ -698,108 +812,116 @@ fn inline_calls_in_stmts(
     }
 }
 
-/// Inline function and method calls in an expression
+/// Inline function and method calls in an expression.
+/// Returns setup statements that must be spliced before the enclosing statement.
 fn inline_calls_in_expr(
     expr: &mut Expr,
     func_candidates: &HashMap<FuncId, Function>,
     method_candidates: &HashMap<(String, String), MethodCandidate>,
     local_types: &HashMap<LocalId, String>,
     next_local_id: &mut LocalId,
-) {
+) -> Vec<Stmt> {
     // First try to inline this expression if it's a call
-    if let Some((_stmts, mut result)) = try_inline_simple_call(expr, func_candidates, method_candidates, local_types, next_local_id) {
-        inline_calls_in_expr(&mut result, func_candidates, method_candidates, local_types, next_local_id);
+    if let Some((stmts, mut result)) = try_inline_simple_call(expr, func_candidates, method_candidates, local_types, next_local_id) {
+        let inner = inline_calls_in_expr(&mut result, func_candidates, method_candidates, local_types, next_local_id);
         *expr = result;
-        return;
+        let mut all = stmts;
+        all.extend(inner);
+        return all;
     }
 
-    // Otherwise recurse into sub-expressions
+    // Otherwise recurse into sub-expressions, collecting hoisted stmts
+    let mut hoisted = Vec::new();
     match expr {
         Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } |
         Expr::Compare { left, right, .. } => {
-            inline_calls_in_expr(left, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(right, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(left, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(right, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::Unary { operand, .. } => {
-            inline_calls_in_expr(operand, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(operand, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
-            inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(then_expr, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(else_expr, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(condition, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(then_expr, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(else_expr, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::Call { callee, args, .. } => {
-            inline_calls_in_expr(callee, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(callee, func_candidates, method_candidates, local_types, next_local_id));
             for arg in args {
-                inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id));
             }
         }
         Expr::Array(elements) => {
             for elem in elements {
-                inline_calls_in_expr(elem, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(elem, func_candidates, method_candidates, local_types, next_local_id));
             }
         }
         Expr::Object(fields) => {
             for (_, v) in fields {
-                inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id));
             }
         }
         Expr::ObjectSpread { parts } => {
             for (_, v) in parts {
-                inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id));
             }
         }
         Expr::ArraySpread(elements) => {
             for elem in elements {
                 match elem {
                     perry_hir::ArrayElement::Expr(e) | perry_hir::ArrayElement::Spread(e) => {
-                        inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id);
+                        hoisted.extend(inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id));
                     }
                 }
             }
         }
         Expr::CallSpread { callee, args, .. } => {
-            inline_calls_in_expr(callee, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(callee, func_candidates, method_candidates, local_types, next_local_id));
             for arg in args {
                 match arg {
                     perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
-                        inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id);
+                        hoisted.extend(inline_calls_in_expr(e, func_candidates, method_candidates, local_types, next_local_id));
                     }
                 }
             }
         }
         Expr::IndexGet { object, index } => {
-            inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::IndexSet { object, index, value } => {
-            inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(index, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::PropertyGet { object, .. } => {
-            inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::PropertySet { object, value, .. } => {
-            inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id);
-            inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(object, func_candidates, method_candidates, local_types, next_local_id));
+            hoisted.extend(inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::LocalSet(_, value) => {
-            inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id);
+            hoisted.extend(inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id));
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
-                inline_calls_in_expr(obj, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(obj, func_candidates, method_candidates, local_types, next_local_id));
             }
             for arg in args {
-                inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id);
+                hoisted.extend(inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id));
             }
         }
         _ => {}
     }
+    hoisted
 }
 
-/// Try to inline a simple function or method call (single return expression)
+/// Try to inline a simple function or method call.
+/// Handles two patterns:
+/// 1. Single `Return(expr)` body — classic expression-level inline
+/// 2. `[Let*, Return(expr)]` body — setup stmts + result expression
 fn try_inline_simple_call(
     expr: &Expr,
     func_candidates: &HashMap<FuncId, Function>,
@@ -811,6 +933,7 @@ fn try_inline_simple_call(
         // Check for regular function call
         if let Expr::FuncRef(func_id) = callee.as_ref() {
             if let Some(func) = func_candidates.get(func_id) {
+                // Pattern 1: single Return(expr)
                 if func.body.len() == 1 {
                     if let Stmt::Return(Some(return_expr)) = &func.body[0] {
                         let mut param_map: HashMap<LocalId, Expr> = HashMap::new();
@@ -820,6 +943,86 @@ fn try_inline_simple_call(
                         let mut result = return_expr.clone();
                         substitute_locals(&mut result, &param_map, next_local_id);
                         return Some((vec![], result));
+                    }
+                }
+
+                // Pattern 2: [Let (const)*, Return(expr)] — e.g. imul32 polyfill
+                // All statements except the last must be immutable Let declarations,
+                // and the last must be Return(Some(expr)).
+                if func.body.len() > 1 {
+                    let last = func.body.last().unwrap();
+                    if let Stmt::Return(Some(return_expr)) = last {
+                        let all_lets = func.body[..func.body.len() - 1].iter().all(|s| {
+                            matches!(s, Stmt::Let { mutable: false, init: Some(_), .. })
+                        });
+                        if all_lets {
+                            // Build param substitution map
+                            let mut param_map: HashMap<LocalId, Expr> = HashMap::new();
+                            for (param, arg) in func.params.iter().zip(args.iter()) {
+                                if is_trivial_expr(arg) {
+                                    param_map.insert(param.id, arg.clone());
+                                } else {
+                                    let fresh = *next_local_id;
+                                    *next_local_id += 1;
+                                    param_map.insert(param.id, Expr::LocalGet(fresh));
+                                    // We'll create the Let for this fresh id below
+                                }
+                            }
+
+                            // Remap body-local IDs
+                            let body_ids = collect_body_local_ids(&func.body);
+                            for old_id in &body_ids {
+                                if !param_map.contains_key(old_id) {
+                                    let fresh = *next_local_id;
+                                    *next_local_id += 1;
+                                    param_map.insert(*old_id, Expr::LocalGet(fresh));
+                                }
+                            }
+
+                            // Build setup stmts: param Lets (for non-trivial args) + body Lets
+                            let mut setup: Vec<Stmt> = Vec::new();
+
+                            // First, add Lets for non-trivial param args
+                            for (param, arg) in func.params.iter().zip(args.iter()) {
+                                if !is_trivial_expr(arg) {
+                                    if let Some(Expr::LocalGet(fresh_id)) = param_map.get(&param.id) {
+                                        setup.push(Stmt::Let {
+                                            id: *fresh_id,
+                                            name: param.name.clone(),
+                                            ty: param.ty.clone(),
+                                            mutable: false,
+                                            init: Some(arg.clone()),
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Then clone the body Let stmts with substituted inits
+                            for stmt in &func.body[..func.body.len() - 1] {
+                                if let Stmt::Let { id, name, ty, mutable, init: Some(init_expr) } = stmt {
+                                    let new_id = if let Some(Expr::LocalGet(fresh)) = param_map.get(id) {
+                                        *fresh
+                                    } else {
+                                        *id
+                                    };
+                                    let mut new_init = init_expr.clone();
+                                    substitute_locals(&mut new_init, &param_map, next_local_id);
+                                    setup.push(Stmt::Let {
+                                        id: new_id,
+                                        name: name.clone(),
+                                        ty: ty.clone(),
+                                        mutable: *mutable,
+                                        init: Some(new_init),
+                                    });
+                                }
+                            }
+
+                            // Build result expression from the Return
+                            let mut result = return_expr.clone();
+                            substitute_locals(&mut result, &param_map, next_local_id);
+
+                            return Some((setup, result));
+                        }
                     }
                 }
             }

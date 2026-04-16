@@ -50,6 +50,10 @@ pub const GC_FLAG_PINNED: u8 = 0x04;
 /// fresh object literal — a 20-property row object allocates 19
 /// throwaway keys_array clones per row.
 pub const GC_FLAG_SHAPE_SHARED: u8 = 0x08;
+/// Set on strings that live in the intern table. Prevents in-place
+/// mutation and allows `js_object_set_field_by_name` to skip the
+/// FNV-1a hash (pointer identity is sufficient for interned strings).
+pub const GC_FLAG_INTERNED: u8 = 0x10;
 
 // Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
 pub const OBJ_FLAG_FROZEN: u16 = 0x01;
@@ -105,6 +109,12 @@ thread_local! {
     /// Prevents gc_check_trigger() from running a collection while allocation tracking is in progress,
     /// which would cause RefCell double-borrow panics (SIGABRT).
     static GC_IN_ALLOC: Cell<bool> = Cell::new(false);
+
+    /// Suppression flag: when true, gc_check_trigger() skips collection entirely.
+    /// Used by JSON.parse to avoid mid-parse GC cycles — parse is synchronous
+    /// and roots intermediate values in PARSE_ROOTS, so deferring GC until
+    /// after parse completes is safe and eliminates O(n*m) GC overhead.
+    static GC_SUPPRESSED: Cell<bool> = Cell::new(false);
 }
 
 /// Threshold: run GC when total arena bytes exceed this
@@ -356,11 +366,30 @@ pub extern "C" fn js_gc_register_global_root(ptr: i64) {
     });
 }
 
+/// Suppress GC triggers. While suppressed, `gc_check_trigger` is a no-op.
+/// Used by JSON.parse to avoid mid-parse GC cycles.
+pub fn gc_suppress() {
+    GC_SUPPRESSED.with(|c| c.set(true));
+}
+
+/// Resume GC triggers after suppression.
+pub fn gc_unsuppress() {
+    GC_SUPPRESSED.with(|c| c.set(false));
+}
+
+/// Rebaseline the malloc-count trigger to the current live set so that
+/// objects just created during a GC-suppressed window (e.g. JSON.parse)
+/// don't immediately trip a collection on the next allocation.
+pub fn gc_bump_malloc_trigger() {
+    let current = MALLOC_OBJECTS.with(|list| list.borrow().len());
+    GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(current + GC_MALLOC_COUNT_STEP));
+}
+
 /// Check if GC should run. Called only when a new arena block is allocated.
 /// Skips collection if we're inside gc_malloc/gc_realloc to prevent
 /// RefCell double-borrow panics (reentrancy from allocation → arena grow → GC → sweep).
 pub fn gc_check_trigger() {
-    if GC_IN_ALLOC.with(|f| f.get()) {
+    if GC_IN_ALLOC.with(|f| f.get()) || GC_SUPPRESSED.with(|f| f.get()) {
         return;
     }
     use crate::arena::arena_total_bytes;
@@ -1409,6 +1438,12 @@ pub fn gc_init() {
     gc_register_root_scanner(transition_cache_root_scanner);
     gc_register_root_scanner(overflow_fields_root_scanner);
     gc_register_root_scanner(json_parse_root_scanner);
+    gc_register_root_scanner(intern_table_root_scanner);
+}
+
+/// Root scanner for the string intern table.
+pub fn intern_table_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::string::scan_intern_table_roots(mark);
 }
 
 /// FFI: initialize GC (called from compiled code startup)
