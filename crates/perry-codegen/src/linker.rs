@@ -62,6 +62,9 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // -fno-math-errno: skip errno checks on math functions
         // (Do NOT use -ffinite-math-only or -ffast-math)
         .arg("-fno-math-errno")
+        // Use native CPU features (NEON, AES, etc.) for better codegen
+        // on the build machine. Cross-compilation overrides this via -target.
+        .arg("-mcpu=native")
         .arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
