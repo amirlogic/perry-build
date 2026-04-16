@@ -394,24 +394,41 @@ fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
 /// building the same shape reuse the first's keys_array from the very
 /// first write — no per-row allocation of a 1-entry keys_array.
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct TransitionEntry {
-    prev_keys: usize,
-    key_hash: u64,
-    next_keys: usize,
-    slot_idx: u32,
+    prev_keys: usize,    // offset 0
+    key_hash: u64,       // offset 8
+    next_keys: usize,    // offset 16
+    slot_idx: u32,       // offset 24
+    _pad: u32,           // offset 28, pad to 32 bytes
 }
 
 const TRANSITION_CACHE_SIZE: usize = 16384;
+/// Mask for slot computation: TRANSITION_CACHE_SIZE - 1
+const TRANSITION_CACHE_MASK: usize = TRANSITION_CACHE_SIZE - 1;
 
 /// Main-thread transition cache — bypasses TLS overhead (user code is
-/// single-threaded). Worker threads spawned by `perry/thread` are
-/// short-lived and don't share objects, so they don't need transitions.
+/// single-threaded). `#[no_mangle]` so the LLVM codegen can emit inline
+/// lookups against this symbol (write PIC).
+#[no_mangle]
 static mut TRANSITION_CACHE_GLOBAL: [TransitionEntry; TRANSITION_CACHE_SIZE] =
-    [TransitionEntry { prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0 }; TRANSITION_CACHE_SIZE];
+    [TransitionEntry { prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0, _pad: 0 }; TRANSITION_CACHE_SIZE];
 
 /// FNV-1a content hash for a property-name string.
+/// Exported as `perry_key_content_hash` for the codegen write-PIC to
+/// call without going through the full `js_object_set_field_by_name`.
+#[no_mangle]
+pub extern "C" fn perry_key_content_hash(key: *const crate::StringHeader) -> u64 {
+    key_content_hash_impl(key)
+}
+
 #[inline(always)]
 fn key_content_hash(key: *const crate::StringHeader) -> u64 {
+    key_content_hash_impl(key)
+}
+
+#[inline(always)]
+fn key_content_hash_impl(key: *const crate::StringHeader) -> u64 {
     unsafe {
         let len = (*key).byte_len as usize;
         let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
@@ -450,7 +467,7 @@ fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, ne
     let kh = key_content_hash(key);
     let slot = transition_cache_slot(prev_keys, kh);
     unsafe {
-        TRANSITION_CACHE_GLOBAL[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx };
+        TRANSITION_CACHE_GLOBAL[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx, _pad: 0 };
     }
     // Mark the target as shape-shared so any future extension on the
     // original owning object clones before mutating. Without this flag,
