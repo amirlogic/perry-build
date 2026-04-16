@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.46
+**Current Version:** 0.5.47
 
 ## TypeScript Parity Status
 
@@ -177,6 +177,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 Keep entries here to 1-2 lines max. Detailed write-ups live in CHANGELOG.md.
 
+- **v0.5.47** — `Buffer.indexOf(byte)` / `Buffer.includes(byte)` with numeric argument now searches for the byte value instead of returning -1/false (closes #56). Added INT32_TAG and plain-double branches to `js_buffer_index_of`.
 - **v0.5.46** — Fix PIC miss handler reading past inline allocation for objects with >8 dynamic fields (closes #55). `js_object_get_field_ic_miss` now checks `alloc_limit` before reading inline memory — fields in the overflow map fall through to the slow path. Also: Zero-copy JSON string parsing + incremental object build. `parse_string_bytes` returns `ParsedStr::Borrowed(&[u8])` for non-escaped strings (zero-copy slice from input buffer), falling back to `ParsedStr::Owned(Vec<u8>)` only for strings with `\` escapes. `parse_object` builds incrementally (no intermediate `Vec<(Vec<u8>, JSValue)>` — fields set via `js_object_set_field_by_name` as they're parsed). Fixed double-RefCell-borrow crash: `js_string_from_bytes` inside `PARSE_KEY_CACHE.borrow_mut()` could trigger GC → `scan_parse_roots` → re-borrow panic; split into check-then-alloc-then-insert. Real JSON pipeline (100-record fixture): **Perry 180ms vs Node 140ms (1.3× gap, was 547×)**.
 - **v0.5.45** — JSON.parse key interning + transition-cache shape sharing (v0.5.45). `parse_object` now uses a thread-local `PARSE_KEY_CACHE` (HashMap<Vec<u8>, *const StringHeader>) to intern key strings — first record allocates N keys, subsequent records 0. Objects are built via `js_object_set_field_by_name` (transition cache) instead of manual keys_array construction, so all records from the same schema share their `keys_array` pointer. This enables the v0.5.44 PIC to hit on every PropertyGet after the first record. Combined: parse(500×20 records) dropped from unmeasurable (OOM/crash at 2000 iters) to 10ms, transform from 10s+ to 1ms. 20-record pipeline: Perry 12ms vs Node 4ms (3× gap, was 547×).
 - **v0.5.44** — Monomorphic inline cache for PropertyGet (closes #51). Per-site `[2 x i64]` globals (`@perry_ic_N`) cache `(keys_array_ptr, slot_index)`. Fast path: load obj→keys_array (offset 16), compare cached → direct field load at obj+24+slot*8 (no call, no hash, no linear scan). Miss: `js_object_get_field_ic_miss` does full lookup + primes cache. Guards: skip cache for non-regular objects (Error, Closure, etc.) and when `ACCESSORS_IN_USE` is set (getters/setters need the full dispatch). JSON-parsed objects currently get per-object keys_arrays (no shape sharing from the parser), so the PIC hits only for class instances and object-literal shapes shared via the transition cache. Follow-up: shape-sharing in JSON.parse to unlock the PIC for parsed records.

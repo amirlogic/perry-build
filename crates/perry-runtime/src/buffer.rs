@@ -871,8 +871,8 @@ fn buffer_index_of_bytes(buf: *const BufferHeader, needle: &[u8], start: i32) ->
     }
 }
 
-/// `buf.indexOf(needle, start?)` where `needle` is a string or buffer
-/// (NaN-boxed value).
+/// `buf.indexOf(needle, start?)` where `needle` is a string, buffer,
+/// or numeric byte value (NaN-boxed value).
 #[no_mangle]
 pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i32 {
     let buf = unbox_buffer_ptr(buf_ptr.to_bits()) as *const BufferHeader;
@@ -907,7 +907,18 @@ pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i
             }
         }
     }
-    -1
+    // Numeric byte needle — INT32_TAG or plain double
+    let byte_val = if top16 == 0x7FFE {
+        // INT32_TAG: lower 32 bits are an i32
+        (needle_bits as u32) & 0xFF
+    } else if top16 < 0x7FF8 || (top16 == 0x7FF8 && needle_bits == 0x7FF8_0000_0000_0000) {
+        // Raw double — convert to byte
+        ((needle as i64) & 0xFF) as u32
+    } else {
+        return -1;
+    };
+    let byte = [byte_val as u8];
+    buffer_index_of_bytes(buf, &byte, start)
 }
 
 /// `buf.includes(needle, start?)` — boolean i32.
