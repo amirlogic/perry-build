@@ -814,6 +814,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
 ///   our number ABI)
 pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_alloc", I64, &[I32]);
+    // Exact-sized literal allocator — one call + N direct stores replaces
+    // alloc + N×push_f64. See `js_array_alloc_literal` in perry-runtime/src/array.rs.
+    module.declare_function("js_array_alloc_literal", I64, &[I32]);
     module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
     module.declare_function("js_array_set_f64", VOID, &[I64, I32, DOUBLE]);

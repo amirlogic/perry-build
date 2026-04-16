@@ -100,6 +100,30 @@ pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut Ar
     arr
 }
 
+/// Exact-sized array allocation for array literals `[a, b, c, ...]`.
+///
+/// Unlike `js_array_alloc`, this does NOT apply `MIN_ARRAY_CAPACITY=16` padding.
+/// Every byte allocated is a byte the literal uses, which keeps tight-loop
+/// allocation pressure proportional to the literal size (a 3-element literal
+/// costs 32 bytes, not 136). `length` is pre-set to `capacity` so the codegen
+/// only needs to emit direct stores for each element; no per-element
+/// `js_array_push_f64` call with redundant capacity check.
+///
+/// Caller contract: the codegen evaluates every element expression *before*
+/// calling this function, then emits direct stores to `(arr+8) + i*8` with no
+/// intervening GC-triggering operation. Between this call and completion of
+/// the stores, the array header reports `length == capacity` but elements are
+/// uninitialized; only pure LLVM stores may execute in that window.
+#[no_mangle]
+pub extern "C" fn js_array_alloc_literal(capacity: u32) -> *mut ArrayHeader {
+    let ptr = arena_alloc_gc(array_byte_size(capacity as usize), 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
+    unsafe {
+        (*ptr).length = capacity;
+        (*ptr).capacity = capacity;
+    }
+    ptr
+}
+
 /// Get the length of an array
 /// Also handles Sets and Maps via registry check (for-of iteration treats them as arrays)
 #[no_mangle]

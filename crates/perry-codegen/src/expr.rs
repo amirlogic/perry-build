@@ -7683,43 +7683,53 @@ fn lower_object_literal(ctx: &mut FnCtx<'_>, props: &[(String, Expr)]) -> Result
 
 /// Lower an array literal `[a, b, c, …]`.
 ///
-/// Pattern:
-/// ```llvm
-/// %arr0 = call i64 @js_array_alloc(i32 N)        ; pre-sized
-/// %arr1 = call i64 @js_array_push_f64(i64 %arr0, double <a>)
-/// %arr2 = call i64 @js_array_push_f64(i64 %arr1, double <b>)
-/// %arr3 = call i64 @js_array_push_f64(i64 %arr2, double <c>)
-/// %boxed = call double @js_nanbox_pointer(i64 %arr3)
-/// ```
+/// Fast path (all literals): evaluate every element first (so any allocations
+/// happen before the array exists), then issue a single
+/// `js_array_alloc_literal(N)` and emit direct `store double, ptr` instructions
+/// for each element into `(arr + 8) + i*8`. This replaces `alloc + N×push_f64`
+/// — N+1 extern calls, each with redundant capacity checks and clean-ptr
+/// guards — with exactly one call plus N inline stores that LLVM can vectorize.
 ///
-/// Each `push_f64` returns a possibly-realloc'd pointer that the next push
-/// must use. Since we pre-size with `js_array_alloc(N)`, the pushes
-/// shouldn't actually realloc, but we honor the ABI to stay correct if the
-/// runtime grows the array for any reason.
-///
-/// All elements are lowered to raw `double` first; the array stores them
-/// as f64 (the typed-Number array layout). Mixed-type arrays come in a
-/// later Phase B slice.
+/// GC safety: between `js_array_alloc_literal` (which pre-sets `length == N`)
+/// and the last element store, only pure LLVM instructions execute — no
+/// allocator is called, so no GC can observe the partially-initialized array.
+/// Element expressions with their own allocations are lowered up front into
+/// SSA values that conservative stack scanning pins.
 fn lower_array_literal(ctx: &mut FnCtx<'_>, elements: &[Expr]) -> Result<String> {
-    let n = elements.len() as u32;
-    let cap_str = n.to_string();
+    let n = elements.len();
 
-    // Allocate. The result is a raw i64 array pointer (NOT NaN-boxed).
-    let mut current_arr = ctx
-        .block()
-        .call(I64, "js_array_alloc", &[(I32, &cap_str)]);
-
-    for value_expr in elements {
-        let v = lower_expr(ctx, value_expr)?;
-        current_arr = ctx.block().call(
-            I64,
-            "js_array_push_f64",
-            &[(I64, &current_arr), (DOUBLE, &v)],
-        );
+    // Empty literal: no elements to worry about, keep the simple path.
+    if n == 0 {
+        let arr = ctx
+            .block()
+            .call(I64, "js_array_alloc", &[(I32, "0")]);
+        return Ok(nanbox_pointer_inline(ctx.block(), &arr));
     }
 
-    // Inline NaN-box (POINTER_TAG) — alloc always returns a real heap ptr.
-    Ok(nanbox_pointer_inline(ctx.block(), &current_arr))
+    // Evaluate all element expressions *before* allocating. This keeps each
+    // value in an SSA register (spilled to stack if needed; reachable by the
+    // conservative stack scanner) so nested allocations inside element
+    // expressions don't see a half-initialized outer array.
+    let mut vals = Vec::with_capacity(n);
+    for value_expr in elements {
+        vals.push(lower_expr(ctx, value_expr)?);
+    }
+
+    let cap_str = n.to_string();
+    let arr = ctx
+        .block()
+        .call(I64, "js_array_alloc_literal", &[(I32, &cap_str)]);
+
+    let arr_ptr = ctx.block().inttoptr(I64, &arr);
+    for (i, v) in vals.iter().enumerate() {
+        let offset = (8 + i * 8).to_string();
+        let elem_ptr = ctx
+            .block()
+            .gep_inbounds(I8, &arr_ptr, &[(I64, &offset)]);
+        ctx.block().store(DOUBLE, v, &elem_ptr);
+    }
+
+    Ok(nanbox_pointer_inline(ctx.block(), &arr))
 }
 
 /// Inline fast-path lowering for `local_arr[i] = v`.
