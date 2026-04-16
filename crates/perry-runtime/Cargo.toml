@@ -40,6 +40,12 @@ lazy_static = "1.4"
 
 serde_json = "1"
 unicode-normalization = "0.1"
+# Issue #62: mimalloc replaces the system allocator for gc_malloc/arena/etc.
+# macOS `malloc` is ~25-40ns/alloc; mimalloc's per-thread free-list is ~5-10ns.
+# Set as #[global_allocator] in lib.rs, so it covers Rust heap allocations in
+# both the `perry` CLI and the compiled-TypeScript executables linked against
+# libperry_runtime.a.
+mimalloc = { version = "0.1", default-features = false }
 
 # We'll add GC bindings later
 # For now, use a simple bump allocator or leak memory for MVP

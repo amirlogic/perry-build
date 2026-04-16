@@ -8,6 +8,19 @@
 //! - Built-in object implementations
 //! - Console and other global functions
 
+/// Issue #62: route every Rust heap allocation through mimalloc instead of
+/// the system `malloc`. `gc_malloc`, arena block allocation, Vec/HashMap
+/// growth inside the runtime, and the compiled-program side of the FFI all
+/// use `std::alloc::{alloc, realloc, dealloc}`, which dispatch through the
+/// global allocator — so flipping it here affects the entire hot path
+/// (strings, closures, bigints, promises, object/array backing stores)
+/// without touching any call sites. Per-thread segregated free lists cut
+/// allocation dispatch from ~25-40ns (macOS `malloc`) to ~5-10ns, which is
+/// meaningful because `gc_malloc` is called ~1M+ times/sec in allocation-
+/// heavy workloads (string concat loops, JSON roundtrip, gc_pressure).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod value;
 pub mod gc;
 pub mod arena;
