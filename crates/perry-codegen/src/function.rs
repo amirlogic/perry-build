@@ -23,6 +23,10 @@ pub struct LlFunction {
     /// after longjmp returns. `returns_twice` alone on the setjmp call is not
     /// sufficient at -O2 on aarch64.
     pub has_try: bool,
+    /// When true, emit `alwaysinline` attribute. Forces LLVM to inline this
+    /// function at every call site, exposing integer operations to the
+    /// caller's optimizer context (critical for vectorization of clamp patterns).
+    pub force_inline: bool,
     blocks: Vec<LlBlock>,
     block_counter: u32,
     reg_counter: Rc<RegCounter>,
@@ -75,6 +79,7 @@ impl LlFunction {
             params,
             linkage: String::new(),
             has_try: false,
+            force_inline: false,
             blocks: Vec::new(),
             block_counter: 0,
             reg_counter: Rc::new(RegCounter::new()),
@@ -219,7 +224,13 @@ impl LlFunction {
             format!("{} ", self.linkage)
         };
 
-        let attrs = if self.has_try { " #1" } else { "" };
+        let attrs = if self.has_try {
+            " #1"
+        } else if self.force_inline {
+            " alwaysinline"
+        } else {
+            ""
+        };
         let mut ir = format!(
             "define {}{} @{}({}){} {{\n",
             linkage, self.return_type, self.name, param_str, attrs

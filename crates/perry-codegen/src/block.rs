@@ -325,8 +325,8 @@ impl LlBlock {
     }
 
     /// ECMAScript ToInt32: `fptosi` with a NaN/Infinity guard.
-    /// NaN and ±Infinity produce 0 (per spec), normal values go through
-    /// the standard `fptosi(f64→i64) + trunc(i64→i32)` path.
+    /// JS ToInt32: NaN and ±Infinity produce 0 (per spec), normal values
+    /// go through `fptosi(f64→i64) + trunc(i64→i32)`.
     pub fn toint32(&mut self, val: &str) -> String {
         use crate::types::{DOUBLE, I1, I32, I64};
         let is_nan = self.fcmp("uno", val, "0.0");
@@ -335,6 +335,15 @@ impl LlBlock {
         let is_bad = self.or(I1, &is_nan, &is_inf);
         let safe = self.select(I1, &is_bad, DOUBLE, "0.0", val);
         let as_i64 = self.fptosi(DOUBLE, &safe, I64);
+        self.trunc(I64, &as_i64, I32)
+    }
+
+    /// Fast ToInt32 — skip NaN/Infinity guards. Use ONLY when the input
+    /// is known to be a finite number (e.g., result of integer arithmetic,
+    /// `sitofp(i32)`, or a value that went through `toint32` already).
+    pub fn toint32_fast(&mut self, val: &str) -> String {
+        use crate::types::{I32, I64};
+        let as_i64 = self.fptosi(crate::types::DOUBLE, val, I64);
         self.trunc(I64, &as_i64, I32)
     }
 

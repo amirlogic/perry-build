@@ -1393,7 +1393,8 @@ fn collect_integer_let_ids(
         match s {
             Stmt::Let { id, init: Some(init), .. }
                 if matches!(init, Expr::Integer(_))
-                    || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids) =>
+                    || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids)
+ =>
             {
                 out.insert(*id);
             }
@@ -1911,6 +1912,50 @@ fn collect_localset_ids_in_expr_filtered(
 
 use perry_hir::{Expr, Stmt, Function, BinaryOp};
 
+/// Detect a 3-param clamp pattern: `if (v < lo) return lo; if (v > hi) return hi; return v;`
+/// Returns (v_param_id, lo_param_id, hi_param_id) if the function matches.
+pub fn detect_clamp3(f: &Function) -> Option<(u32, u32, u32)> {
+    if f.is_async || f.is_generator || f.params.len() != 3 { return None; }
+    if !matches!(f.return_type, perry_types::Type::Number) { return None; }
+    if f.body.len() != 3 { return None; }
+    let (v_id, lo_id, hi_id) = (f.params[0].id, f.params[1].id, f.params[2].id);
+    // [0] If { cond: Compare(Lt, v, lo), then: [Return(lo)] }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Lt, left, right }, then_branch, else_branch: None } = &f.body[0] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return None; }
+        if !matches!(right.as_ref(), Expr::LocalGet(id) if *id == lo_id) { return None; }
+        if then_branch.len() != 1 { return None; }
+        if !matches!(&then_branch[0], Stmt::Return(Some(Expr::LocalGet(id))) if *id == lo_id) { return None; }
+    } else { return None; }
+    // [1] If { cond: Compare(Gt, v, hi), then: [Return(hi)] }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Gt, left, right }, then_branch, else_branch: None } = &f.body[1] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return None; }
+        if !matches!(right.as_ref(), Expr::LocalGet(id) if *id == hi_id) { return None; }
+        if then_branch.len() != 1 { return None; }
+        if !matches!(&then_branch[0], Stmt::Return(Some(Expr::LocalGet(id))) if *id == hi_id) { return None; }
+    } else { return None; }
+    // [2] Return(v)
+    if !matches!(&f.body[2], Stmt::Return(Some(Expr::LocalGet(id))) if *id == v_id) { return None; }
+    Some((v_id, lo_id, hi_id))
+}
+
+/// Detect a 1-param clampU8 pattern: `if (v < 0) return 0; if (v > 255) return 255; return v|0;`
+pub fn detect_clamp_u8(f: &Function) -> bool {
+    if f.is_async || f.is_generator || f.params.len() != 1 { return false; }
+    if f.body.len() != 3 { return false; }
+    let v_id = f.params[0].id;
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Lt, left, right }, then_branch, else_branch: None } = &f.body[0] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return false; }
+        if !matches!(right.as_ref(), Expr::Integer(0)) { return false; }
+        if !matches!(then_branch.as_slice(), [Stmt::Return(Some(Expr::Integer(0)))]) { return false; }
+    } else { return false; }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Gt, left, right }, then_branch, else_branch: None } = &f.body[1] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return false; }
+        if !matches!(right.as_ref(), Expr::Integer(255)) { return false; }
+        if !matches!(then_branch.as_slice(), [Stmt::Return(Some(Expr::Integer(255)))]) { return false; }
+    } else { return false; }
+    true
+}
+
 /// A function is i64-specializable if it's a pure numeric recursive fn.
 pub fn is_integer_specializable(f: &Function) -> bool {
     if f.is_async || f.is_generator { return false; }
@@ -1957,6 +2002,7 @@ pub fn emit_i64_function(
     let params: Vec<(crate::types::LlvmType, String)> = f
         .params.iter().map(|p| (I64, format!("%arg{}", p.id))).collect();
     let lf = llmod.define_function(i64_name, I64, params);
+    lf.force_inline = true;
     let _ = lf.create_block("entry");
     let mut locals: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     {

@@ -219,6 +219,11 @@ pub(crate) struct CrossModuleCtx {
     /// dead branches (which may reference FFI functions that don't exist on
     /// the current target).
     pub compile_time_constants: std::collections::HashMap<u32, f64>,
+    /// Functions with a 3-param clamp pattern: fid → true. Call sites
+    /// emit `@llvm.smax.i32` + `@llvm.smin.i32` instead of a function call.
+    pub clamp3_functions: std::collections::HashSet<u32>,
+    /// Functions with clampU8 pattern (1 param, clamp to [0, 255]).
+    pub clamp_u8_functions: std::collections::HashSet<u32>,
     /// (Issue #50) Module-level `const` 2D int arrays folded into flat
     /// `[N x i32]` LLVM constants. Maps local_id → info. Populated by
     /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
@@ -555,6 +560,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         ),
         imported_vars: opts.imported_vars,
         compile_time_constants,
+        clamp3_functions: hir.functions.iter()
+            .filter_map(|f| crate::collectors::detect_clamp3(f).map(|_| f.id))
+            .collect(),
+        clamp_u8_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::detect_clamp_u8(f))
+            .map(|f| f.id)
+            .collect(),
         flat_const_arrays: {
             // Issue #50: fold module-level `const X: number[][] = [[int, ...], ...]`
             // into a flat `[N x i32]` LLVM constant so `X[i][j]` / `krow[j]` can
@@ -1075,9 +1087,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 let i64_name = format!("{}_i64", llvm_name);
                 crate::collectors::emit_i64_function(&mut llmod, f, &i64_name);
                 // Emit the f64 wrapper that calls the i64 version.
+                // Mark as alwaysinline so LLVM exposes the integer ops
+                // to callers — critical for vectorizing clamp patterns.
                 let params: Vec<(LlvmType, String)> = f
                     .params.iter().map(|p| (DOUBLE, format!("%arg{}", p.id))).collect();
                 let wrapper = llmod.define_function(llvm_name, DOUBLE, params);
+                wrapper.force_inline = true;
                 let _ = wrapper.create_block("entry");
                 let blk = wrapper.block_mut(0).unwrap();
                 let mut i64_args: Vec<(LlvmType, String)> = Vec::new();
@@ -1423,6 +1438,12 @@ fn compile_function(
         .collect();
 
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
+    // exposes their operations to the caller's optimizer context — critical
+    // for vectorizing clamp helpers and similar patterns.
+    if f.body.len() <= 8 && !f.is_async && !f.is_generator {
+        lf.force_inline = true;
+    }
     let _ = lf.create_block("entry");
 
     // Store each param into an alloca slot, collecting LocalId → slot
@@ -1518,6 +1539,8 @@ fn compile_function(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
     };
@@ -1770,6 +1793,8 @@ fn compile_closure(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
     };
@@ -1919,6 +1944,8 @@ fn compile_method(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
     };
@@ -2079,6 +2106,8 @@ fn compile_module_entry(
             non_escaping_news: main_non_escaping_news,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
         };
@@ -2253,6 +2282,8 @@ fn compile_module_entry(
             non_escaping_news: init_non_escaping_news,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
         };
@@ -2539,6 +2570,8 @@ fn compile_static_method(
         non_escaping_news,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
     };
