@@ -591,8 +591,24 @@ unsafe fn write_number(buf: &mut String, value: f64) {
 
 #[inline]
 unsafe fn write_escaped_string(buf: &mut String, s: &str) {
-    buf.push('"');
     let bytes = s.as_bytes();
+    // Fast path: scan for any escape-triggering byte. JSON output is
+    // overwhelmingly escape-free (ASCII identifiers, simple values), so
+    // a straight-line SIMD-friendly scan + one `push_str` beats the
+    // scalar per-byte escape loop. Needs_escape fires for `"`, `\`, or
+    // any control byte (< 0x20).
+    let needs_escape = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\');
+    if !needs_escape {
+        buf.reserve(bytes.len() + 2);
+        buf.push('"');
+        buf.push_str(s);
+        buf.push('"');
+        return;
+    }
+
+    buf.push('"');
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let escape = match b {
@@ -990,85 +1006,230 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
 }
 
 unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
-    let arr = ptr as *const crate::ArrayHeader;
-    let len = (*arr).length;
-    let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    stringify_array_depth(ptr, buf, 0)
+}
 
-    buf.push('[');
-    for i in 0..len {
-        if i > 0 {
-            buf.push(',');
-        }
-        let elem = *elements.add(i as usize);
-        let elem_bits = elem.to_bits();
-        let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
+/// Cached shape template for a homogeneous array of objects.
+struct ShapeTemplate {
+    keys_arr: *mut crate::ArrayHeader,
+    prefixes: Vec<String>,
+    shape_fields: u32,
+    /// True when element 0's fields are all primitives (no POINTER_TAG /
+    /// UNDEFINED). Lets the emit path skip its per-element pre-scan.
+    primitive_only: bool,
+}
 
-        if elem_bits == TAG_UNDEFINED {
-            buf.push_str("null"); // undefined in arrays becomes null per JSON spec
-        } else if elem_tag == STRING_TAG {
-            let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
-            if let Some(s) = str_from_header(str_ptr) {
-                write_escaped_string(buf, s);
-            } else {
-                buf.push_str("null");
-            }
-        } else if elem_bits == TAG_NULL {
-            buf.push_str("null");
-        } else if elem_bits == TAG_TRUE {
-            buf.push_str("true");
-        } else if elem_bits == TAG_FALSE {
-            buf.push_str("false");
-        } else if elem_tag == BIGINT_TAG {
-            let bigint_ptr = (elem_bits & POINTER_MASK) as *const crate::BigIntHeader;
-            let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
-            if let Some(s) = str_from_header(str_ptr) {
-                write_escaped_string(buf, s);
-            } else {
-                buf.push_str("null");
-            }
-        } else if elem_tag == POINTER_TAG || is_raw_pointer(elem_bits) {
-            let elem_ptr = if elem_tag == POINTER_TAG {
-                (elem_bits & POINTER_MASK) as *const u8
-            } else {
-                elem_bits as *const u8
-            };
-            match gc_obj_type(elem_ptr) {
-                crate::gc::GC_TYPE_OBJECT => stringify_object(elem_ptr, buf),
-                crate::gc::GC_TYPE_ARRAY => stringify_array(elem_ptr, buf),
-                crate::gc::GC_TYPE_STRING => {
-                    let str_ptr = elem_ptr as *const StringHeader;
-                    if let Some(s) = str_from_header(str_ptr) {
-                        write_escaped_string(buf, s);
-                    } else {
-                        buf.push_str("null");
-                    }
-                }
-                _ => {
-                    // Untagged pointer fallback: structural heuristics
-                    if is_object_pointer(elem_ptr) {
-                        stringify_object(elem_ptr, buf);
-                    } else {
-                        let arr_elem = elem_ptr as *const crate::ArrayHeader;
-                        let arr_len = (*arr_elem).length;
-                        let arr_cap = (*arr_elem).capacity;
-                        if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                            stringify_array(elem_ptr, buf);
-                        } else {
-                            let str_ptr = elem_ptr as *const StringHeader;
-                            if let Some(s) = str_from_header(str_ptr) {
-                                write_escaped_string(buf, s);
-                            } else {
-                                buf.push_str("null");
-                            }
-                        }
-                    }
-                }
-            }
+/// Build a per-shape key-prefix template for a homogeneous array of objects.
+///
+/// When every element of an array shares the same `keys_array` pointer (same
+/// shape), we can pre-format the key portion of each field once and reuse it
+/// across every element — turning the per-field key lookup (load key f64,
+/// extract pointer, `str_from_header`, 3 `push`/`push_str` calls) into a
+/// single `push_str` of a cached prefix.
+///
+/// Prefix layout for N fields with keys k0..kN-1:
+///   `prefixes[0]   = "{\"k0\":"`        (opening brace fused with first key)
+///   `prefixes[f>0] = ",\"kf\":"`        (comma fused with key)
+/// Close with `}`. This compresses ~7 per-field write ops down to ~2.
+///
+/// Returns `None` when the first element isn't a regular object, the keys
+/// array is invalid, or any key string is malformed — callers fall back to
+/// the generic slow path in that case.
+unsafe fn build_shape_prefix_template(first_elem_bits: u64) -> Option<ShapeTemplate> {
+    let tag = first_elem_bits & 0xFFFF_0000_0000_0000;
+    let first_ptr = if tag == POINTER_TAG {
+        (first_elem_bits & POINTER_MASK) as *const u8
+    } else if is_raw_pointer(first_elem_bits) {
+        first_elem_bits as *const u8
+    } else {
+        return None;
+    };
+    if gc_obj_type(first_ptr) != crate::gc::GC_TYPE_OBJECT {
+        return None;
+    }
+    let obj = first_ptr as *const crate::ObjectHeader;
+    let keys_arr = (*obj).keys_array;
+    if keys_arr.is_null() {
+        return None;
+    }
+    let keys_len = (*keys_arr).length;
+    let field_count = (*obj).field_count;
+    let shape_fields = std::cmp::min(keys_len, field_count);
+    if shape_fields == 0 || shape_fields > 32 {
+        return None;
+    }
+
+    let keys_elements =
+        (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let mut prefixes: Vec<String> = Vec::with_capacity(shape_fields as usize);
+    for f in 0..shape_fields {
+        let key_bits = (*keys_elements.add(f as usize)).to_bits();
+        let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+        let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+            (key_bits & POINTER_MASK) as *const StringHeader
         } else {
-            write_number(buf, elem);
+            key_bits as *const StringHeader
+        };
+        let key_str = str_from_header(key_ptr)?;
+        let needs_escape = key_str
+            .bytes()
+            .any(|b| b == b'"' || b == b'\\' || b < 0x20);
+        let mut prefix = String::with_capacity(key_str.len() + 4);
+        prefix.push(if f == 0 { '{' } else { ',' });
+        if needs_escape {
+            write_escaped_string(&mut prefix, key_str);
+        } else {
+            prefix.push('"');
+            prefix.push_str(key_str);
+            prefix.push('"');
+        }
+        prefix.push(':');
+        prefixes.push(prefix);
+    }
+
+    // Sample first element to decide whether every field slot is already
+    // a primitive (number/bool/null/string). When true, per-element emit
+    // can skip the undefined/closure pre-scan.
+    let fields_ptr =
+        (first_ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let mut primitive_only = true;
+    for f in 0..shape_fields {
+        let fb = (*fields_ptr.add(f as usize)).to_bits();
+        if fb == TAG_UNDEFINED || (fb & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            primitive_only = false;
+            break;
         }
     }
-    buf.push(']');
+
+    Some(ShapeTemplate {
+        keys_arr,
+        prefixes,
+        shape_fields,
+        primitive_only,
+    })
+}
+
+/// Fast emission path for an object element that matches the cached shape
+/// template. Returns `true` when the element was emitted via the template;
+/// `false` when the element diverges (different shape, skippable field, or
+/// has a `toJSON` that must produce the replacement value). On `false` the
+/// buffer is unchanged — the caller is responsible for falling back.
+unsafe fn try_emit_shape_element(
+    elem_bits: u64,
+    template: &ShapeTemplate,
+    buf: &mut String,
+    depth: u32,
+) -> bool {
+    let tag = elem_bits & 0xFFFF_0000_0000_0000;
+    let elem_ptr = if tag == POINTER_TAG {
+        (elem_bits & POINTER_MASK) as *const u8
+    } else if is_raw_pointer(elem_bits) {
+        elem_bits as *const u8
+    } else {
+        return false;
+    };
+    if gc_obj_type(elem_ptr) != crate::gc::GC_TYPE_OBJECT {
+        return false;
+    }
+    let obj = elem_ptr as *const crate::ObjectHeader;
+    if (*obj).keys_array != template.keys_arr {
+        return false;
+    }
+
+    let fields_ptr =
+        (elem_ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let shape_fields = template.shape_fields;
+    let prefixes = template.prefixes.as_slice();
+
+    // Primitive-only fast path (common case for JSON.parse output): skip
+    // the undefined/closure pre-scan and trust that the sampled element 0
+    // was representative. The emit loop handles stray POINTER_TAG values
+    // via `stringify_value_depth`; a stray UNDEFINED is rare enough that
+    // we save `buf.len()` pre-emit and roll back on detection.
+    if template.primitive_only {
+        let save_pos = buf.len();
+        for f in 0..shape_fields as usize {
+            let field_val = *fields_ptr.add(f);
+            let fb = field_val.to_bits();
+            // UNDEFINED desyncs comma placement → roll back and let the
+            // slow object path emit this element correctly.
+            if fb == TAG_UNDEFINED {
+                buf.truncate(save_pos);
+                return false;
+            }
+            buf.push_str(&prefixes[f]);
+            let vtag = fb & 0xFFFF_0000_0000_0000;
+            if fb == TAG_NULL {
+                buf.push_str("null");
+            } else if fb == TAG_TRUE {
+                buf.push_str("true");
+            } else if fb == TAG_FALSE {
+                buf.push_str("false");
+            } else if vtag == STRING_TAG {
+                let str_ptr = (fb & POINTER_MASK) as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            } else if vtag == POINTER_TAG || is_raw_pointer(fb) {
+                stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+            } else {
+                write_number(buf, field_val);
+            }
+        }
+        buf.push('}');
+        return true;
+    }
+
+    // General path: template contains (or may contain) pointer/undefined
+    // fields. Pre-scan to honor JSON spec (skip undefined, skip closures,
+    // respect toJSON).
+    let mut has_pointer_fields = false;
+    for f in 0..shape_fields as usize {
+        let fb = (*fields_ptr.add(f)).to_bits();
+        if fb == TAG_UNDEFINED {
+            return false;
+        }
+        if (fb & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            has_pointer_fields = true;
+            if is_closure_value(fb) {
+                return false;
+            }
+        }
+    }
+    if has_pointer_fields {
+        if let Some(to_json_val) = object_get_to_json(elem_ptr) {
+            stringify_value_depth(to_json_val, TYPE_UNKNOWN, buf, depth + 1);
+            return true;
+        }
+    }
+    for f in 0..shape_fields as usize {
+        buf.push_str(&prefixes[f]);
+        let field_val = *fields_ptr.add(f);
+        let fb = field_val.to_bits();
+        let vtag = fb & 0xFFFF_0000_0000_0000;
+        if fb == TAG_NULL {
+            buf.push_str("null");
+        } else if fb == TAG_TRUE {
+            buf.push_str("true");
+        } else if fb == TAG_FALSE {
+            buf.push_str("false");
+        } else if vtag == STRING_TAG {
+            let str_ptr = (fb & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if vtag == POINTER_TAG || is_raw_pointer(fb) {
+            stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+        } else {
+            write_number(buf, field_val);
+        }
+    }
+    buf.push('}');
+    true
 }
 
 /// Depth-aware variant of stringify_array for recursive calls.
@@ -1076,6 +1237,35 @@ unsafe fn stringify_array_depth(ptr: *const u8, buf: &mut String, depth: u32) {
     let arr = ptr as *const crate::ArrayHeader;
     let len = (*arr).length;
     let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+
+    // Homogeneous-shape fast path for arrays of objects sharing one
+    // `keys_array` (issue #59). The template is built from element 0 and
+    // reused for every subsequent element whose shape matches; mismatches
+    // fall back per-element via `stringify_value_depth`, so mixed arrays
+    // still produce correct output.
+    let template = if len >= 2 {
+        let first_bits = (*elements).to_bits();
+        build_shape_prefix_template(first_bits)
+    } else {
+        None
+    };
+
+    if let Some(ref tmpl) = template {
+        buf.push('[');
+        for i in 0..len {
+            if i > 0 {
+                buf.push(',');
+            }
+            let elem = *elements.add(i as usize);
+            let elem_bits = elem.to_bits();
+            if !try_emit_shape_element(elem_bits, tmpl, buf, depth) {
+                // Match the slow path: array descent does not bump depth.
+                stringify_value_depth(elem, TYPE_UNKNOWN, buf, depth);
+            }
+        }
+        buf.push(']');
+        return;
+    }
 
     buf.push('[');
     for i in 0..len {
