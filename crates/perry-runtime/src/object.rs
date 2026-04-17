@@ -940,15 +940,20 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
 /// Check if a pointer is a valid heap object (safe to dereference GcHeader).
 /// Values below 0x100000 (1MB) are likely INT32_TAG extracts, small handles,
 /// or null. The upper bound filters out NaN-box tag bits that leaked through.
+///
+/// Issue #73 follow-up: raised the lower bound from 1 MB to 2 TB to reject
+/// corrupted NaN-boxes whose 48-bit handle lands in the 1-2 TB window
+/// (e.g. `0x00FF_0000_0000` from an `ArrayHeader { length: 0, capacity:
+/// 255 }` read as u64). Real Darwin mimalloc + arena allocations all
+/// land in the 3-5 TB range; anything below 2 TB is certainly bogus on
+/// this platform. The remaining Windows/Linux targets still fit —
+/// their heaps are similarly high-address on 64-bit systems — but we
+/// haven't captured the same corruption pattern there, so if it ever
+/// regresses we'll want platform-specific bounds.
 #[inline(always)]
 fn is_valid_obj_ptr(ptr: *const u8) -> bool {
     let addr = ptr as u64;
-    // Lower bound: skip null, small handles, and INT32_TAG extracts.
-    // Upper bound: platform-dependent userspace ceiling.
-    //   macOS ARM64: heap pointers < 0x800000000000 (48-bit)
-    //   Windows x86_64: userspace < 0x7FFFFFFFFFFF (top half is kernel)
-    //   Linux x86_64: userspace < 0x800000000000 (48-bit canonical)
-    addr > 0x100000 && addr < 0x800000000000
+    addr >= 0x200_0000_0000 && addr < 0x8000_0000_0000
 }
 
 /// Object header - precedes the fields in memory

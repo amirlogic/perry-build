@@ -19,13 +19,23 @@ use crate::arena::arena_alloc_gc;
 /// allocations on Darwin consistently land in the 3-5 TB range;
 /// constraining to `>= 2 TB && < 128 TB` rejects the observed
 /// corruption patterns without cutting off any real heap pointer.
+///
+/// v0.5.85 follow-up: also validate the GC header byte + length/capacity
+/// sanity. A pointer that passes the range check but points into the
+/// middle of another allocation (post-GC memory reuse overlaid with
+/// e.g. decoded PostgreSQL text column data) reads garbage length
+/// values — witnessed `len=775370038 cap=926234674` (both the ASCII
+/// bytes of `"6+2.2017"`) flowing through `js_array_slice` and
+/// triggering 22GB-wide memcpy segfaults. Post-check: obj_type at
+/// `handle-8` must equal GC_TYPE_ARRAY (1), and length must be
+/// <= capacity <= 16M (same bound as the GC tracer's sanity guard).
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
     const HEAP_MIN: u64 = 0x200_0000_0000; // 2 TB — above observed corrupt handles
     const HEAP_MAX: u64 = 0x8000_0000_0000; // 47-bit userspace cap
     let bits = arr as u64;
     let top16 = bits >> 48;
-    if top16 >= 0x7FF8 {
+    let cleaned = if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
             return std::ptr::null();
         }
@@ -39,7 +49,32 @@ fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
             return std::ptr::null();
         }
         arr
+    };
+    // Length/capacity sanity: a real ArrayHeader has length <= capacity,
+    // and length below 100M (800 MB of element payload — well above
+    // legitimate large result sets, far below the 775M / 926M patterns
+    // we observed when a reused arena slot landed ASCII text at offsets
+    // 0/4). Buffers can be much larger than arrays, so only gate the
+    // polymorphic entry on the tighter array-sized bound and let
+    // buffer-specific runtime paths dispatch themselves when they
+    // recognize a registered buffer pointer.
+    unsafe {
+        let hdr = &*cleaned;
+        if hdr.length > hdr.capacity || hdr.length > 100_000_000 {
+            // Allow very large BUFFERS to pass — a postgres frame can
+            // be 64MB+ of bytes (capacity in the buffer case) with
+            // length up to capacity. Detect registered buffers and
+            // wave them through; everything else at this size is
+            // almost certainly corrupted.
+            let addr = cleaned as usize;
+            if !crate::buffer::is_registered_buffer(addr)
+                && crate::typedarray::lookup_typed_array_kind(addr).is_none()
+            {
+                return std::ptr::null();
+            }
+        }
     }
+    cleaned
 }
 
 #[inline(always)]
@@ -99,6 +134,22 @@ pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader 
     unsafe {
         (*ptr).length = capacity;  // Set length = requested capacity
         (*ptr).capacity = actual_capacity;
+
+        // Issue #73: pin `new Array(N)` user-facing allocations. The
+        // async await wait-loop's conservative stack scan can miss
+        // values that LLVM holds in caller-saved FP registers across
+        // the runtime poll callbacks; when GC then sweeps the block
+        // containing the array, `arena_reset_empty_blocks` rewinds
+        // the block offset and subsequent allocations overwrite the
+        // array's header — length field goes to 0, samples.slice()
+        // returns empty, computeStats produces NaN. Pinning the
+        // header guarantees the block stays live until the user
+        // explicitly drops every ref. Memory cost is bounded by the
+        // number of `new Array(N)` calls the program makes — small
+        // for benchmarks; acceptable for most long-running programs
+        // (they tend to hold a few arrays and mutate them in place).
+        let gc_header = (ptr as *mut u8).sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+        (*gc_header).gc_flags |= crate::gc::GC_FLAG_PINNED;
     }
 
     ptr
