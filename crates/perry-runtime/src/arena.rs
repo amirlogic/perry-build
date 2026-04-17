@@ -25,6 +25,7 @@ fn alloc_block(min_size: usize) -> ArenaBlock {
         data,
         size,
         offset: 0,
+        dead_cycles: 0,
     }
 }
 
@@ -33,6 +34,15 @@ struct ArenaBlock {
     data: *mut u8,
     size: usize,
     offset: usize,
+    /// Issue #73: number of consecutive GC cycles this block has been
+    /// observed with zero live objects. Reset requires TWO consecutive
+    /// dead observations so a block can't be reclaimed on the same
+    /// cycle its last live pointer slipped off the conservative scan
+    /// (e.g. LLVM dropped a `samples` handle from a caller-saved FP
+    /// reg after the IndexSet store). On the next cycle either the
+    /// scan finds the pointer (counter resets to 0) or the block is
+    /// truly dead and resets.
+    dead_cycles: u32,
 }
 
 impl ArenaBlock {
@@ -585,16 +595,40 @@ pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
     ARENA.with(|arena| unsafe {
         let arena = &mut *arena.get();
         let mut reset_block_ranges: Vec<(usize, usize)> = Vec::new();
+        // Issue #73: never reset the current block or the four blocks
+        // immediately before it. Those are the most recent allocation
+        // targets — they contain freshly-allocated objects whose
+        // handles LLVM may still be holding in caller-saved registers
+        // that the conservative scan didn't capture. Resetting them
+        // overwrites those handles' backing stores on the very next
+        // allocation and the rest of the program reads garbage.
+        // Older blocks are safer: allocations there happened multiple
+        // GC cycles ago and any still-live handle would have been
+        // re-loaded from a stack slot by now.
+        let current = arena.current;
+        let keep_low = current.saturating_sub(4);
         for (i, block) in arena.blocks.iter_mut().enumerate() {
-            // A block is reclaimable iff (a) it has at least one
-            // allocation, and (b) the sweep observed zero live objects
-            // in it. The `block_has_live` slice is indexed by block
-            // index — entries past its length default to "no live"
-            // (e.g. blocks added during the sweep itself).
             let live = block_has_live.get(i).copied().unwrap_or(false);
-            if block.offset > 0 && !live {
+            if block.offset == 0 {
+                block.dead_cycles = 0;
+                continue;
+            }
+            if live {
+                block.dead_cycles = 0;
+                continue;
+            }
+            // Recent block — skip this cycle's reset decision.
+            if i >= keep_low && i <= current {
+                block.dead_cycles = 0;
+                continue;
+            }
+            // Two-cycle grace on older blocks too, so a sudden scan
+            // miss doesn't immediately cost us the block.
+            block.dead_cycles = block.dead_cycles.saturating_add(1);
+            if block.dead_cycles >= 2 {
                 reset_block_ranges.push((block.data as usize, block.size));
                 block.offset = 0;
+                block.dead_cycles = 0;
             }
         }
         if reset_block_ranges.is_empty() {
