@@ -197,6 +197,48 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 }
             }
 
+            // Scalar replacement: if this Let binds a non-escaping object
+            // literal, skip the heap allocation entirely. One alloca per
+            // unique field; PropertyGet/Set already resolve through
+            // `ctx.scalar_replaced`, so no additional read path is needed.
+            // See `collect_non_escaping_object_literals` in collectors.rs.
+            if let Some(perry_hir::Expr::Object(props)) = init.as_ref() {
+                if let Some(field_order) = ctx.non_escaping_object_literals.get(id).cloned() {
+                    let undef = crate::nanbox::double_literal(f64::from_bits(
+                        crate::nanbox::TAG_UNDEFINED,
+                    ));
+                    let mut field_slots: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::with_capacity(field_order.len());
+                    for fname in &field_order {
+                        let slot = ctx.func.alloca_entry(DOUBLE);
+                        ctx.func.entry_allocas_push_store(DOUBLE, &undef, &slot);
+                        field_slots.insert(fname.clone(), slot);
+                    }
+
+                    // Evaluate and store each property expression in source
+                    // order — duplicate keys naturally do last-write-wins
+                    // because they share a slot. Side effects of each value
+                    // expression stay observable in declaration order.
+                    for (key, value_expr) in props {
+                        let v = lower_expr(ctx, value_expr)?;
+                        if let Some(slot) = field_slots.get(key).cloned() {
+                            ctx.block().store(DOUBLE, &v, &slot);
+                        }
+                    }
+
+                    ctx.scalar_replaced.insert(*id, field_slots);
+
+                    // Register type + dummy slot so any surviving LocalGet
+                    // (conservative collector rejects are possible) resolves
+                    // — the scalar-replaced PropertyGet/Set paths short-
+                    // circuit before loading this slot.
+                    ctx.local_types.insert(*id, refined_ty);
+                    let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                    ctx.locals.insert(*id, dummy_slot);
+                    return Ok(());
+                }
+            }
+
             // Scalar replacement: if this Let binds a non-escaping New,
             // skip the heap allocation entirely. Create a stack alloca
             // per field and inline the constructor stores into those allocas.

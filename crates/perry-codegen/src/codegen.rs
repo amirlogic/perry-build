@@ -1500,6 +1500,9 @@ fn compile_function(
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &f.body, &boxed_vars, module_globals,
     );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &f.body, &boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1552,6 +1555,7 @@ fn compile_function(
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
         non_escaping_arrays,
+        non_escaping_object_literals,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -1761,6 +1765,9 @@ fn compile_closure(
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         body, &closure_boxed_vars, module_globals,
     );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        body, &closure_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1817,6 +1824,7 @@ fn compile_closure(
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
         non_escaping_arrays,
+        non_escaping_object_literals,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -1927,6 +1935,9 @@ fn compile_method(
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &method.body, &method_boxed_vars, module_globals,
     );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &method.body, &method_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1979,6 +1990,7 @@ fn compile_method(
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
         non_escaping_arrays,
+        non_escaping_object_literals,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2114,6 +2126,9 @@ fn compile_module_entry(
         let main_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
             &hir.init, &main_boxed_vars, module_globals,
         );
+        let main_non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+            &hir.init, &main_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
@@ -2165,6 +2180,7 @@ fn compile_module_entry(
             scalar_ctor_target: Vec::new(),
             non_escaping_news: main_non_escaping_news,
             non_escaping_arrays: main_non_escaping_arrays,
+            non_escaping_object_literals: main_non_escaping_object_literals,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2311,6 +2327,9 @@ fn compile_module_entry(
         let init_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
             &hir.init, &init_boxed_vars, module_globals,
         );
+        let init_non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+            &hir.init, &init_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -2362,6 +2381,7 @@ fn compile_module_entry(
             scalar_ctor_target: Vec::new(),
             non_escaping_news: init_non_escaping_news,
             non_escaping_arrays: init_non_escaping_arrays,
+            non_escaping_object_literals: init_non_escaping_object_literals,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2657,6 +2677,9 @@ fn compile_static_method(
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &f.body, &static_boxed_vars, module_globals,
     );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &f.body, &static_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -2713,6 +2736,7 @@ fn compile_static_method(
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
         non_escaping_arrays,
+        non_escaping_object_literals,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,

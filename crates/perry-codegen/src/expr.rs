@@ -471,6 +471,14 @@ pub(crate) struct FnCtx<'a> {
     /// heap array, and by `.length` reads to fold to the constant.
     pub non_escaping_arrays: std::collections::HashMap<u32, u32>,
 
+    /// Non-escaping object literals identified by escape analysis. Maps
+    /// local_id → field names (declaration order, deduplicated). Used by
+    /// the Stmt::Let lowering to intercept `let o = { a: x, b: y }` and
+    /// emit per-field allocas. PropertyGet/Set on the local's fields
+    /// already resolve through `scalar_replaced`, so no separate read path
+    /// is required.
+    pub non_escaping_object_literals: std::collections::HashMap<u32, Vec<String>>,
+
     /// (Issue #50) Module-level const 2D int arrays folded into a flat
     /// `[N x i32]` LLVM constant. Maps local_id → (flat_global_name, rows,
     /// cols). Populated at module compile, before any function lowering.
@@ -4047,6 +4055,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // Lowered as: load → fadd/fsub 1.0 → store. Same as the
         // Update variant but for a property instead of a local.
         Expr::PropertyUpdate { object, property, op, prefix } => {
+            // Scalar replacement fast path: load → fadd/fsub 1.0 → store
+            // on the field's alloca, no heap traffic.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(slot) = ctx.scalar_replaced.get(id).and_then(|fs| fs.get(property.as_str())).cloned() {
+                    let blk = ctx.block();
+                    let old = blk.load(DOUBLE, &slot);
+                    let new = match op {
+                        BinaryOp::Sub => blk.fsub(&old, "1.0"),
+                        _ => blk.fadd(&old, "1.0"),
+                    };
+                    blk.store(DOUBLE, &new, &slot);
+                    return Ok(if *prefix { new } else { old });
+                }
+            }
+            if let Expr::This = object.as_ref() {
+                if let Some(slot) = ctx.scalar_ctor_target.last()
+                    .and_then(|tid| ctx.scalar_replaced.get(tid))
+                    .and_then(|fs| fs.get(property.as_str())).cloned()
+                {
+                    let blk = ctx.block();
+                    let old = blk.load(DOUBLE, &slot);
+                    let new = match op {
+                        BinaryOp::Sub => blk.fsub(&old, "1.0"),
+                        _ => blk.fadd(&old, "1.0"),
+                    };
+                    blk.store(DOUBLE, &new, &slot);
+                    return Ok(if *prefix { new } else { old });
+                }
+            }
             let obj_box = lower_expr(ctx, object)?;
             let key_idx = ctx.strings.intern(property);
             let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
