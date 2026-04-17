@@ -481,6 +481,50 @@ pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usi
     });
 }
 
+/// Like `arena_walk_objects_with_block_index` but filters whole blocks
+/// up-front via `block_filter(block_idx) -> bool` — returning `false`
+/// skips that block's entire object loop. This is O(n_blocks) vs
+/// O(n_objects_in_skipped_blocks), which matters a lot when the GC
+/// block-persistence pass has 3M dead objects spread across 27 blocks
+/// it already knows have no live objects (issue #64 follow-up).
+pub fn arena_walk_objects_filtered(
+    mut block_filter: impl FnMut(usize) -> bool,
+    mut callback: impl FnMut(*mut u8, usize),
+) {
+    use crate::gc::GcHeader;
+
+    sync_inline_arena_state();
+
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for (block_idx, block) in arena.blocks.iter().enumerate() {
+            if !block_filter(block_idx) {
+                continue;
+            }
+            let mut offset = 0usize;
+            while offset < block.offset {
+                let aligned = (offset + 7) & !7;
+                if aligned >= block.offset {
+                    break;
+                }
+                let header_ptr = unsafe { block.data.add(aligned) };
+                let header = header_ptr as *const GcHeader;
+                unsafe {
+                    let total_size = (*header).size as usize;
+                    if total_size == 0 || total_size > block.size {
+                        break;
+                    }
+                    let obj_type = (*header).obj_type;
+                    if obj_type >= 1 && obj_type <= 7 {
+                        callback(header_ptr, block_idx);
+                    }
+                    offset = aligned + total_size;
+                }
+            }
+        }
+    });
+}
+
 /// How many arena blocks are currently allocated. Used by the sweep to
 /// size its per-block live-tracking `Vec<bool>` before walking objects.
 pub fn arena_block_count() -> usize {

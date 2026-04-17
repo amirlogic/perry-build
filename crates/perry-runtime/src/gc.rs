@@ -436,17 +436,23 @@ pub fn gc_check_trigger() {
         gc_collect_inner();
         let post_in_use = crate::arena::arena_in_use_bytes();
 
-        // Adaptive: if the GC was mostly garbage (>75% of in-use
-        // bytes reclaimed), double the per-program step so the next
-        // allocation burst doesn't trip GC at the same point. If the
-        // GC freed almost nothing (<25%), halve the step — the
-        // program has a large live set and we should collect more
-        // frequently to avoid runaway memory growth.
+        // Adaptive step:
+        //   >75% freed → double (collections are cheap, back off).
+        //   10-25% freed → halve (large live set, collect more often to
+        //                         avoid runaway memory).
+        //   <10% freed → DOUBLE (this GC was pointless — block-persistence
+        //                        kept everything alive because live strings
+        //                        share blocks with dead ones. Halving would
+        //                        thrash 20× GCs/sec; doubling defers).
+        //                        Issue #64 follow-up: without this, a parse
+        //                        loop after a stringify loop hit GCs every
+        //                        ~5MB of growth, each freed=0, and the step
+        //                        got stuck at the 16MB floor.
         let freed = pre_in_use.saturating_sub(post_in_use);
         let mut step = GC_STEP_BYTES.with(|c| c.get());
         if pre_in_use > 0 {
             let pct_freed = (freed * 100) / pre_in_use;
-            if pct_freed > 75 {
+            if pct_freed > 75 || pct_freed < 10 {
                 step = (step * 2).min(GC_THRESHOLD_MAX_BYTES);
             } else if pct_freed < 25 {
                 step = (step / 2).max(16 * 1024 * 1024);
@@ -996,20 +1002,25 @@ fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
         });
 
         // Pass 2: mark any unmarked arena object in a live block and enqueue.
+        // Block-level pre-filter skips the object loop for dead blocks —
+        // post-parse workloads can have 27 of 29 blocks containing 3M dead
+        // objects, and the per-object early-return inside the callback still
+        // invokes the walker for every header (issue #64 follow-up). The
+        // filter drops pass 2 from ~55ms to <1ms on that workload.
         let mut newly_marked = 0usize;
-        crate::arena::arena_walk_objects_with_block_index(|header_ptr, block_idx| {
-            if block_idx >= block_has_live.len() || !block_has_live[block_idx] {
-                return;
-            }
-            let header = header_ptr as *mut GcHeader;
-            unsafe {
-                if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 {
-                    (*header).gc_flags |= GC_FLAG_MARKED;
-                    worklist.push(header);
-                    newly_marked += 1;
+        crate::arena::arena_walk_objects_filtered(
+            |block_idx| block_idx < block_has_live.len() && block_has_live[block_idx],
+            |header_ptr, _block_idx| {
+                let header = header_ptr as *mut GcHeader;
+                unsafe {
+                    if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 {
+                        (*header).gc_flags |= GC_FLAG_MARKED;
+                        worklist.push(header);
+                        newly_marked += 1;
+                    }
                 }
-            }
-        });
+            },
+        );
 
         if newly_marked == 0 {
             break;

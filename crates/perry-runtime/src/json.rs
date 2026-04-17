@@ -573,6 +573,20 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
 
+    // #64 follow-up: opportunistic pre-parse cleanup. When parse runs in a
+    // tight loop (e.g. `for (let i=0; i<N; i++) JSON.parse(blob);`), each
+    // call suppresses GC for its duration, and the post-parse malloc-trigger
+    // bump defers collection of the PREVIOUS iteration's now-dead tree.
+    // Garbage accumulates until the arena trigger fires — typically during
+    // the next stringify, producing one 100ms+ pause that walks every dead
+    // block from every iteration. Calling `gc_check_trigger` here (before
+    // suppression) lets the trigger fire normally between iterations so
+    // garbage is shed incrementally. The new <10%-freed-doubles-step rule
+    // in `gc_check_trigger` protects adversarial cases (previous stringify
+    // result strings sharing blocks with interned keys) from retrigger
+    // thrash when block-persistence keeps everything alive.
+    crate::gc::gc_check_trigger();
+
     // Suppress GC for the duration of the parse. Parse is synchronous and
     // roots all intermediates in PARSE_ROOTS, so no collection is needed
     // until we're done. This eliminates O(n*m) overhead from mid-parse GC
