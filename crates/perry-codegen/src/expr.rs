@@ -2352,6 +2352,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_bits = blk.bitcast_double_to_i64(&key_box);
             let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
 
+            // Issue #70: guard against non-pointer receivers before the PIC
+            // deref. `globalThis` lowers to `double_literal(0.0)` and flows
+            // through `const g: any = globalThis; g.foo` as a plain 0.0 —
+            // masking gives handle=0 and the unguarded `load obj+16` below
+            // segfaulted. Any NaN-box that isn't POINTER_TAG/STRING_TAG lands
+            // in the same window (INT32_TAG extracts, TAG_UNDEFINED, TAG_NULL,
+            // plain doubles). Runtime slow paths already guard with
+            // `is_valid_obj_ptr`; match that threshold (>0x100000) inline so
+            // the fast PIC path keeps its invariants. Happy-path cost is one
+            // cmp + one always-taken cond_br — branch-predicted and hoistable.
+            let is_valid = ctx.block().icmp_ugt(I64, &obj_handle, "1048576");
+            let pic_idx = ctx.new_block("pget.recv_ok");
+            let invalid_idx = ctx.new_block("pget.recv_bad");
+            let final_merge_idx = ctx.new_block("pget.recv_merge");
+            let pic_label = ctx.block_label(pic_idx);
+            let invalid_label = ctx.block_label(invalid_idx);
+            let final_merge_label = ctx.block_label(final_merge_idx);
+            ctx.block().cond_br(&is_valid, &pic_label, &invalid_label);
+
+            ctx.current_block = pic_idx;
+
             // Issue #51: monomorphic inline cache. Per-site 16-byte global
             // holds [cached_keys_array_ptr, cached_slot_index]. The fast path
             // compares obj->keys_array (offset 16) to cache[0]; on match,
@@ -2408,11 +2429,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let miss_end_label = ctx.block().label.clone();
             ctx.block().br(&merge_label);
 
-            // Merge.
+            // Merge PIC hit + miss, then jump to the outer recv-valid merge.
             ctx.current_block = merge_idx;
-            Ok(ctx.block().phi(
+            let pic_val = ctx.block().phi(
                 DOUBLE,
                 &[(&val_hit, &hit_end_label), (&val_miss, &miss_end_label)],
+            );
+            let pic_end_label = ctx.block().label.clone();
+            ctx.block().br(&final_merge_label);
+
+            // Invalid receiver: return undefined without dereferencing.
+            ctx.current_block = invalid_idx;
+            let undef_bits = crate::nanbox::i64_literal(crate::nanbox::TAG_UNDEFINED);
+            let undef_val = ctx.block().bitcast_i64_to_double(&undef_bits);
+            let invalid_end_label = ctx.block().label.clone();
+            ctx.block().br(&final_merge_label);
+
+            // Outer merge joins the PIC result with the invalid-receiver
+            // undefined.
+            ctx.current_block = final_merge_idx;
+            Ok(ctx.block().phi(
+                DOUBLE,
+                &[(&pic_val, &pic_end_label), (&undef_val, &invalid_end_label)],
             ))
         }
 
