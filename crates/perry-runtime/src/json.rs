@@ -839,6 +839,7 @@ unsafe fn object_get_to_json(ptr: *const u8) -> Option<f64> {
     None
 }
 
+#[inline]
 unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     let bits: u64 = value.to_bits();
 
@@ -1029,6 +1030,7 @@ unsafe fn stringify_value_depth(value: f64, type_hint: u32, buf: &mut String, de
 /// at depth > MAX_FAST_DEPTH to catch genuine circular refs.
 const MAX_FAST_DEPTH: u32 = 128;
 
+#[inline]
 unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
     stringify_object_inner(ptr, buf, 0)
 }
@@ -2561,11 +2563,13 @@ pub unsafe extern "C" fn js_json_stringify_full(
         None
     };
 
-    // Clear the circular detection stack
-    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
-
     // Non-reentrant fast path (issue #67): same depth-counter trick as
     // js_json_stringify — skip shape_cache save for the outermost call.
+    // Skip the pre-call STRINGIFY_STACK clear: the exit path below always
+    // clears it on normal return, and the deep-recursion check at depth
+    // > MAX_FAST_DEPTH is robust to leftover entries from a prior panic
+    // (a stale ptr that happens to match is a false-positive TypeError,
+    // which is a defensible degradation for pathological reentrant cases).
     let prior_depth = STRINGIFY_DEPTH.with(|d| {
         let c = d.get();
         d.set(c + 1);
@@ -2637,7 +2641,18 @@ pub unsafe extern "C" fn js_json_stringify_full(
         stringify_value(value, TYPE_UNKNOWN, &mut buf);
     }
 
-    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+    // Only touch STRINGIFY_STACK if we actually pushed to it (depth >
+    // MAX_FAST_DEPTH was hit). The `borrow` path avoids the borrow_mut
+    // cost on the common empty-stack case. Unpopped entries only exist
+    // after a panic mid-traversal; see the entry-side comment for the
+    // correctness argument.
+    STRINGIFY_STACK.with(|s| {
+        let stack = s.borrow();
+        if !stack.is_empty() {
+            drop(stack);
+            s.borrow_mut().clear();
+        }
+    });
 
     // JSON output is always ASCII (high bytes are \uXXXX-escaped), so
     // utf16_len == byte_len. Allocate the StringHeader directly via
