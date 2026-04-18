@@ -1201,6 +1201,15 @@ impl JsEmitter {
                 }
                 self.output.push_str(") : undefined)");
             }
+            Expr::ProcessExit(code) => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.exit(");
+                if let Some(c) = code {
+                    self.emit_expr(c);
+                } else {
+                    self.output.push('0');
+                }
+                self.output.push_str(") : undefined)");
+            }
             Expr::ProcessStdin => {
                 self.output.push_str("(typeof process !== 'undefined' ? process.stdin : { write: () => true })");
             }

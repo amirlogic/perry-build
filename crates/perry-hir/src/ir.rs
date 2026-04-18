@@ -1029,6 +1029,9 @@ pub enum Expr {
     ProcessChdir(Box<Expr>),
     // process.kill(pid, signal?) -> void
     ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
+    // process.exit(code?) -> never. Bare `process.exit()` lowers as
+    // `ProcessExit(None)` which the runtime treats as code 0.
+    ProcessExit(Option<Box<Expr>>),
     // process.stdin -> stub object { write: fn }
     ProcessStdin,
     // process.stdout -> stub object { write: fn }

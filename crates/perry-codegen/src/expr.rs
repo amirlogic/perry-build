@@ -5247,6 +5247,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             blk.call_void("js_process_chdir", &[(I64, &p_handle)]);
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
+        Expr::ProcessExit(code) => {
+            // `process.exit(code?)` terminates immediately. Before the
+            // explicit lowering it fell through to generic NativeMethodCall
+            // which silently no-op'd — scripts whose tail was
+            // `main().then(() => process.exit(0))` would see the callback
+            // fire, fail to exit, and hang in the event loop with any
+            // live net.Socket keeping `js_stdlib_has_active_handles`
+            // non-zero. The runtime fn calls `_exit(code as i32)`.
+            let code_val = if let Some(e) = code {
+                lower_expr(ctx, e)?
+            } else {
+                "0.0".to_string()
+            };
+            ctx.block().call_void("js_process_exit", &[(DOUBLE, &code_val)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
         Expr::ObjectGetPrototypeOf(o) => lower_expr(ctx, o),
         Expr::MathExpm1(o) => {
             // expm1(x) = exp(x) - 1. No llvm.expm1 intrinsic; use llvm.exp.f64

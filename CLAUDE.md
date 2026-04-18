@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.91
+**Current Version:** 0.5.92
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.92** — Wire up `process.exit(code?)` (closes #75). New `Expr::ProcessExit(Option<Box<Expr>>)` in HIR, detected for the `process.exit` member call in `lower.rs::ast::Expr::Call` alongside `chdir`/`kill`, lowered in `expr.rs` as `call void @js_process_exit(double %code)` (defaulting to 0.0 when the arg is omitted). Matching emit path added in `perry-codegen-js` (passthrough to Node `process.exit`) and `perry-codegen-wasm` (undefined stub — wasm has no `_exit`). Runtime `js_process_exit` was already defined in `perry-runtime/src/process.rs` and calls `_exit(code as i32)`; codegen just wasn't dispatching to it, so `process.exit(0)` fell through to generic NativeMethodCall and silently no-op'd. User-visible effect: `main().then(() => process.exit(0))` at the tail of a net.Socket program now actually terminates the process instead of returning to the event loop, which keeps spinning as long as `js_stdlib_has_active_handles` reports live sockets. 108 runtime tests + 38 perry CLI tests + 49 codegen/hir/wasm/js tests pass; gap suite unchanged.
 - **v0.5.91** — Empty `asm sideeffect` barrier in pure loop bodies (closes #74). Prevents LLVM loop-deletion from erasing observably-pure loops used as timing probes; gated on body purity so vectorizable loops keep full optimization budget.
 - **v0.5.90** — Release-gated regression workflow + CI-ready `benchmarks/compare.sh`. Hard-gate on version tags (>20% speed / >30% RAM / >15% binary-size regressions block the release); warn-only on main.
 - **v0.5.89** — Fix `.github/workflows/test.yml` YAML parse error (dedented content inside `run: |` block scalars terminated them early). No runtime/codegen changes.

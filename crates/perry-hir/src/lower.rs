@@ -5075,6 +5075,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 });
                                             }
                                         }
+                                        "exit" => {
+                                            // process.exit() / process.exit(code) — never
+                                            // returns, terminates the process. Until now this
+                                            // fell through to generic NativeMethodCall which
+                                            // silently no-op'd, so scripts that rely on it to
+                                            // end the event loop (e.g. `main().then(() =>
+                                            // process.exit(0))` in a net-socket driver) would
+                                            // hang with the socket still keeping the loop alive.
+                                            let code = if args.len() >= 1 {
+                                                Some(Box::new(args.into_iter().next().unwrap()))
+                                            } else {
+                                                None
+                                            };
+                                            return Ok(Expr::ProcessExit(code));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

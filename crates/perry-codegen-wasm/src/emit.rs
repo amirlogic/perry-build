@@ -6590,7 +6590,8 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::ProcessNextTick(_) | Expr::ProcessChdir(_) |
-            Expr::ProcessOn { .. } | Expr::ProcessKill { .. } => {
+            Expr::ProcessOn { .. } | Expr::ProcessKill { .. } |
+            Expr::ProcessExit(_) => {
                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => {
