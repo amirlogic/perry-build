@@ -544,8 +544,8 @@ jobs:
           set -e
           for pkg in ./npm/perry-*; do
             echo "=== publishing $pkg ==="
-            npm publish "$pkg" --access public --provenance
+            npm publish "$pkg" --access public
           done
 
       - name: Publish wrapper (@perryts/perry) last
-        run: npm publish ./npm/perry --access public --provenance
+        run: npm publish ./npm/perry --access public
