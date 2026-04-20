@@ -453,6 +453,13 @@ jobs:
         run: |
           Invoke-WebRequest "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
 
+      - name: Sync PerryTS/winget-pkgs fork with upstream
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PAT }}
+        run: |
+          gh repo sync PerryTS/winget-pkgs --source microsoft/winget-pkgs --force
+
       - name: Update winget manifest
         shell: pwsh
         env:

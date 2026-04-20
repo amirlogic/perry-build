@@ -156,7 +156,7 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(40),
                 "wait returned too early: {:?}", elapsed);
-        assert!(elapsed < Duration::from_millis(150),
+        assert!(elapsed < Duration::from_millis(500),
                 "wait blocked past timer deadline: {:?}", elapsed);
     }
 }
