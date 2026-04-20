@@ -1138,17 +1138,33 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_cheerio_selection_to_array", I64, &[I64]);
 
     // ========== URL / URLSearchParams ==========
+    // Rust runtime signatures (see crates/perry-runtime/src/url.rs):
+    //   js_url_new(*mut StringHeader)                         -> *mut ObjectHeader
+    //   js_url_new_with_base(*mut StringHeader, *mut ...)     -> *mut ObjectHeader
+    //   js_url_get_{href,pathname,protocol,host,hostname,port,search,hash,origin,search_params}
+    //     (*mut ObjectHeader)                                  -> f64 (NaN-boxed string)
+    //   js_url_search_params_new(*mut StringHeader)            -> *mut ObjectHeader
+    //   js_url_search_params_new_empty()                       -> *mut ObjectHeader
+    //   js_url_search_params_get(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> *mut StringHeader (null if missing)
+    //   js_url_search_params_has(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> f64 (0.0 or 1.0)
+    //   js_url_search_params_set/append(*mut ObjectHeader, *mut ..., *mut ...) -> void
+    //   js_url_search_params_delete(*mut ObjectHeader, *mut StringHeader)      -> void
+    //   js_url_search_params_to_string(*mut ObjectHeader)     -> *mut StringHeader
+    //   js_url_search_params_get_all(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> f64 (NaN-boxed array)
     module.declare_function("js_url_file_url_to_path", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_url_get_hash", I64, &[I64]);
-    module.declare_function("js_url_get_host", I64, &[I64]);
-    module.declare_function("js_url_get_hostname", I64, &[I64]);
-    module.declare_function("js_url_get_href", I64, &[I64]);
-    module.declare_function("js_url_get_origin", I64, &[I64]);
-    module.declare_function("js_url_get_pathname", I64, &[I64]);
-    module.declare_function("js_url_get_port", I64, &[I64]);
-    module.declare_function("js_url_get_protocol", I64, &[I64]);
-    module.declare_function("js_url_get_search", I64, &[I64]);
-    module.declare_function("js_url_get_search_params", I64, &[I64]);
+    module.declare_function("js_url_get_hash", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_host", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_hostname", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_href", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_origin", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_pathname", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_port", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_protocol", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_search", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_search_params", DOUBLE, &[I64]);
     module.declare_function("js_url_new", I64, &[I64]);
     module.declare_function("js_url_new_with_base", I64, &[I64, I64]);
     module.declare_function("js_url_search_params_append", VOID, &[I64, I64, I64]);

@@ -7584,6 +7584,229 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
+        // -------- URL / URLSearchParams --------
+        //
+        // Runtime entrypoints live in `crates/perry-runtime/src/url.rs`. The
+        // URL object is a plain `*mut ObjectHeader` with 10 string fields;
+        // URLSearchParams is a separate `*mut ObjectHeader` holding a
+        // `_entries: Array<[key, value]>` field. The HIR emits these nodes
+        // only when the local is typed `URL` / `URLSearchParams` (see
+        // `crates/perry-hir/src/lower.rs`), so here we assume the receiver
+        // NaN-box holds a POINTER_TAG value we can unbox.
+
+        Expr::UrlNew { url, base } => {
+            let url_v = lower_expr(ctx, url)?;
+            let url_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &url_v)],
+            );
+            let obj = if let Some(base) = base {
+                let base_v = lower_expr(ctx, base)?;
+                let base_ptr = ctx.block().call(
+                    I64,
+                    "js_get_string_pointer_unified",
+                    &[(DOUBLE, &base_v)],
+                );
+                ctx.block().call(
+                    I64,
+                    "js_url_new_with_base",
+                    &[(I64, &url_ptr), (I64, &base_ptr)],
+                )
+            } else {
+                ctx.block().call(I64, "js_url_new", &[(I64, &url_ptr)])
+            };
+            Ok(nanbox_pointer_inline(ctx.block(), &obj))
+        }
+
+        // The nine scalar URL getters. Runtime returns an already-NaN-boxed
+        // f64 string, so no retagging needed.
+        Expr::UrlGetHref(u) => lower_url_string_getter(ctx, u, "js_url_get_href"),
+        Expr::UrlGetPathname(u) => lower_url_string_getter(ctx, u, "js_url_get_pathname"),
+        Expr::UrlGetProtocol(u) => lower_url_string_getter(ctx, u, "js_url_get_protocol"),
+        Expr::UrlGetHost(u) => lower_url_string_getter(ctx, u, "js_url_get_host"),
+        Expr::UrlGetHostname(u) => lower_url_string_getter(ctx, u, "js_url_get_hostname"),
+        Expr::UrlGetPort(u) => lower_url_string_getter(ctx, u, "js_url_get_port"),
+        Expr::UrlGetSearch(u) => lower_url_string_getter(ctx, u, "js_url_get_search"),
+        Expr::UrlGetHash(u) => lower_url_string_getter(ctx, u, "js_url_get_hash"),
+        Expr::UrlGetOrigin(u) => lower_url_string_getter(ctx, u, "js_url_get_origin"),
+
+        Expr::UrlGetSearchParams(u) => {
+            // Runtime stores an already-NaN-boxed URLSearchParams pointer in
+            // the URL object's `searchParams` field (see create_url_object in
+            // perry-runtime/src/url.rs).
+            lower_url_string_getter(ctx, u, "js_url_get_search_params")
+        }
+
+        Expr::UrlSearchParamsNew(init) => {
+            let params_obj = if let Some(init) = init {
+                let v = lower_expr(ctx, init)?;
+                let str_ptr = ctx.block().call(
+                    I64,
+                    "js_get_string_pointer_unified",
+                    &[(DOUBLE, &v)],
+                );
+                ctx.block().call(
+                    I64,
+                    "js_url_search_params_new",
+                    &[(I64, &str_ptr)],
+                )
+            } else {
+                ctx.block().call(I64, "js_url_search_params_new_empty", &[])
+            };
+            Ok(nanbox_pointer_inline(ctx.block(), &params_obj))
+        }
+
+        Expr::UrlSearchParamsGet { params, name } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            let str_ptr = ctx.block().call(
+                I64,
+                "js_url_search_params_get",
+                &[(I64, &p_ptr), (I64, &n_ptr)],
+            );
+            // Runtime returns a null pointer when the key is absent;
+            // JS expects `null` in that case, not an empty string.
+            let blk = ctx.block();
+            let is_null = blk.icmp_eq(I64, &str_ptr, "0");
+            let as_string = nanbox_string_inline(blk, &str_ptr);
+            let str_bits = ctx.block().bitcast_double_to_i64(&as_string);
+            let selected = ctx.block().select(
+                I1,
+                &is_null,
+                I64,
+                crate::nanbox::TAG_NULL_I64,
+                &str_bits,
+            );
+            Ok(ctx.block().bitcast_i64_to_double(&selected))
+        }
+
+        Expr::UrlSearchParamsHas { params, name } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            // Runtime returns 0.0 / 1.0 as a plain f64 — not NaN-boxed.
+            // Translate to TAG_TRUE / TAG_FALSE so `typeof` and strict-eq
+            // behave correctly.
+            let raw = ctx.block().call(
+                DOUBLE,
+                "js_url_search_params_has",
+                &[(I64, &p_ptr), (I64, &n_ptr)],
+            );
+            let blk = ctx.block();
+            let is_true = blk.fcmp("une", &raw, &double_literal(0.0));
+            let tagged = blk.select(
+                I1,
+                &is_true,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(ctx.block().bitcast_i64_to_double(&tagged))
+        }
+
+        Expr::UrlSearchParamsSet { params, name, value } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            let val_v = lower_expr(ctx, value)?;
+            let val_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &val_v)],
+            );
+            ctx.block().call_void(
+                "js_url_search_params_set",
+                &[(I64, &p_ptr), (I64, &n_ptr), (I64, &val_ptr)],
+            );
+            Ok(ctx.block().bitcast_i64_to_double(crate::nanbox::TAG_UNDEFINED_I64))
+        }
+
+        Expr::UrlSearchParamsAppend { params, name, value } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            let val_v = lower_expr(ctx, value)?;
+            let val_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &val_v)],
+            );
+            ctx.block().call_void(
+                "js_url_search_params_append",
+                &[(I64, &p_ptr), (I64, &n_ptr), (I64, &val_ptr)],
+            );
+            Ok(ctx.block().bitcast_i64_to_double(crate::nanbox::TAG_UNDEFINED_I64))
+        }
+
+        Expr::UrlSearchParamsDelete { params, name } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            ctx.block().call_void(
+                "js_url_search_params_delete",
+                &[(I64, &p_ptr), (I64, &n_ptr)],
+            );
+            Ok(ctx.block().bitcast_i64_to_double(crate::nanbox::TAG_UNDEFINED_I64))
+        }
+
+        Expr::UrlSearchParamsToString(params) => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let str_ptr = ctx.block().call(
+                I64,
+                "js_url_search_params_to_string",
+                &[(I64, &p_ptr)],
+            );
+            Ok(nanbox_string_inline(ctx.block(), &str_ptr))
+        }
+
+        Expr::UrlSearchParamsGetAll { params, name } => {
+            let p_v = lower_expr(ctx, params)?;
+            let p_ptr = unbox_to_i64(ctx.block(), &p_v);
+            let n_v = lower_expr(ctx, name)?;
+            let n_ptr = ctx.block().call(
+                I64,
+                "js_get_string_pointer_unified",
+                &[(DOUBLE, &n_v)],
+            );
+            // Returns f64 with the raw array pointer bit-cast in; the runtime
+            // does not NaN-box it, so tag it here with POINTER_TAG.
+            let raw_f64 = ctx.block().call(
+                DOUBLE,
+                "js_url_search_params_get_all",
+                &[(I64, &p_ptr), (I64, &n_ptr)],
+            );
+            let bits = ctx.block().bitcast_double_to_i64(&raw_f64);
+            Ok(nanbox_pointer_inline(ctx.block(), &bits))
+        }
+
         // -------- Unsupported (clear error) --------
         other => bail!(
             "perry-codegen Phase 2: expression {} not yet supported",
@@ -7905,6 +8128,20 @@ pub(crate) fn buffer_alias_metadata_suffix(scope_idx: u32) -> String {
 pub(crate) fn unbox_to_i64(blk: &mut LlBlock, boxed: &str) -> String {
     let bits = blk.bitcast_double_to_i64(boxed);
     blk.and(I64, &bits, POINTER_MASK_I64)
+}
+
+/// Lower one of the scalar URL getters (`url.href`, `url.pathname`, …).
+/// Each runtime entry takes a raw `*mut ObjectHeader` and returns an
+/// already NaN-boxed f64 string, so the caller only has to unbox the
+/// URL handle.
+fn lower_url_string_getter(
+    ctx: &mut FnCtx<'_>,
+    url: &Expr,
+    runtime_fn: &str,
+) -> Result<String> {
+    let v = lower_expr(ctx, url)?;
+    let obj_ptr = unbox_to_i64(ctx.block(), &v);
+    Ok(ctx.block().call(DOUBLE, runtime_fn, &[(I64, &obj_ptr)]))
 }
 
 /// Lower an object literal `{ k1: v1, k2: v2, … }`.

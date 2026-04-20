@@ -226,7 +226,15 @@ fn create_url_object(url_string: &str) -> *mut ObjectHeader {
         js_object_set_field_f64(obj, URL_SEARCH, create_string_f64(&search));
         js_object_set_field_f64(obj, URL_HASH, create_string_f64(&hash));
         js_object_set_field_f64(obj, URL_ORIGIN, create_string_f64(&origin));
-        js_object_set_field_f64(obj, URL_SEARCH_PARAMS, create_string_f64(&search)); // TODO: URLSearchParams
+        // Build a real URLSearchParams object from the search string (parsed
+        // lazily below). Storing a string here would break `url.searchParams.get()`
+        // because the URLSearchParams method runtime functions interpret the
+        // receiver as `*mut ObjectHeader` and would deref a StringHeader
+        // instead — see issue #111.
+        let params_entries = parse_query_string(&search);
+        let params_obj = create_url_search_params_object(params_entries);
+        let params_f64 = crate::value::js_nanbox_pointer(params_obj as i64);
+        js_object_set_field_f64(obj, URL_SEARCH_PARAMS, params_f64);
 
         obj
     }
