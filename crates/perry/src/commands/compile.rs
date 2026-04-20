@@ -700,9 +700,37 @@ fn find_msvc_lib_paths() -> Option<String> {
     Some(paths.join(";"))
 }
 
-/// Find a library by name, optionally searching cross-compilation target directories
+/// Find a library by name, optionally searching cross-compilation target directories.
+///
+/// Returns the located path, or a list of all searched candidate paths so the
+/// caller can surface them in an error message.
+fn find_library_with_candidates(name: &str, target: Option<&str>) -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates = collect_library_candidates(name, target);
+    for path in &candidates {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+    Err(candidates)
+}
+
 fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
+    find_library_with_candidates(name, target).ok()
+}
+
+fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+
+    // Env-var overrides: users can point at an out-of-tree build dir (e.g. when
+    // the perry binary is copied to /usr/local/bin but the source tree lives
+    // elsewhere). Checked first so an explicit override always wins.
+    for env_var in ["PERRY_RUNTIME_DIR", "PERRY_LIB_DIR"] {
+        if let Ok(dir) = std::env::var(env_var) {
+            if !dir.is_empty() {
+                candidates.push(PathBuf::from(&dir).join(name));
+            }
+        }
+    }
 
     // For cross-compilation targets, ONLY search target-specific directories
     // to avoid linking host-platform libraries into the wrong target
@@ -787,12 +815,7 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
         candidates.push(PathBuf::from(format!("/usr/lib/perry/{}", name)));
     }
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-    None
+    candidates
 }
 
 /// Find the runtime library for linking
@@ -803,17 +826,31 @@ fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
         None => "perry_runtime.lib",
         _ => "libperry_runtime.a",
     };
-    find_library(lib_name, target).ok_or_else(|| {
+    find_library_with_candidates(lib_name, target).map_err(|searched| {
         let extra = if target.is_some() {
             format!(" (for target {:?})", target.unwrap())
         } else {
             String::new()
         };
+        let target_flag = rust_target_triple(target)
+            .map(|t| format!(" --target {}", t))
+            .unwrap_or_default();
+        let searched_list = searched
+            .iter()
+            .map(|p| format!("  - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
         anyhow!(
-            "Could not find {}{}. Build it with: cargo build --release -p perry-runtime{}",
-            lib_name,
-            extra,
-            rust_target_triple(target).map(|t| format!(" --target {}", t)).unwrap_or_default()
+            "Could not find {lib}{extra}.\n\
+             Searched:\n{list}\n\n\
+             Fixes:\n\
+             - From the perry workspace: cargo build --release -p perry-runtime{tf}\n\
+             - Out-of-tree install: set PERRY_RUNTIME_DIR to the directory containing {lib}\n\
+               (e.g. export PERRY_RUNTIME_DIR=/path/to/perry/target/release)",
+            lib = lib_name,
+            extra = extra,
+            list = searched_list,
+            tf = target_flag,
         )
     })
 }
