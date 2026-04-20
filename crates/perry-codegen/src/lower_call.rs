@@ -2315,6 +2315,52 @@ pub(crate) fn lower_native_method_call(
         return Ok(nanbox_pointer_inline(blk, &parent_final));
     }
 
+    // perry/ui ForEach — TS shape is `ForEach(state, (i) => Widget)`. The
+    // runtime's `perry_ui_for_each_init` wants `(container, state, closure)`,
+    // so we synthesize a VStack container, call for_each_init with it, and
+    // return the container handle. Without this special case the call falls
+    // through to the generic dispatch which emits the "method 'ForEach' not
+    // in dispatch table" warning and returns 0/undefined — the outer VStack
+    // then tries to add_child with an invalid handle, AppKit silently fails
+    // to attach the window body, and the process runs but no window shows.
+    if module == "perry/ui" && method == "ForEach" && object.is_none() && args.len() == 2 {
+        ctx.pending_declares.push((
+            "perry_ui_vstack_create".to_string(),
+            I64,
+            vec![DOUBLE],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_for_each_init".to_string(),
+            crate::types::VOID,
+            vec![I64, I64, DOUBLE],
+        ));
+
+        let spacing = "8.0".to_string();
+        let blk = ctx.block();
+        let container = blk.call(I64, "perry_ui_vstack_create", &[(DOUBLE, &spacing)]);
+        let container_slot = ctx.func.alloca_entry(I64);
+        ctx.block().store(I64, &container, &container_slot);
+
+        // args[0]: State handle — NaN-boxed pointer, unbox to i64.
+        let state_box = lower_expr(ctx, &args[0])?;
+        let blk = ctx.block();
+        let state_handle = unbox_to_i64(blk, &state_box);
+
+        // args[1]: render closure — stays as a NaN-boxed f64.
+        let closure_d = lower_expr(ctx, &args[1])?;
+
+        let blk = ctx.block();
+        let container_reload = blk.load(I64, &container_slot);
+        blk.call_void(
+            "perry_ui_for_each_init",
+            &[(I64, &container_reload), (I64, &state_handle), (DOUBLE, &closure_d)],
+        );
+
+        let blk = ctx.block();
+        let container_final = blk.load(I64, &container_slot);
+        return Ok(nanbox_pointer_inline(blk, &container_final));
+    }
+
     // perry/ui Button — TS shape is `Button(label, handler)` where
     // handler is a closure. The simple positional form is what mango
     // uses. The Object-config form (`Button(label, { onPress: cb })`)
