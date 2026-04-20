@@ -37,36 +37,41 @@ Text(`Count: ${count.value}`);
 
 This works because Perry detects `state.value` reads inside template literals and creates reactive bindings.
 
-## Two-Way Binding
+## Binding Inputs to State
 
-`TextField` and other input widgets bind to state bidirectionally:
+Input widgets expose an `onChange` callback. Forward that into a state's
+`.set(...)` to keep the state in sync as the user types/toggles/drags:
 
 ```typescript
-import { TextField, State } from "perry/ui";
+import { TextField, State, stateBindTextfield } from "perry/ui";
 
 const input = State("");
-TextField(input, "Type here...");
+const field = TextField("Type here...", (value: string) => input.set(value));
 
-// input.value always reflects what the user typed
-// input.set("hello") updates the text field
+// Optional: also let input.set("hello") update the field on screen.
+stateBindTextfield(input, field);
 ```
 
-Controls that support two-way binding:
-- `TextField(state, placeholder)` — text input
-- `SecureField(state, placeholder)` — password input
-- `Toggle(label, state)` — boolean toggle
-- `Slider(state, min, max)` — numeric slider
-- `Picker(options, state)` — selection
+Input control signatures:
+- `TextField(placeholder, onChange)` — text input, `onChange: (value: string) => void`
+- `SecureField(placeholder, onChange)` — password input, `onChange: (value: string) => void`
+- `Toggle(label, onChange)` — boolean toggle, `onChange: (value: boolean) => void`
+- `Slider(min, max, onChange)` — numeric slider, `onChange: (value: number) => void`
+- `Picker(onChange)` — dropdown, `onChange: (index: number) => void`; items via `pickerAddItem`
+
+For programmatic-to-UI sync (state-drives-widget) use the dedicated binders:
+`stateBindTextfield`, `stateBindSlider`, `stateBindToggle`, `stateBindTextNumeric`,
+`stateBindVisibility`.
 
 ## onChange Callbacks
 
-Listen for state changes:
+Listen for state changes with the free-function `stateOnChange`:
 
 ```typescript
-import { State } from "perry/ui";
+import { State, stateOnChange } from "perry/ui";
 
 const count = State(0);
-count.onChange((newValue) => {
+stateOnChange(count, (newValue: number) => {
   console.log(`Count changed to ${newValue}`);
 });
 ```
@@ -167,7 +172,7 @@ App({
     Text("My Todos"),
 
     HStack(8, [
-      TextField(input, "What needs to be done?"),
+      TextField("What needs to be done?", (value: string) => input.set(value)),
       Button("Add", () => {
         const text = input.value;
         if (text.length > 0) {

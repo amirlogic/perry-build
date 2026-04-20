@@ -56,18 +56,16 @@ btn.setBackgroundColor("#007AFF");
 An editable text input.
 
 ```typescript
-import { TextField, State } from "perry/ui";
+import { TextField, State, stateBindTextfield } from "perry/ui";
 
 const text = State("");
-const field = TextField(text, "Placeholder...");
+const field = TextField("Placeholder...", (value: string) => text.set(value));
+stateBindTextfield(text, field); // optional: let text.set(...) drive the field
 ```
 
-`TextField` takes a `State` for two-way binding — the state updates as the user types, and setting the state updates the field.
-
-**Methods:**
-- `setText(text: string)` — Set the text programmatically
-- `setPlaceholder(text: string)` — Set placeholder text
-- `setEnabled(enabled: boolean)` — Enable/disable editing
+`TextField(placeholder, onChange)` creates the field. The `onChange` callback fires
+as the user types. For two-way binding (so programmatic `state.set(...)` also
+updates the visible text) pair it with `stateBindTextfield(state, field)`.
 
 ## SecureField
 
@@ -77,10 +75,10 @@ A password input field (text is masked).
 import { SecureField, State } from "perry/ui";
 
 const password = State("");
-SecureField(password, "Enter password...");
+SecureField("Enter password...", (value: string) => password.set(value));
 ```
 
-Same API as `TextField` but input is hidden.
+Same signature as `TextField` but input is hidden.
 
 ## Toggle
 
@@ -90,10 +88,8 @@ A boolean on/off switch.
 import { Toggle, State } from "perry/ui";
 
 const enabled = State(false);
-Toggle("Enable notifications", enabled);
+Toggle("Enable notifications", (on: boolean) => enabled.set(on));
 ```
-
-The `State` is bound two-way — toggling updates the state, and setting the state updates the toggle.
 
 ## Slider
 
@@ -103,18 +99,21 @@ A numeric slider.
 import { Slider, State } from "perry/ui";
 
 const value = State(50);
-Slider(value, 0, 100); // state, min, max
+Slider(0, 100, (v: number) => value.set(v)); // min, max, onChange
 ```
 
 ## Picker
 
-A dropdown selection control.
+A dropdown selection control. Items are added with `pickerAddItem`.
 
 ```typescript
-import { Picker, State } from "perry/ui";
+import { Picker, State, pickerAddItem } from "perry/ui";
 
 const selected = State(0);
-Picker(["Option A", "Option B", "Option C"], selected);
+const picker = Picker((index: number) => selected.set(index));
+pickerAddItem(picker, "Option A");
+pickerAddItem(picker, "Option B");
+pickerAddItem(picker, "Option C");
 ```
 
 ## Image
@@ -159,10 +158,10 @@ const notifications = State(true);
 
 Form([
   Section("Personal Info", [
-    TextField(name, "Name"),
+    TextField("Name", (value: string) => name.set(value)),
   ]),
   Section("Settings", [
-    Toggle("Notifications", notifications),
+    Toggle("Notifications", (on: boolean) => notifications.set(on)),
   ]),
 ]);
 ```

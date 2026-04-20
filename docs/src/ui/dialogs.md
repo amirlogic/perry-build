@@ -111,7 +111,7 @@ App({
       }),
     ]),
     Text(`File: ${filePath.value || "No file open"}`),
-    TextField(content, "Start typing..."),
+    TextField("Start typing...", (value: string) => content.set(value)),
   ]),
 });
 ```

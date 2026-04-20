@@ -6,12 +6,12 @@ declare const __widget: unique symbol;
 /** Opaque handle to a native UI widget. */
 export type Widget = number & { readonly [__widget]: void };
 
-/** Reactive state container. */
-export interface State {
+/** Reactive state container. Generic over the value type it holds. */
+export interface State<T = number> {
     /** Current value of the state. */
-    readonly value: number;
+    readonly value: T;
     /** Set the state value and trigger bound UI updates. */
-    set(value: number): void;
+    set(value: T): void;
 }
 
 /** Native window with instance methods. */
@@ -112,7 +112,17 @@ export function VStackWithInsets(spacing: number, top: number, left: number, bot
 export function HStackWithInsets(spacing: number, top: number, left: number, bottom: number, right: number): Widget;
 
 /** Reactive state container constructor. */
-export function State(initial: number): State;
+export function State<T>(initial: T): State<T>;
+
+/**
+ * Re-render a container's children from a count-driven state.
+ *
+ * `count` is a `State<number>` representing how many items to render.
+ * Whenever the count changes, `render(i)` is invoked for `i = 0..count-1`
+ * and the returned widgets replace the container's children. Pair this with
+ * a separate array state that you keep in sync with the count.
+ */
+export function ForEach(count: State<number>, render: (index: number) => Widget): Widget;
 
 // ---------------------------------------------------------------------------
 // Text setters
@@ -229,7 +239,7 @@ export function stateBindTextNumeric(state: State, text: Widget, prefix: string,
 export function stateBindSlider(state: State, slider: Widget): void;
 export function stateBindToggle(state: State, toggle: Widget): void;
 export function stateBindVisibility(state: State, showWidget: Widget, hideWidget: Widget): void;
-export function stateBindTextfield(state: State, textfield: Widget): void;
+export function stateBindTextfield(state: State<string>, textfield: Widget): void;
 
 // ---------------------------------------------------------------------------
 // Image

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.108
+**Current Version:** 0.5.109
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.109** — Fix `perry init` TypeScript type stubs and the UI docs that exercised them (closes #103). `types/perry/ui/index.d.ts`: `State` is now generic (`State<T = number>`) so `State<string[]>([])` and `State("")` type-check instead of erroring on the old number-only signature; added `ForEach(count: State<number>, render)` export (was used in the todo-app docs example but missing from the stub); `stateBindTextfield` now takes `State<string>`. Rewrote the docs examples in `docs/src/getting-started/first-app.md` (counter + todo), `docs/src/ui/state.md` (two-way binding section, onChange snippet, complete example), `docs/src/ui/widgets.md` (TextField/SecureField/Toggle/Slider/Picker/Form), and `docs/src/ui/dialogs.md` to use the actual runtime signatures — `TextField(placeholder, onChange)`, `Slider(min, max, onChange)`, `Picker(onChange)` + `pickerAddItem`, etc. — instead of the fictional `TextField(state, placeholder)` / `count.onChange(...)` forms. The old forms silently segfaulted at launch because `UiArgKind::Str` at `lower_call.rs:2557` routes the first arg through `get_raw_string_ptr`, and a State handle (i64) reinterpreted as a NaN-boxed string derefs garbage. No runtime/codegen change — the stubs are embedded via `include_str!` at compile time and ship to users via `perry init` / `perry types`. Verified: 5 new example binaries (counter, todo, controls, form, onchange) all `tsc --noEmit` clean AND compile + launch without crashing.
 - **v0.5.108** — Honor `PERRY_RUNTIME_DIR` / `PERRY_LIB_DIR` env vars in `find_library` so out-of-tree installs (perry binary in `/usr/local/bin`, source tree elsewhere) can point at an explicit lib dir. The "Could not find libperry_runtime.a" error now lists every candidate path it searched and names the env var as a fix. Closes #101.
 - **v0.5.107** — First end-to-end release with npm distribution live. `@perryts/perry` + seven per-platform optional-dep packages (`@perryts/perry-{darwin-arm64,darwin-x64,linux-x64,linux-arm64,linux-x64-musl,linux-arm64-musl,win32-x64}`) publish via OIDC Trusted Publisher from `release-packages.yml` on each GitHub Release. `npx @perryts/perry compile file.ts` works on all seven platforms. No runtime/codegen change.
 - **v0.5.106** — Swap `lettre`'s `tokio1-native-tls` feature for `tokio1-rustls-tls` in `crates/perry-stdlib/Cargo.toml`. Eliminates `openssl-sys` / `native-tls` from the transitive dep tree (they were the only holdouts; the policy comment at Cargo.toml:35 already states "rustls only to avoid OpenSSL"). Unblocks the musl CI build — `openssl-sys` was failing with "Could not find openssl via pkg-config: cross-compilation unsupported" on `x86_64-unknown-linux-musl`. No functional change for SMTP clients; rustls provides the same TLS surface.

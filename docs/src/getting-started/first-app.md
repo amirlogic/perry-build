@@ -11,17 +11,16 @@ import { App, Text, Button, VStack, State } from "perry/ui";
 
 const count = State(0);
 
-App("My Counter", () =>
-  VStack([
-    Text(`Count: ${count.get()}`),
-    Button("Increment", () => {
-      count.set(count.get() + 1);
-    }),
-    Button("Reset", () => {
-      count.set(0);
-    }),
-  ])
-);
+App({
+  title: "My Counter",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`Count: ${count.value}`),
+    Button("Increment", () => count.set(count.value + 1)),
+    Button("Reset", () => count.set(0)),
+  ]),
+});
 ```
 
 Compile and run:
@@ -35,43 +34,51 @@ A native window opens with a label and two buttons. Clicking "Increment" updates
 
 ## How It Works
 
-- **`App(title, renderFn)`** — Creates a native application window. The render function defines the UI.
-- **`State(initialValue)`** — Creates reactive state. When you call `.set()`, the UI re-renders.
-- **`VStack([...])`** — Vertical stack layout (like SwiftUI's VStack or CSS flexbox column).
-- **`Text(string)`** — A text label. Template literals with `${state.get()}` update reactively.
+- **`App({ title, width, height, body })`** — Creates a native application window. `body` is the root widget.
+- **`State(initialValue)`** — Creates reactive state. `.value` reads, `.set(v)` writes and triggers UI updates.
+- **`VStack(spacing, [...])`** — Vertical stack layout (like SwiftUI's VStack or CSS flexbox column). Spacing arg is optional.
+- **`Text(string)`** — A text label. Template literals referencing `${state.value}` bind reactively.
 - **`Button(label, onClick)`** — A native button with a click handler.
 
 ## A Todo App
 
 ```typescript
-import { App, Text, Button, TextField, VStack, HStack, State, ForEach } from "perry/ui";
+import {
+  App, Text, Button, TextField, VStack, HStack, State, ForEach, Spacer,
+} from "perry/ui";
 
 const todos = State<string[]>([]);
+const count = State(0); // ForEach iterates by index, so we keep a count in sync
 const input = State("");
 
-App("Todo App", () =>
-  VStack([
-    HStack([
-      TextField(input, "Add a todo..."),
+App({
+  title: "Todo App",
+  width: 480,
+  height: 600,
+  body: VStack(16, [
+    HStack(8, [
+      TextField("Add a todo...", (value: string) => input.set(value)),
       Button("Add", () => {
-        const text = input.get();
+        const text = input.value;
         if (text.length > 0) {
-          todos.set([...todos.get(), text]);
+          todos.set([...todos.value, text]);
+          count.set(count.value + 1);
           input.set("");
         }
       }),
     ]),
-    ForEach(todos, (todo, index) =>
-      HStack([
-        Text(todo),
+    ForEach(count, (i: number) =>
+      HStack(8, [
+        Text(todos.value[i]),
+        Spacer(),
         Button("Remove", () => {
-          const items = todos.get();
-          todos.set(items.filter((_, i) => i !== index));
+          todos.set(todos.value.filter((_, idx) => idx !== i));
+          count.set(count.value - 1);
         }),
       ])
     ),
-  ])
-);
+  ]),
+});
 ```
 
 ## Cross-Platform
