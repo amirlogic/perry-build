@@ -6888,6 +6888,42 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
 
+        // Copy project resource directories into the bundle so
+        // bloom_load_texture / load_sound / read_file can resolve relative
+        // asset paths via [[NSBundle mainBundle] resourcePath].
+        let source_dir = args.input.canonicalize().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(src_dir) = &source_dir {
+            let mut project_root = src_dir.clone();
+            for _ in 0..5 {
+                if project_root.join("package.json").exists() || project_root.join("perry.toml").exists() { break; }
+                if let Some(parent) = project_root.parent() {
+                    project_root = parent.to_path_buf();
+                } else { break; }
+            }
+            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                fs::create_dir_all(dst)?;
+                for entry in fs::read_dir(src)? {
+                    let entry = entry?;
+                    let ty = entry.file_type()?;
+                    let dest_path = dst.join(entry.file_name());
+                    if ty.is_dir() {
+                        copy_dir_recursive(&entry.path(), &dest_path)?;
+                    } else {
+                        fs::copy(entry.path(), &dest_path)?;
+                    }
+                }
+                Ok(())
+            }
+            for dir_name in &["logo", "assets", "resources", "images"] {
+                let resource_dir = project_root.join(dir_name);
+                if resource_dir.is_dir() {
+                    let dest = app_dir.join(dir_name);
+                    let _ = copy_dir_recursive(&resource_dir, &dest);
+                }
+            }
+        }
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote watchOS app bundle: {}", app_dir.display());
