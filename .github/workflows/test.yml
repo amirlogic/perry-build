@@ -273,8 +273,11 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.sh --verbose --filter ui/gallery.ts"
-            # macOS baseline is checked in — gallery is blocking here.
-            gallery_advisory: false
+            # Locally-blessed baseline didn't match the macOS-14 runner's
+            # headless display (dev-box Retina 1800x2864 vs runner 900x970).
+            # Advisory on all OSes until each baseline is captured from a
+            # clean CI run and committed.
+            gallery_advisory: true
           - os: ubuntu-24.04
             ui_backend: perry-ui-gtk4
             shell: bash

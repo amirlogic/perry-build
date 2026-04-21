@@ -119,10 +119,13 @@ fn run(cli: &Cli) -> Result<i32> {
         .examples_dir
         .clone()
         .unwrap_or_else(|| repo_root.join("docs/examples"));
-    let perry_bin = cli
-        .perry
-        .clone()
-        .unwrap_or_else(|| repo_root.join("target/release/perry"));
+    let perry_bin = cli.perry.clone().unwrap_or_else(|| {
+        repo_root.join(if cfg!(windows) {
+            "target/release/perry.exe"
+        } else {
+            "target/release/perry"
+        })
+    });
 
     if !examples_dir.is_dir() {
         return Err(anyhow!(
@@ -660,8 +663,12 @@ fn stdout_diff_summary(expected: &str, actual: &str) -> String {
 
 fn trim_detail(s: &str) -> String {
     let s = s.trim();
-    if s.len() > 300 {
-        format!("{}...", &s[..300])
+    if s.len() > 4000 {
+        // Keep both ends — head has "Compiling libc v0.2.184..." noise but
+        // the real error usually sits at the tail.
+        let head = &s[..1000];
+        let tail = &s[s.len() - 2500..];
+        format!("{head}\n  ... [truncated] ...\n{tail}")
     } else {
         s.to_string()
     }
