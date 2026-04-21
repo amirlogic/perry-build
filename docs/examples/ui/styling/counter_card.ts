@@ -15,11 +15,13 @@ import {
     textSetFontFamily,
     textSetColor,
     widgetSetBackgroundColor,
-    widgetSetBorderColor,
-    widgetSetBorderWidth,
     widgetSetEdgeInsets,
     setCornerRadius,
 } from "perry/ui"
+
+// Note: widgetSetBorderColor / widgetSetBorderWidth are macOS/iOS/Windows
+// only — perry-ui-gtk4 doesn't export them (GTK4 borders are CSS-driven).
+// Omitted from this demo so it compiles everywhere.
 
 const count = State(0)
 
@@ -47,8 +49,6 @@ const container = VStack(16, [title, display, controls])
 widgetSetEdgeInsets(container, 40, 40, 40, 40)
 setCornerRadius(container, 16)
 widgetSetBackgroundColor(container, 1.0, 1.0, 1.0, 1.0)
-widgetSetBorderColor(container, 0.898, 0.898, 0.898, 1.0)
-widgetSetBorderWidth(container, 1)
 
 App({
     title: "Styled App",

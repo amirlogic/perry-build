@@ -133,18 +133,22 @@ pub extern "C" fn perry_ui_screenshot_capture(out_len: *mut usize) -> *mut u8 {
 #[cfg(target_os = "windows")]
 fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len() / 4);
-    {
+    let ok = {
         let mut encoder = png::Encoder::new(&mut out, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         // Fast compression — deflate level 1 is ~30x faster than level 9
         // and typical gallery screenshots still land under 100 KB.
         encoder.set_compression(png::Compression::Fast);
-        let mut writer = match encoder.write_header() {
-            Ok(w) => w,
-            Err(_) => return out, // malformed; return empty
-        };
-        let _ = writer.write_image_data(rgba);
+        // Keep the encoder borrow strictly inside this block so we can
+        // freely return `out` below.
+        match encoder.write_header() {
+            Ok(mut writer) => writer.write_image_data(rgba).is_ok(),
+            Err(_) => false,
+        }
+    };
+    if !ok {
+        out.clear();
     }
     out
 }
