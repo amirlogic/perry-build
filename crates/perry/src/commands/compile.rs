@@ -1080,11 +1080,24 @@ fn build_optimized_libs(
 ) -> OptimizedLibs {
     use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
 
-    let features = compute_required_features(
+    let mut features = compute_required_features(
         &ctx.native_module_imports,
         ctx.uses_fetch,
         ctx.uses_crypto_builtins,
     );
+    // The UI backends (perry-ui-gtk4 on Linux, perry-ui-macos, perry-ui-windows)
+    // reach into perry-stdlib's async bridge from GLib/NSTimer/WM_TIMER
+    // trampolines (js_stdlib_process_pending, js_promise_run_microtasks).
+    // Those symbols live in perry-stdlib/src/common/async_bridge.rs which is
+    // gated on `#[cfg(feature = "async-runtime")]`. For a bare UI program
+    // whose user code imports zero stdlib modules, compute_required_features
+    // returns an empty set and the auto-optimized stdlib is built with
+    // --no-default-features — no `async-runtime`, no async_bridge module, no
+    // symbol. Force `async-runtime` whenever the program pulls in a UI
+    // backend so the trampolines resolve at link time.
+    if ctx.needs_ui {
+        features.insert("async-runtime");
+    }
     let feature_arg = features_to_cargo_arg(&features);
 
     // panic = "abort" is safe whenever no `catch_unwind` callers are
