@@ -335,6 +335,7 @@ struct Example {
     kind: ExampleKind,
     platforms: BTreeSet<String>,
     targets: BTreeSet<String>,
+    compile_only: bool,
 }
 
 fn discover_examples(root: &Path) -> Result<Vec<Example>> {
@@ -367,6 +368,7 @@ fn discover_examples(root: &Path) -> Result<Vec<Example>> {
             kind,
             platforms: banner.platforms,
             targets: banner.targets,
+            compile_only: banner.compile_only,
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -377,6 +379,12 @@ fn discover_examples(root: &Path) -> Result<Vec<Example>> {
 struct Banner {
     platforms: BTreeSet<String>,
     targets: BTreeSet<String>,
+    /// When true, the harness compiles the example but doesn't run it.
+    /// Useful for programs that bind ports, depend on external services,
+    /// or otherwise can't be driven to a clean exit under the default
+    /// single-program timeout. Catches API/TS drift without the
+    /// integration-test overhead.
+    compile_only: bool,
 }
 
 fn read_banner(path: &Path) -> Result<Banner> {
@@ -402,6 +410,11 @@ fn read_banner(path: &Path) -> Result<Banner> {
                 if !t.is_empty() {
                     b.targets.insert(t.to_string());
                 }
+            }
+        } else if let Some(rest) = body.strip_prefix("run:") {
+            let v = rest.trim();
+            if v.eq_ignore_ascii_case("false") || v == "0" || v.eq_ignore_ascii_case("no") {
+                b.compile_only = true;
             }
         }
     }
@@ -441,6 +454,20 @@ fn run_one(
                 duration_ms: 0,
             };
         }
+    }
+
+    // `// run: false` — compile-only examples (servers that bind ports,
+    // programs that need external services, etc.) just verify the TS
+    // compiles and links cleanly. Drift protection for the API shape
+    // without the integration-test overhead.
+    if ex.compile_only {
+        return ExampleReport {
+            file: rel.to_string(),
+            kind: ex.kind,
+            status: Status::Pass,
+            detail: "compile-only (`run: false` banner)".to_string(),
+            duration_ms: 0,
+        };
     }
 
     let expected_stdout = load_expected_stdout(examples_dir, rel);
