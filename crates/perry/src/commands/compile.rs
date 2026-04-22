@@ -366,6 +366,18 @@ impl Djb2Hasher {
 /// is meaningful (topological init order, FFI wrapper order), and mix
 /// in the module's source hash and the perry version.
 ///
+/// We also mix in three environment variables that `perry-codegen` reads
+/// at compile time but that aren't part of `CompileOptions`:
+/// `PERRY_DEBUG_INIT`, `PERRY_DEBUG_SYMBOLS`, `PERRY_LLVM_CLANG`. See the
+/// env-var block at the bottom of this function for the rationale.
+///
+/// NOT captured in the key: the host CPU. `compile_ll_to_object` passes
+/// `-mcpu=native`/`-march=native` to clang, so the emitted `.o` bakes in
+/// whatever instruction set the build machine supports. The cache is
+/// consequently **machine-local** — `.perry-cache/` is in `.gitignore`
+/// for this reason. Sharing across machines with different CPUs (rsync,
+/// NFS, Docker bind-mount) can produce SIGILL at runtime.
+///
 /// Cross-platform non-determinism (Mach-O LC_UUID, PE TimeDateStamp,
 /// codesigning) affects the *linked binary*, not the object file — so
 /// a per-module `.o` cache can reuse bytes across runs as long as LLVM
@@ -585,6 +597,34 @@ fn compute_object_cache_key(
     } else {
         h.field("i18n", "none");
     }
+
+    // Environment variables read by `perry-codegen` that influence the
+    // emitted .o bytes. Not part of `CompileOptions`, but just as real an
+    // input to `compile_module` / `compile_ll_to_object`:
+    //   - PERRY_DEBUG_INIT=1 bakes a `puts("INIT: <prefix>")` call into
+    //     every module's `__init` (codegen.rs).
+    //   - PERRY_DEBUG_SYMBOLS=1 adds `-g` to clang → embeds DWARF sections
+    //     into the object (linker.rs).
+    //   - PERRY_LLVM_CLANG selects which clang binary compiles .ll → .o;
+    //     different clang versions/builds emit different bytes (linker.rs).
+    // Hashing the values (not just presence) means a persistent override
+    // like PERRY_LLVM_CLANG=/opt/homebrew/opt/llvm/bin/clang in a shell rc
+    // still gets cache reuse across runs, while flipping a debug flag on
+    // or off cleanly invalidates.
+    h.field(
+        "env_debug_init",
+        std::env::var("PERRY_DEBUG_INIT").as_deref().unwrap_or(""),
+    );
+    h.field(
+        "env_debug_symbols",
+        std::env::var("PERRY_DEBUG_SYMBOLS")
+            .as_deref()
+            .unwrap_or(""),
+    );
+    h.field(
+        "env_llvm_clang",
+        std::env::var("PERRY_LLVM_CLANG").as_deref().unwrap_or(""),
+    );
 
     h.finish()
 }
@@ -8219,6 +8259,47 @@ mod object_cache_tests {
             compute_object_cache_key(&a, 1, "0.5.156"),
             compute_object_cache_key(&b, 1, "0.5.156")
         );
+    }
+
+    #[test]
+    fn key_changes_with_codegen_env_vars() {
+        // Flipping an env var that perry-codegen reads (PERRY_DEBUG_INIT,
+        // PERRY_DEBUG_SYMBOLS, PERRY_LLVM_CLANG) must invalidate the key
+        // so we don't serve a cached .o that was built with different
+        // debug sections / a different clang binary.
+        //
+        // Uses unique var names (suffixed with a test-local marker) would
+        // be cleaner, but we're checking behavior against the *actual*
+        // names the codegen reads — toggling them temporarily with unsafe
+        // env::set_var is the only way. Test is #[serial]-safe only in
+        // spirit; cargo's single-threaded test runner for this binary
+        // keeps it from racing with other tests that happen to read the
+        // same vars (none today).
+        let opts = empty_opts();
+        let var = "PERRY_DEBUG_INIT";
+        // Sample state without the var, with the var, and with a different
+        // value — all three keys must be distinct.
+        let prev = std::env::var_os(var);
+        // SAFETY: Rust 1.80+ flags env::set_var/remove_var as unsafe
+        // because they're racy with other threads reading env. cargo's
+        // in-process test runner can parallelize tests; this test is
+        // still correct because `compute_object_cache_key` reads the
+        // env at call time and we don't span a .await / yield. The
+        // remaining race is another *test* reading PERRY_DEBUG_INIT
+        // mid-flight, which none do.
+        unsafe { std::env::remove_var(var) };
+        let k_unset = compute_object_cache_key(&opts, 1, "0.5.156");
+        unsafe { std::env::set_var(var, "1") };
+        let k_set = compute_object_cache_key(&opts, 1, "0.5.156");
+        unsafe { std::env::set_var(var, "2") };
+        let k_two = compute_object_cache_key(&opts, 1, "0.5.156");
+        // Restore.
+        match prev {
+            Some(v) => unsafe { std::env::set_var(var, v) },
+            None => unsafe { std::env::remove_var(var) },
+        }
+        assert_ne!(k_unset, k_set, "setting {} must change key", var);
+        assert_ne!(k_set, k_two, "changing {} value must change key", var);
     }
 
     #[test]

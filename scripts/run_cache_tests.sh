@@ -73,10 +73,11 @@ grep -E "• codegen cache: 0/[0-9]+ hit" "$WORK/cold.log" >/dev/null \
 run_and_capture warm
 WARM_OUT="$(cat "$WORK/warm.out")"
 [ "$WARM_OUT" = "$BASELINE_OUT" ] || { echo "FAIL: warm output differs from baseline" >&2; exit 1; }
-# Expect full hits: "N/N hit (0 miss)"
-# (Note: N == M because hits == total when misses == 0. The `codegen cache:`
-# label format matches V2.1's `parse cache:` format — see commands/dev.rs.)
-if ! grep -E "• codegen cache: ([0-9]+)/\1 hit \(0 miss\)" "$WORK/warm.log" >/dev/null; then
+# Expect zero misses: "N/N hit (0 miss)". "All hits" == miss count is 0 —
+# use plain `grep -E` without a backreference so the test stays portable to
+# BSD grep on macOS (GNU grep supports backrefs in -E as an extension, BSD
+# grep does not).
+if ! grep -E "• codegen cache: [0-9]+/[0-9]+ hit \(0 miss\)" "$WORK/warm.log" >/dev/null; then
     echo "FAIL: warm build should be all hits" >&2
     cat "$WORK/warm.log" | grep cache >&2
     exit 1
@@ -107,7 +108,7 @@ rm -f registry.ts.orig
 run_and_capture rewarm
 REWARM_OUT="$(cat "$WORK/rewarm.out")"
 [ "$REWARM_OUT" = "$BASELINE_OUT" ] || { echo "FAIL: post-restore output differs from baseline" >&2; exit 1; }
-if ! grep -E "• codegen cache: ([0-9]+)/\1 hit \(0 miss\)" "$WORK/rewarm.log" >/dev/null; then
+if ! grep -E "• codegen cache: [0-9]+/[0-9]+ hit \(0 miss\)" "$WORK/rewarm.log" >/dev/null; then
     echo "FAIL: after restoring source, rebuild should be all hits" >&2
     cat "$WORK/rewarm.log" | grep cache >&2
     exit 1
