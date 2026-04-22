@@ -542,12 +542,24 @@ jobs:
         run: |
           Invoke-WebRequest "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
 
-      - name: Sync PerryTS/winget-pkgs fork with upstream
+      - name: Sync WINGET_PAT-user's winget-pkgs fork with upstream
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.WINGET_PAT }}
+        # wingetcreate --submit uses the AUTHENTICATED USER'S fork of
+        # microsoft/winget-pkgs, not the org's (PerryTS/winget-pkgs was a
+        # red herring left over from a misread of how wingetcreate works).
+        # Query the token's current user, resolve `<user>/winget-pkgs`,
+        # then merge-upstream. microsoft/winget-pkgs gets thousands of
+        # commits per day — any fork untouched for a week is already behind
+        # enough that wingetcreate's internal SyncFork call will throw the
+        # opaque "forked repository could not be synced" error we saw on
+        # the v0.5.158 first-real-release run.
         run: |
-          gh repo sync PerryTS/winget-pkgs --source microsoft/winget-pkgs --force
+          $user = (gh api /user --jq '.login').Trim()
+          Write-Host "Authenticated user: $user"
+          Write-Host "Syncing $user/winget-pkgs from microsoft/winget-pkgs"
+          gh repo sync "$user/winget-pkgs" --source microsoft/winget-pkgs --force
 
       - name: Update winget manifest
         shell: pwsh
