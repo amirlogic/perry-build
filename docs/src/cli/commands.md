@@ -1,6 +1,6 @@
 # CLI Commands
 
-Perry provides 10 commands for compiling, checking, running, publishing, and managing your projects.
+Perry provides 11 commands for compiling, checking, running, publishing, and managing your projects.
 
 See also: [perry.toml Reference](perry-toml.md) for project configuration.
 
@@ -92,6 +92,48 @@ perry run ios --remote
 # Run web target
 perry run web
 ```
+
+## dev
+
+Watch your TypeScript source tree and auto-recompile + relaunch on every save.
+
+```bash
+perry dev src/main.ts                        # watch + rebuild + relaunch on save
+perry dev src/server.ts -- --port 3000       # forward args to the child
+perry dev src/app.ts --watch shared/         # watch an extra directory
+perry dev src/app.ts -o build/dev-app        # override output path
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output <PATH>` | Output binary path (default: `.perry-dev/<entry-stem>`) |
+| `--watch <DIR>` | Extra directories to watch (comma-separated or repeated) |
+| `--` | Separator — everything after is forwarded to the compiled binary |
+
+**How it works:**
+
+1. Resolves the entry, computes the **project root** (walks up until it finds a `package.json` or `perry.toml`; falls back to the entry's parent directory).
+2. Does an initial `perry compile`, then spawns the resulting binary with stdio inherited.
+3. Watches the project root (plus any `--watch` dirs) recursively using the `notify` crate. A 300 ms **debounce** window collapses editor "save storms" into one rebuild.
+4. On each relevant change: kill the running child, recompile, relaunch. A failed build leaves the old child dead and waits for the next change; no crash loop.
+
+**What counts as a "relevant" change:**
+- **Trigger extensions:** `.ts`, `.tsx`, `.mts`, `.cts`, `.json`, `.toml`
+- **Ignored directories (not watched, never retrigger):** `node_modules`, `target`, `.git`, `dist`, `build`, `.perry-dev`, `.perry-cache`
+
+**Benchmarks** (trivial single-file program, macOS):
+
+| Phase | Time |
+|---|---|
+| Initial build (cold — runtime + stdlib rebuilt by auto-optimize) | ~15 s |
+| Post-edit rebuild (hot libs cached on disk) | **~330 ms** |
+
+The speedup on hot rebuilds comes from Perry's existing auto-optimize library cache. Multi-module projects will still recompile every changed module on each save — see the V2 note below for planned incremental work.
+
+**Not yet in scope (V2+):**
+- In-memory AST cache (reuse SWC parses across rebuilds).
+- Per-module `.o` cache on disk (only re-codegen the changed module).
+- State preservation across rebuilds / HMR — "fast restart" is the honest target.
 
 ## check
 
