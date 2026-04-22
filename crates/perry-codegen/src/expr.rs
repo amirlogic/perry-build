@@ -1922,21 +1922,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
             let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
-            // Constrain to the observed macOS ARM64 mimalloc heap window.
-            // Real allocations land in the 3-5 TB range on Darwin due to
-            // ASLR + mmap's high-address allocation strategy; bogus
-            // POINTER_TAG NaN-boxes (e.g. a `BufferHeader { length: 0,
-            // capacity: 255 }` read as u64 produces handle
-            // `0x00FF_0000_0000` ≈ 1 TB) reliably fall below this window.
-            // The prior `> 0x1_0000_0000` (4 GB) floor let 1 TB through;
-            // `> 0x200_0000_0000` (2 TB) is conservative enough to reject
-            // the pathological cases we've captured while still clearing
-            // every real mimalloc allocation observed in bench profiling.
-            //   upper < 0x8000_0000_0000 (47-bit userspace cap; above
-            //                             this is kernel / unmapped)
-            let above_floor = blk.icmp_ugt(I64, &recv_handle, "2199023255552"); // > 0x200_0000_0000 (2 TB)
-            let below_ceil = blk.icmp_ult(I64, &recv_handle, "140737488355328"); // < 0x8000_0000_0000
-            let handle_ok = blk.and(I1, &above_floor, &below_ceil);
+            // Tag-based guard: real heap references carry NaN-box tag
+            // POINTER_TAG (0x7FFD) or STRING_TAG (0x7FFF) in the top
+            // 16 bits. `AND 0xFFFD` collapses both to 0x7FFD; every
+            // other NaN-box / plain double / corrupt bit-pattern
+            // (e.g. a `BufferHeader { length: 0, capacity: 255 }`
+            // read as u64 → 0x00FF_0000_0000) fails the compare and
+            // routes through the slow runtime path.
+            //
+            // Previously a Darwin mimalloc heap-window check
+            // (`> 2 TB && < 128 TB`); aarch64-linux-android Scudo
+            // allocations live below 2 TB, so every real array/string
+            // was forced through `js_value_length_f64` (issue #128
+            // follow-up — correctness-safe, but ~10x slower on the
+            // `.length` hot path). Tag check is platform-independent.
+            let recv_tag = blk.lshr(I64, &recv_bits, "48");
+            let recv_tag_masked = blk.and(I64, &recv_tag, "65533"); // 0xFFFD
+            let handle_ok = blk.icmp_eq(I64, &recv_tag_masked, "32765"); // 0x7FFD
 
             let check_gc_idx = ctx.new_block("plen.check_gc");
             let fast_idx = ctx.new_block("plen.fast");
@@ -2443,24 +2445,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_bits = blk.bitcast_double_to_i64(&key_box);
             let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
 
-            // Issue #70/#73: guard against non-pointer receivers before the
-            // PIC deref. `globalThis` lowers to `double_literal(0.0)` and
-            // flows through `const g: any = globalThis; g.foo` as a plain
-            // 0.0 — masking gives handle=0 and the unguarded `load obj+16`
-            // below segfaulted. Any NaN-box that isn't POINTER_TAG/STRING_TAG
-            // lands in the same window. Issue #73 follow-up: the old
-            // `> 0x100000` (1 MB) bar let corrupted NaN-boxes with handles
-            // like `0x00FF_0000_0000` (1 TB, unmapped) through, segfaulting
-            // the subsequent `ldurb obj_type, [handle-8]` added in v0.5.82.
-            // Tighten to the observed mimalloc heap window on Darwin:
-            //   above 2 TB (empirical floor — real allocations consistently
-            //               land in 3-5 TB per crash-dump profiling)
-            //   below 128 TB (47-bit userspace cap)
-            // Real heap pointers always land in this window; two LLVM
-            // `icmp` that the branch predictor handles on the hot path.
-            let above_floor = ctx.block().icmp_ugt(I64, &obj_handle, "2199023255552"); // > 0x200_0000_0000 (2 TB)
-            let below_ceil = ctx.block().icmp_ult(I64, &obj_handle, "140737488355328"); // < 0x8000_0000_0000
-            let is_valid = ctx.block().and(I1, &above_floor, &below_ceil);
+            // Issue #70/#73/#128: guard against non-pointer receivers
+            // before the PIC deref. Tag-based check on the unmasked
+            // NaN-box: real heap references have high-16-bits POINTER_TAG
+            // (0x7FFD) or STRING_TAG (0x7FFF). `AND 0xFFFD` collapses both
+            // to 0x7FFD; everything else (undefined/null/bool=0x7FFC,
+            // int32=0x7FFE, bigint=0x7FFA, plain f64 like 0.0 globalThis
+            // or 3.14, corrupt bit-patterns like 0x00FF_0000_0000 read as
+            // a BufferHeader) falls through to the invalid branch and
+            // returns undefined safely.
+            //
+            // Previously used a Darwin mimalloc heap-window check
+            // (`> 2 TB && < 128 TB`). On aarch64-linux-android (issue
+            // #128) Bionic Scudo allocations live far below 2 TB, so
+            // every real object pointer failed the guard and the IC
+            // returned undefined — `obj.x` read as NaN everywhere,
+            // silently corrupting FFI args and pure-TS field compares.
+            // Tag check is platform-independent: same two LLVM ops
+            // (`lshr` + `and`) + one `icmp`, branch-predicted taken.
+            let obj_tag = ctx.block().lshr(I64, &obj_bits, "48");
+            let obj_tag_masked = ctx.block().and(I64, &obj_tag, "65533"); // 0xFFFD
+            let is_valid = ctx.block().icmp_eq(I64, &obj_tag_masked, "32765"); // 0x7FFD
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
@@ -5273,6 +5278,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let exp_v = blk.call(DOUBLE, "llvm.exp.f64", &[(DOUBLE, &v)]);
             Ok(blk.fsub(&exp_v, "1.0"))
+        }
+        Expr::MathExp(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "llvm.exp.f64", &[(DOUBLE, &v)]))
         }
         Expr::DateSetUtcFullYear { date, value } => {
             let d = lower_expr(ctx, date)?;
