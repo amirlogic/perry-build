@@ -12,12 +12,72 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: wait for Tests + Simulator Tests to pass on this commit before we
+  # publish anything downstream (Homebrew bottle, apt .deb, npm tarballs).
+  # Both workflows are triggered by the same `push: tags: ['v*']` event that
+  # the /release skill does, so they run in parallel with this job. We poll
+  # `gh run list --commit <sha>` until each reports a conclusion. Fails fast
+  # if either workflow failed — npm publish is not reversible.
+  #
+  # Skipped on workflow_dispatch so the "first-run / bypass" lever still works.
+  # ---------------------------------------------------------------------------
+  await-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for Tests + Simulator Tests (iOS) to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch — bypassing test gate (manual publish)."
+            exit 0
+          fi
+          echo "Gating release on commit $SHA"
+          for wf in "Tests" "Simulator Tests (iOS)"; do
+            echo "::group::Waiting for workflow \"$wf\""
+            deadline=$(( SECONDS + 45 * 60 ))
+            while :; do
+              run_json=$(gh run list --workflow "$wf" --commit "$SHA" -L 1 \
+                --json status,conclusion,databaseId,url 2>/dev/null || echo '[]')
+              status=$(echo "$run_json" | jq -r '.[0].status // empty')
+              conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // empty')
+              url=$(echo "$run_json" | jq -r '.[0].url // empty')
+              if [ -z "$status" ]; then
+                echo "  no run found yet for \"$wf\" on $SHA — waiting"
+              elif [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "  OK  \"$wf\" passed: $url"
+                  break
+                else
+                  echo "  FAIL  \"$wf\" $conclusion: $url"
+                  exit 1
+                fi
+              else
+                echo "  \"$wf\": $status ($url) — waiting"
+              fi
+              if [ $SECONDS -ge $deadline ]; then
+                echo "  timed out waiting for \"$wf\""
+                exit 1
+              fi
+              sleep 30
+            done
+            echo "::endgroup::"
+          done
+          echo "All gate workflows passed — proceeding to build/publish."
+
   # ---------------------------------------------------------------------------
   # Build release binaries for all platforms
   # ---------------------------------------------------------------------------
   build:
+    needs: await-tests
     strategy:
       matrix:
         include:
