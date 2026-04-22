@@ -1654,15 +1654,16 @@ fn compile_closure(
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
-    let (params, body, captures, captures_this, enclosing_class) = match closure_expr {
+    let (params, body, captures, captures_this, enclosing_class, is_async) = match closure_expr {
         perry_hir::Expr::Closure {
             params,
             body,
             captures,
             captures_this,
             enclosing_class,
+            is_async,
             ..
-        } => (params, body, captures, *captures_this, enclosing_class.clone()),
+        } => (params, body, captures, *captures_this, enclosing_class.clone(), *is_async),
         _ => return Err(anyhow!("compile_closure: expected Expr::Closure")),
     };
 
@@ -1811,11 +1812,14 @@ fn compile_closure(
         closure_captures,
         current_closure_ptr: Some("%this_closure".to_string()),
         enums,
-        // Closures don't surface their is_async on the body in the
-        // same way functions do. The closure-creation site emits
-        // them as plain double-returning functions; we set false
-        // here to skip the wrap-in-promise behaviour.
-        is_async_fn: false,
+        // Async closures (arrow functions declared `async () => ...`)
+        // must wrap their return values in `js_promise_resolved` so the
+        // call site sees a NaN-boxed Promise pointer — same contract as
+        // regular async functions. Consumers like the Fastify server
+        // runtime inspect the returned value with `js_is_promise` and
+        // break if a raw object pointer (or any non-Promise) is handed
+        // back. Issue #125.
+        is_async_fn: is_async,
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
@@ -1862,7 +1866,14 @@ fn compile_closure(
         .with_context(|| format!("lowering closure body func_id={}", func_id))?;
 
     if !ctx.block().is_terminated() {
-        ctx.block().ret(DOUBLE, "0.0");
+        if is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let ic_end = ctx.ic_site_counter;
