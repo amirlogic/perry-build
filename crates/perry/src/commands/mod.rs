@@ -5,6 +5,7 @@ pub mod audit;
 pub mod check;
 pub mod compile;
 pub mod deps;
+pub mod dev;
 pub mod doctor;
 pub mod explain;
 pub mod fix_applier;
