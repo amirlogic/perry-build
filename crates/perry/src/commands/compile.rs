@@ -6440,43 +6440,49 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         let _ = fs::remove_file(&exe_path);
 
         let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
-        // Check perry.toml, then package.json for a custom bundleId, fall back to com.perry.{name}
-        // Search relative to the source file, walking up directories
-        let bundle_id = (|| -> Option<String> {
-            let mut dir = args.input.canonicalize().ok()?;
-            for _ in 0..5 {
-                dir = dir.parent()?.to_path_buf();
-                // Check perry.toml first: [ios].bundle_id, then top-level bundle_id
-                let toml_path = dir.join("perry.toml");
-                if toml_path.exists() {
-                    if let Ok(data) = fs::read_to_string(&toml_path) {
-                        if let Ok(doc) = data.parse::<toml::Table>() {
-                            let toml_bid = doc.get("ios")
-                                .and_then(|i| i.get("bundle_id"))
-                                .or_else(|| doc.get("app").and_then(|a| a.get("bundle_id")))
-                                .or_else(|| doc.get("project").and_then(|p| p.get("bundle_id")))
-                                .or_else(|| doc.get("bundle_id"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            if toml_bid.is_some() {
-                                return toml_bid;
+        // Precedence: --app-bundle-id CLI flag > perry.toml [ios].bundle_id / [app]
+        // / [project] / top-level > package.json "bundleId" > com.perry.{name}.
+        // CLI wins so callers (doc-tests harness, CI, scripts) can override the
+        // embedded ID without editing manifests; without this the app installs
+        // under its fallback CFBundleIdentifier and a later `simctl launch
+        // <custom-id>` fails with FBSOpenApplicationServiceErrorDomain code=4.
+        let bundle_id = args.app_bundle_id.clone().or_else(|| {
+            (|| -> Option<String> {
+                let mut dir = args.input.canonicalize().ok()?;
+                for _ in 0..5 {
+                    dir = dir.parent()?.to_path_buf();
+                    // Check perry.toml first: [ios].bundle_id, then top-level bundle_id
+                    let toml_path = dir.join("perry.toml");
+                    if toml_path.exists() {
+                        if let Ok(data) = fs::read_to_string(&toml_path) {
+                            if let Ok(doc) = data.parse::<toml::Table>() {
+                                let toml_bid = doc.get("ios")
+                                    .and_then(|i| i.get("bundle_id"))
+                                    .or_else(|| doc.get("app").and_then(|a| a.get("bundle_id")))
+                                    .or_else(|| doc.get("project").and_then(|p| p.get("bundle_id")))
+                                    .or_else(|| doc.get("bundle_id"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                if toml_bid.is_some() {
+                                    return toml_bid;
+                                }
                             }
                         }
                     }
+                    // Then check package.json
+                    let pkg = dir.join("package.json");
+                    if pkg.exists() {
+                        let data = fs::read_to_string(pkg).ok()?;
+                        let idx = data.find("\"bundleId\"")?;
+                        let colon = data[idx..].find(':')?;
+                        let q1 = data[idx + colon..].find('"')? + idx + colon + 1;
+                        let q2 = data[q1..].find('"')? + q1;
+                        return Some(data[q1..q2].to_string());
+                    }
                 }
-                // Then check package.json
-                let pkg = dir.join("package.json");
-                if pkg.exists() {
-                    let data = fs::read_to_string(pkg).ok()?;
-                    let idx = data.find("\"bundleId\"")?;
-                    let colon = data[idx..].find(':')?;
-                    let q1 = data[idx + colon..].find('"')? + idx + colon + 1;
-                    let q2 = data[q1..].find('"')? + q1;
-                    return Some(data[q1..q2].to_string());
-                }
-            }
-            None
-        })().unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+                None
+            })()
+        }).unwrap_or_else(|| format!("com.perry.{}", exe_stem));
         result_bundle_id = Some(bundle_id.clone());
         result_app_dir = Some(app_dir.clone());
 
