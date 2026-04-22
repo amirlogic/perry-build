@@ -567,6 +567,21 @@ pub unsafe extern "C" fn js_ws_close(handle: i64) {
     unsafe { perry_native_ws_close(handle as f64); }
 }
 
+/// Server-side bridges: `sendToClient(handle, msg)` / `closeClient(handle)`.
+/// `ws.on('connection', cb)` delivers the client handle as a plain f64
+/// number (see `PendingWsEvent::Connection` dispatch — `client_ws_id as f64`,
+/// not NaN-boxed), so the codegen passes f64 here rather than the i64 form
+/// `js_ws_send`/`js_ws_close` use for receiver-style `ws.send(...)` calls.
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_send_to_client(handle_f64: f64, message_ptr: *const StringHeader) {
+    js_ws_send(handle_f64 as i64, message_ptr);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_close_client(handle_f64: f64) {
+    js_ws_close(handle_f64 as i64);
+}
+
 /// Check if WebSocket is open
 /// ws.readyState === WebSocket.OPEN
 #[cfg(not(target_os = "ios"))]

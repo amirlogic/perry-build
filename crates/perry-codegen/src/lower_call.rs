@@ -4516,6 +4516,19 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "ws", has_receiver: true, method: "close",
         class_filter: None,
         runtime: "js_ws_close", args: &[], ret: NR_VOID },
+    // Server-side helpers — the user receives a client handle as a plain
+    // f64 number from `wss.on('connection', (handle) => …)`, then passes
+    // it back to these free functions to write/close that specific peer.
+    // Without these entries the receiver-less call falls through to the
+    // silent stub a few hundred lines down, evaluates the args for side
+    // effects, and returns TAG_UNDEFINED — so frames silently never ship
+    // (issue #136).
+    NativeModSig { module: "ws", has_receiver: false, method: "sendToClient",
+        class_filter: None,
+        runtime: "js_ws_send_to_client", args: &[NA_F64, NA_STR], ret: NR_VOID },
+    NativeModSig { module: "ws", has_receiver: false, method: "closeClient",
+        class_filter: None,
+        runtime: "js_ws_close_client", args: &[NA_F64], ret: NR_VOID },
 
     // ========== Raw TCP sockets (net) + TLS ==========
     // Factory: `net.createConnection(host, port)` returns a Socket handle.
