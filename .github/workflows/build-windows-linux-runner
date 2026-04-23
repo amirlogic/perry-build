@@ -27,6 +27,9 @@ jobs:
       - name: Build for Windows
         run: cargo build --release -p perry-jsruntime --target x86_64-pc-windows-gnu
 
+      - name: List output (debug)
+        run: ls -R target/x86_64-pc-windows-gnu/release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
