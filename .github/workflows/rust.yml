@@ -1,3 +1,4 @@
+
 name: Rust
 
 on:
@@ -15,11 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-     - name: Install Rust
-       uses: dtolnay/rust-toolchain@stable
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
 
-     - name: Cache cargo
-       uses: Swatinem/rust-cache@v2
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
 
     - name: Build
       run: cargo build --release -p perry-jsruntime
@@ -27,5 +28,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-              name: libperry_jsruntime
-              path: target/release/libperry_jsruntime.a
+        name: libperry_jsruntime
+        path: target/release/libperry_jsruntime.a
