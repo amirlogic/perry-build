@@ -279,7 +279,9 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Extract return type from function's type annotation (with context).
     // Body-based inference for unannotated functions is filled in after body
     // lowering below, once parameters and body locals are visible to
-    // `infer_type_from_expr`.
+    // `infer_type_from_expr`. Track whether the user wrote an explicit
+    // annotation so we don't "override" an explicit `: any` with inference.
+    let has_explicit_return_annotation = fn_decl.function.return_type.is_some();
     let mut return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
@@ -368,7 +370,10 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // type inference for unannotated user functions and — combined with Phase 1
     // literal-shape inference — makes `function make() { return {x:0, y:0} }`
     // flow Point-shaped values to callers.
-    if matches!(return_type, Type::Any) && !fn_decl.function.is_generator {
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !fn_decl.function.is_generator
+    {
         if let Some(ref block) = fn_decl.function.body {
             if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
                 return_type = if fn_decl.function.is_async {
@@ -959,6 +964,22 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
     // Restore previous current_class
     ctx.current_class = old_class;
 
+    // Phase 4.1: register each method's and getter's return type so
+    // call-site inference (`infer_call_return_type`'s Member arm) can
+    // resolve `obj.method()` when obj's type is Type::Named(name).
+    // Feeds off Phase 4's body-based inference — any method without an
+    // explicit annotation whose body returned a known type lands here too.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), prop_name.clone(), g.return_type.clone());
+        }
+    }
+
     Ok(Class {
         id: class_id,
         name,
@@ -1167,6 +1188,19 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
 
     ctx.exit_type_param_scope();
     ctx.current_class = old_class;
+
+    // Phase 4.1: register method + getter return types — see the parallel
+    // site in lower_class_decl.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), prop_name.clone(), g.return_type.clone());
+        }
+    }
 
     Ok(Class {
         id: class_id,
@@ -1582,8 +1616,11 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
         });
     }
 
-    // Extract return type (with context)
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type (with context). Phase 4: when the method has no
+    // explicit annotation, fall back to body-based inference after body
+    // lowering so parameters and locals are visible to `infer_type_from_expr`.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1593,6 +1630,30 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
     } else {
         Vec::new()
     };
+
+    // Phase 4 (expansion): body-based return-type inference for unannotated
+    // methods. Same pattern as `lower_fn_decl`: skip when annotation is
+    // present or when the method is a generator; wrap inferred type in
+    // Promise<T> for async methods. Feeds the class's `Function.return_type`
+    // which is then consumed by call-site inference at receiver.method()
+    // sites (currently limited — bare-method call-site inference isn't
+    // wired through `infer_call_return_type` yet; this commit only
+    // populates the field so class methods stop showing Type::Any when
+    // callers inspect them via receiver_class_name + class.methods lookup).
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !method.function.is_generator
+    {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = if method.function.is_async {
+                    Type::Promise(Box::new(inferred))
+                } else {
+                    inferred
+                };
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 
@@ -1639,8 +1700,9 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
 
     // Getters have no parameters
 
-    // Extract return type
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type. Phase 4: body-based inference when no annotation.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1650,6 +1712,18 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
     } else {
         Vec::new()
     };
+
+    // Phase 4: getters can't be async/generator by JS syntax, so just the
+    // plain body-walk + unify path. Feeds `class.getters[i].1.return_type`
+    // which `receiver_class_name`-style codegen consults to pick Return
+    // types through `obj.prop` chains.
+    if !has_explicit_return_annotation && matches!(return_type, Type::Any) {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = inferred;
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 

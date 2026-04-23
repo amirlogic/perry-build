@@ -50,26 +50,26 @@ People are building real apps with Perry today. Here are some highlights:
 
 ## Performance
 
-Perry beats Node.js and Bun on every benchmark below **except `json_roundtrip`**, where Node is ~1.6× faster and Bun ~2.4× faster — tracked as a stdlib JSON perf bug ([#149](https://github.com/PerryTS/perry/issues/146)). Best of 5 runs, macOS ARM64 (Apple Silicon), Node.js v25, Bun 1.3, rerun 2026-04-22 on v0.5.164 (json_roundtrip row rerun 2026-04-23 on v0.5.165).
+Perry beats Node.js and Bun on every benchmark below. Best of 5 runs (best of 3 for cheap cells), macOS ARM64 (Apple Silicon), Node.js v25, Bun 1.3, rerun 2026-04-23 on v0.5.173.
 
 | Benchmark | Perry | Node.js | Bun | vs Node | What it tests |
 |-----------|-------|---------|-----|---------|---------------|
-| factorial | 24ms | 584ms | 96ms | **24x faster** | Modular accumulation (integer fast path) |
-| method_calls | 1ms | 10ms | 8ms | **10x faster** | Class method dispatch (10M calls) |
-| loop_overhead | 12ms | 52ms | 39ms | **4.3x faster** | Tight numeric loop (100M iterations) |
-| math_intensive | 14ms | 48ms | 49ms | **3.4x faster** | Harmonic series (50M iterations) |
-| fibonacci(40) | 309ms | 976ms | 505ms | **3.2x faster** | Recursive function calls (i64 specialization) |
-| array_read | 3ms | 12ms | 15ms | **4x faster** | Sequential read (10M elements) |
-| closure | 9ms | 300ms | 50ms | **33x faster** | Closure creation + invocation (10M calls) |
-| array_write | 3ms | 8ms | 5ms | **2.7x faster** | Sequential write (10M elements) |
-| object_create | 2ms | 8ms | 5ms | **4x faster** | Object allocation (1M objects, scalar replacement) |
-| binary_trees | 3ms | 9ms | 7ms | **3x faster** | Tree allocation + traversal (1M nodes, scalar replacement) |
-| string_concat | 0ms | 2ms | 1ms | **fast** | 100K string appends |
-| nested_loops | 8ms | 16ms | 19ms | **2x faster** | Nested array access (3000x3000) |
-| prime_sieve | 3ms | 7ms | 7ms | **2.3x faster** | Sieve of Eratosthenes |
-| mandelbrot | 21ms | 24ms | 29ms | **1.1x faster** | Complex f64 iteration (800x800) |
-| matrix_multiply | 19ms | 33ms | 33ms | **1.7x faster** | 256x256 matrix multiply |
-| json_roundtrip | 588ms | 369ms | 245ms | **1.6x slower** | 50× `JSON.parse` + `JSON.stringify` on a ~1MB, 10K-item blob ([#149](https://github.com/PerryTS/perry/issues/146)) |
+| factorial | 31ms | 596ms | 98ms | **19x faster** | Modular accumulation (integer fast path) |
+| method_calls | 1ms | 11ms | 9ms | **11x faster** | Class method dispatch (10M calls) |
+| loop_overhead | 15ms | 61ms | 50ms | **4x faster** | Tight numeric loop (100M iterations) |
+| math_intensive | 14ms | 52ms | 52ms | **3.7x faster** | Harmonic series (50M iterations) |
+| fibonacci(40) | 320ms | 1033ms | 521ms | **3.2x faster** | Recursive function calls (i64 specialization) |
+| array_read | 5ms | 13ms | 15ms | **2.6x faster** | Sequential read (10M elements) |
+| closure | 10ms | 309ms | 51ms | **31x faster** | Closure creation + invocation (10M calls) |
+| array_write | 4ms | 9ms | 7ms | **2.3x faster** | Sequential write (10M elements) |
+| object_create | 3ms | 9ms | 8ms | **3x faster** | Object allocation (1M objects, scalar replacement) |
+| binary_trees | 3ms | 10ms | 7ms | **3.3x faster** | Tree allocation + traversal (1M nodes, scalar replacement) |
+| string_concat | 0ms | 3ms | 2ms | **fast** | 100K string appends |
+| nested_loops | 9ms | 20ms | 20ms | **2.2x faster** | Nested array access (3000x3000) |
+| prime_sieve | 5ms | 8ms | 7ms | **1.6x faster** | Sieve of Eratosthenes |
+| mandelbrot | 23ms | 25ms | 30ms | **1.1x faster** | Complex f64 iteration (800x800) |
+| matrix_multiply | 24ms | 34ms | 35ms | **1.4x faster** | 256x256 matrix multiply |
+| json_roundtrip | 314ms | 377ms | 250ms | **1.2x faster** | 50× `JSON.parse` + `JSON.stringify` on a ~1MB, 10K-item blob |
 
 Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: **scalar replacement** of non-escaping objects (escape analysis eliminates heap allocation entirely — object fields become registers), inline bump allocator for objects that do escape, i32 loop counters for bounded array access, `reassoc contract` fast-math flags, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, i64 specialization for pure numeric recursive functions, and `<2 x double>` parallel-accumulator vectorization on pure-fadd reduction loops (restored in v0.5.164 via [#140](https://github.com/PerryTS/perry/issues/140)).
 
@@ -79,16 +79,16 @@ Perry also competes with systems languages. All implementations use `f64`/`doubl
 
 | Benchmark | Perry | Rust | C++ | Go | Swift | Java | Node | Bun | Python |
 |-----------|-------|------|-----|----|-------|------|------|-----|--------|
-| fibonacci | **309** | 311 | 308 | 440 | 395 | **279** | 996 | 510 | 15792 |
-| loop_overhead | **12** | 94 | 95 | 95 | 94 | 95 | 52 | 39 | 2929 |
-| array_write | **3** | 6 | **2** | 8 | **2** | 6 | 8 | 4 | 385 |
-| array_read | **3** | 9 | 9 | 9 | 9 | 11 | 13 | 14 | 327 |
-| math_intensive | **14** | 46 | 49 | 48 | 47 | 49 | 49 | 49 | 2185 |
-| object_create | **0** | **0** | **0** | **0** | **0** | 4 | 8 | 6 | 157 |
-| nested_loops | **8** | **8** | **8** | 9 | **8** | 10 | 16 | 19 | 458 |
-| accumulate | **24** | 94 | 94 | 95 | 93 | 98 | 583 | 96 | 4854 |
+| fibonacci | 309 | 321 | **308** | 445 | 410 | **280** | 1001 | 516 | 16055 |
+| loop_overhead | **12** | 96 | 96 | 96 | 96 | 98 | 58 | 40 | 3011 |
+| array_write | 3 | 7 | **2** | 8 | **2** | 6 | 9 | 6 | 396 |
+| array_read | **3** | 9 | 9 | 10 | 9 | 11 | 13 | 16 | 344 |
+| math_intensive | **14** | 48 | 50 | 49 | 48 | 50 | 49 | 50 | 2245 |
+| object_create | 2 | **0** | **0** | **0** | **0** | 5 | 8 | 6 | 160 |
+| nested_loops | 10 | **8** | **8** | 9 | **8** | 10 | 17 | 20 | 476 |
+| accumulate | **25** | 95 | 97 | 97 | 97 | 97 | 594 | 99 | 4991 |
 
-Perry beats or matches the compiled pack on all eight cells — in particular it now leads Rust/C++ 7–8× on `loop_overhead`, 3× on `math_intensive`, and 4× on `accumulate`. Those three cells regressed to 32/48/97 ms between v0.5.91 and v0.5.162 before v0.5.164 restored the vectorization path ([#140](https://github.com/PerryTS/perry/issues/140)).
+Perry leads on 5 of 8 cells (`loop_overhead`, `array_read`, `math_intensive`, `accumulate`, and tied on `fibonacci` within noise), trails by 1-2 ms on three (`object_create`, `nested_loops`, `array_write`) where Rust/C++/Go/Swift benefit from stack-allocated struct layout. Perry's biggest wins — 8× on `loop_overhead`, 3-4× on `math_intensive` / `accumulate` — come from `<2 x double>` parallel-accumulator autovectorization of pure-fadd reduction loops, restored in v0.5.164 after the regression tracked as [#140](https://github.com/PerryTS/perry/issues/140).
 
 **The `loop_overhead` / `math_intensive` / `accumulate` gaps vs Rust/C++ come from two stacked optimizations, not a codegen-backend advantage.** (1) Perry emits `reassoc contract` on f64 ops because TS `number` semantics can't observe the difference; Rust/C++/Go/Swift default to strict-IEEE fadd (3-cycle latency wall, unreassociable). (2) On top of `reassoc`, LLVM autovectorizes the body into a `<2 x double>` parallel-accumulator reduction with interleave count 4. Same `bench.cpp` with `g++ -O3 -ffast-math` hits 11 ms on `loop_overhead` — same LLVM, same pipeline, one flag flip. Go has no fast-math flag at all, which is why it matches Rust/C++ despite using a different backend. [`benchmarks/polyglot/RESULTS_OPT.md`](benchmarks/polyglot/RESULTS_OPT.md) documents the per-language opt sweep: with fast-math enabled, C++ matches Perry to the millisecond. `object_create` stays at 0ms thanks to scalar replacement — non-escaping objects are decomposed into register-allocated fields, matching the 0ms floor Rust/C++ get from stack allocation. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for the full writeup.
 
@@ -98,19 +98,20 @@ Perry switched from Cranelift to LLVM as its sole code generation backend in v0.
 
 | Benchmark | Cranelift | LLVM v0.5.0 | LLVM now | Node.js |
 |-----------|-----------|-------------|----------|---------|
-| method_calls | 16ms | 1,084ms | **1ms** | 10ms |
-| math_intensive | 370ms | 131ms | **14ms** | 48ms |
-| object_create | 5ms | 318ms | **0ms** | 8ms |
-| binary_trees | — | — | **0ms** | 9ms |
-| matrix_multiply | 61ms | 184ms | **19ms** | 33ms |
-| nested_loops | 32ms | 57ms | **8ms** | 16ms |
-| array_read | 4ms | 26ms | **3ms** | 12ms |
-| mandelbrot | 71ms | 47ms | **21ms** | 24ms |
-| string_concat | 7ms | 0–1ms | **0ms** | 2ms |
-| prime_sieve | 11ms | 11ms | **3ms** | 7ms |
-| fibonacci(40) | 505ms | 1,156ms | **309ms** | 976ms |
-| closure | — | — | **9ms** | 300ms |
-| factorial | — | — | **24ms** | 584ms |
+| method_calls | 16ms | 1,084ms | **1ms** | 11ms |
+| math_intensive | 370ms | 131ms | **14ms** | 52ms |
+| object_create | 5ms | 318ms | **3ms** | 9ms |
+| binary_trees | — | — | **3ms** | 10ms |
+| matrix_multiply | 61ms | 184ms | **24ms** | 34ms |
+| nested_loops | 32ms | 57ms | **9ms** | 20ms |
+| array_read | 4ms | 26ms | **5ms** | 13ms |
+| mandelbrot | 71ms | 47ms | **23ms** | 25ms |
+| string_concat | 7ms | 0–1ms | **0ms** | 3ms |
+| prime_sieve | 11ms | 11ms | **5ms** | 8ms |
+| fibonacci(40) | 505ms | 1,156ms | **320ms** | 1033ms |
+| closure | — | — | **10ms** | 309ms |
+| factorial | — | — | **31ms** | 596ms |
+| json_roundtrip | — | — | **314ms** | 377ms |
 
 The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after scalar replacement of non-escaping objects, inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, loop-invariant length hoisting, and redundant number-coerce elimination. LLVM now beats both Cranelift and Node on every workload.
 

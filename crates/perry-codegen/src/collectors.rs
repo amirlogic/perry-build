@@ -3350,19 +3350,42 @@ fn expr_contains_local_get(e: &perry_hir::Expr, target_id: u32) -> bool {
 /// Conservative catch-all: walk the expression and mark any candidate
 /// local referenced via LocalGet as escaped. Used for Expr variants we
 /// haven't explicitly enumerated in check_escapes_in_expr.
+///
+/// **Safety note (issue #150):** `collect_ref_ids_in_expr` has a silent
+/// `_ => {}` fallthrough for unenumerated HIR variants. That means for
+/// variants like `ObjectGetOwnPropertyDescriptor(LocalGet(p), key)` — which
+/// is an identity-observing operation that should escape `p` — the collector
+/// returns an empty set, and `p` ends up scalar-replaced while an external
+/// runtime function (`js_object_get_own_property_descriptor`) tries to
+/// dereference its dummy alloca slot. Since we can't enumerate every HIR
+/// variant that might embed a LocalGet, we conservatively mark EVERY
+/// candidate as escaped whenever this catch-all fires. The cost is losing
+/// scalar replacement in functions that happen to contain an un-enumerated
+/// variant anywhere; the safety is not silently miscompiling identity-
+/// observing code. This mirrors the `check_object_literal_escapes_in_expr`
+/// catch-all at line ~4148 which already does exactly this for object
+/// literal candidates.
 fn mark_all_candidate_refs_in_expr(
     e: &perry_hir::Expr,
     candidates: &std::collections::HashMap<u32, String>,
     escaped: &mut HashSet<u32>,
 ) {
-    use perry_hir::Expr;
-    // Use the existing ref-id collector to find all local references
+    // First pass: walk what collect_ref_ids_in_expr knows about — these are
+    // the references we can prove exist.
     let mut refs: HashSet<u32> = HashSet::new();
     collect_ref_ids_in_expr(e, &mut refs);
     for id in refs {
         if candidates.contains_key(&id) {
             escaped.insert(id);
         }
+    }
+    // Second pass: conservative fallback. We're in the check_escapes_in_expr
+    // catch-all, meaning `e` is some HIR variant not explicitly enumerated
+    // there. The collector above may have silently skipped unknown
+    // sub-variants, so we must assume any candidate in scope could be
+    // referenced transitively. Mark them all escaped.
+    for id in candidates.keys() {
+        escaped.insert(*id);
     }
 }
 

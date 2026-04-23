@@ -176,6 +176,22 @@ pub struct LoweringContext {
     /// Used to resolve `new.target` to a placeholder object whose `.name`
     /// returns the class name. None outside any constructor.
     pub(crate) in_constructor_class: Option<String>,
+    /// Phase 3 anon-class registry for closed-shape object literals: shape key
+    /// (canonical field-name + type-tag joined) -> synthetic class name. Lets
+    /// identical-shape literals within the same module share one synthesized
+    /// class — shared class_id, shared keys_array global, shared direct-GEP
+    /// field layout. Dedup is per-module only; cross-module dedup would need
+    /// a stable hash and is deferred.
+    pub(crate) anon_shape_classes: HashMap<String, String>,
+    /// Counter for generating anon-class names (`__AnonShape_N`).
+    pub(crate) next_anon_shape_id: u32,
+    /// Phase 4.1: method return types registry keyed by (class_name,
+    /// method_name). Populated as methods are lowered so call-site inference
+    /// (`infer_call_return_type`'s Member arm) can resolve `obj.method()` to
+    /// the method's declared or inferred return type when `obj`'s type is
+    /// `Type::Named(class_name)`. Mirrors `func_return_types` but for the
+    /// method-dispatch path.
+    pub(crate) class_method_return_types: Vec<(String, String, Type)>,
 }
 
 impl LoweringContext {
@@ -243,6 +259,9 @@ impl LoweringContext {
             class_expr_aliases: HashMap::new(),
             in_constructor_class: None,
             mixin_funcs: HashMap::new(),
+            anon_shape_classes: HashMap::new(),
+            next_anon_shape_id: 0,
+            class_method_return_types: Vec::new(),
         }
     }
 
@@ -465,6 +484,141 @@ impl LoweringContext {
         self.classes.push((name, id));
     }
 
+    /// Phase 3: synthesize (or retrieve) an anon class for a closed-shape object
+    /// literal. `fields_with_types` is parallel to the literal's source-declared
+    /// properties — source order is preserved so the anon class's field layout
+    /// matches JS evaluation order. Returns the synthetic class name.
+    ///
+    /// The synthesized class has fields with `init: None`. Each literal's
+    /// values are stored via per-literal `PropertySet` statements emitted
+    /// after the allocation at the Object-arm call site (wrapped in an
+    /// `Expr::Sequence`). This preserves the per-literal values under
+    /// shape-deduplication — earlier versions put the init values on the
+    /// class itself, which meant dedup'd classes silently kept only the
+    /// FIRST literal's values (every subsequent `{name:"b",…}` saw the
+    /// original `{name:"a",…}` inits — broke `arr.map(x => x.name)` into
+    /// `[a, a, a, a]`).
+    pub(crate) fn synthesize_anon_shape_class(
+        &mut self,
+        fields_with_types: &[(String, Type, Expr)],
+    ) -> String {
+        // Canonical shape key: each field as `name:tag` joined by ',' in source
+        // order. Different declaration orders -> different classes (preserves
+        // JS eval order). Type tag is a coarse primitive fingerprint so two
+        // literals with identical names but Number vs String fields don't
+        // share a misleading class.
+        fn tag(ty: &Type) -> &'static str {
+            match ty {
+                Type::Number => "n",
+                Type::Int32 => "i",
+                Type::String => "s",
+                Type::Boolean => "b",
+                Type::BigInt => "B",
+                Type::Null => "N",
+                Type::Void => "v",
+                Type::Array(_) => "a",
+                Type::Object(_) => "o",
+                Type::Function(_) => "f",
+                Type::Named(_) => "c",
+                Type::Promise(_) => "p",
+                _ => "?",
+            }
+        }
+        let mut shape_key = String::new();
+        for (name, ty, _) in fields_with_types {
+            shape_key.push_str(name);
+            shape_key.push(':');
+            shape_key.push_str(tag(ty));
+            shape_key.push(',');
+        }
+
+        if let Some(existing) = self.anon_shape_classes.get(&shape_key) {
+            return existing.clone();
+        }
+
+        let anon_id = self.next_anon_shape_id;
+        self.next_anon_shape_id += 1;
+        let class_name = format!("__AnonShape_{}", anon_id);
+        let class_id = self.fresh_class();
+
+        // Fields have `init: None` — each literal's values are passed as
+        // positional constructor args, so the class stays shape-only (no
+        // per-literal state). See the method doc comment for why this
+        // matters under shape-deduplication.
+        let fields: Vec<ClassField> = fields_with_types
+            .iter()
+            .map(|(name, ty, _init_expr_unused)| ClassField {
+                name: name.clone(),
+                ty: ty.clone(),
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            })
+            .collect();
+
+        // Synthesize a constructor `(f1, f2, ...) => { this.f1 = f1; this.f2 = f2; ... }`.
+        // `Expr::New { args }` at call sites passes each literal's values
+        // in field-declaration order; the constructor body assigns them.
+        // PropertySet's direct-GEP path fires because `this` resolves to
+        // the anon class via the usual class_stack/this_stack dance in
+        // lower_call.rs::lower_new.
+        let mut ctor_params: Vec<Param> = Vec::with_capacity(fields_with_types.len());
+        let mut ctor_body: Vec<Stmt> = Vec::with_capacity(fields_with_types.len());
+        for (name, ty, _value) in fields_with_types {
+            let param_id = self.fresh_local();
+            ctor_params.push(Param {
+                id: param_id,
+                name: name.clone(),
+                ty: ty.clone(),
+                default: None,
+                is_rest: false,
+            });
+            ctor_body.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: name.clone(),
+                value: Box::new(Expr::LocalGet(param_id)),
+            }));
+        }
+        let constructor = Function {
+            id: self.fresh_func(),
+            name: "constructor".to_string(),
+            type_params: Vec::new(),
+            params: ctor_params,
+            return_type: Type::Void,
+            body: ctor_body,
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            captures: Vec::new(),
+            decorators: Vec::new(),
+        };
+
+        // Register in the name->id index so lookup_class finds it, and push to
+        // pending_classes so it flushes into module.classes after the enclosing
+        // statement finishes lowering (same pattern as anonymous class
+        // expressions — see `ast::Expr::Class` arm in lower_expr).
+        self.register_class(class_name.clone(), class_id);
+        self.pending_classes.push(Class {
+            id: class_id,
+            name: class_name.clone(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: None,
+            native_extends: None,
+            fields,
+            constructor: Some(constructor),
+            methods: Vec::new(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            is_exported: false,
+        });
+
+        self.anon_shape_classes.insert(shape_key, class_name.clone());
+        class_name
+    }
+
     pub(crate) fn lookup_func_name(&self, func_id: FuncId) -> Option<&str> {
         self.functions.iter().find(|(_, id)| *id == func_id).map(|(name, _)| name.as_str())
     }
@@ -674,6 +828,37 @@ impl LoweringContext {
         self.func_return_types.iter().rev()
             .find(|(n, _)| n == name)
             .map(|(_, ty)| ty)
+    }
+
+    /// Phase 4.1: register a method's return type so call-site inference can
+    /// resolve `obj.method()` when `obj: Type::Named(class_name)`. Called
+    /// from `lower_class_from_ast` right after each method's Function is
+    /// built, so both declared annotations and Phase 4-expansion body
+    /// inferences flow through. Extends-chain traversal happens at lookup
+    /// time via `lookup_class_method_return_type`.
+    pub(crate) fn register_class_method_return_type(
+        &mut self,
+        class_name: String,
+        method_name: String,
+        ty: Type,
+    ) {
+        self.class_method_return_types.push((class_name, method_name, ty));
+    }
+
+    /// Phase 4.1: lookup the return type of `class_name.method_name`.
+    /// Does NOT walk the extends chain today — that needs the parent class
+    /// name accessible from the context, which the current registry doesn't
+    /// track. Callers handle inheritance externally if needed. Reverse
+    /// iteration so the latest registration wins for shadowing (mirrors
+    /// `lookup_func_return_type`).
+    pub(crate) fn lookup_class_method_return_type(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<&Type> {
+        self.class_method_return_types.iter().rev()
+            .find(|(c, m, _)| c == class_name && m == method_name)
+            .map(|(_, _, ty)| ty)
     }
 
     pub(crate) fn enter_scope(&mut self) -> (usize, usize, usize) {
@@ -9543,6 +9728,89 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
         }
         ast::Expr::Object(obj) => {
+            // Phase 3: closed-shape object literals lower to `new __AnonShape_N()`
+            // so downstream field access hits the direct-GEP fast path. The
+            // anon class is synthesized with `init: Some(value_expr)` on each
+            // field, and `apply_field_initializers_recursive` at codegen time
+            // emits `PropertySet { this, field, init }` — PropertySet's
+            // direct-GEP arm at `crates/perry-codegen/src/expr.rs:2277-2293`
+            // fires because `this` resolves to the anon class via class_stack.
+            //
+            // Runtime parity for Object.* introspection APIs on anon-shape
+            // classes is handled runtime-side in perry-runtime's object module
+            // — see that crate's handling of `class_id`-tagged objects on
+            // getOwnPropertyDescriptor / Object.keys / JSON.stringify / etc.
+            fn is_closed_shape(obj: &ast::ObjectLit) -> bool {
+                if obj.props.is_empty() { return false; }
+                for p in &obj.props {
+                    match p {
+                        ast::PropOrSpread::Spread(_) => return false,
+                        ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                            ast::Prop::KeyValue(kv) => match &kv.key {
+                                ast::PropName::Ident(_)
+                                | ast::PropName::Str(_)
+                                | ast::PropName::Num(_) => {}
+                                _ => return false,
+                            },
+                            ast::Prop::Shorthand(_) => {}
+                            _ => return false,
+                        },
+                    }
+                }
+                true
+            }
+            if is_closed_shape(obj) {
+                let mut fields: Vec<(String, Type, Expr)> = Vec::new();
+                let mut bail = false;
+                let mut seen = std::collections::HashSet::new();
+                for prop in &obj.props {
+                    let ast::PropOrSpread::Prop(p) = prop else { unreachable!() };
+                    match p.as_ref() {
+                        ast::Prop::KeyValue(kv) => {
+                            let key = match &kv.key {
+                                ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                ast::PropName::Num(n) => n.value.to_string(),
+                                _ => unreachable!(),
+                            };
+                            if !seen.insert(key.clone()) { bail = true; break; }
+                            let ty = crate::lower_types::infer_type_from_expr(&kv.value, ctx);
+                            let value = lower_expr(ctx, &kv.value)?;
+                            fields.push((key, ty, value));
+                        }
+                        ast::Prop::Shorthand(ident) => {
+                            let name = ident.sym.to_string();
+                            if !seen.insert(name.clone()) { bail = true; break; }
+                            let (value, ty) = if let Some(func_id) = ctx.lookup_func(&name) {
+                                (Expr::FuncRef(func_id), Type::Any)
+                            } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                let ty = ctx.lookup_local_type(&name).cloned().unwrap_or(Type::Any);
+                                (Expr::LocalGet(local_id), ty)
+                            } else if ctx.lookup_class(&name).is_some() {
+                                (Expr::ClassRef(name.clone()), Type::Any)
+                            } else {
+                                bail = true; break;
+                            };
+                            fields.push((name, ty, value));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if !bail {
+                    // Split (name, ty, value) into parallel vecs before the
+                    // synthesize call consumes ownership of the shape.
+                    let args: Vec<Expr> = fields.iter().map(|(_, _, v)| v.clone()).collect();
+                    let class_name = ctx.synthesize_anon_shape_class(&fields);
+                    return Ok(Expr::New {
+                        class_name,
+                        args,
+                        type_args: Vec::new(),
+                    });
+                }
+            }
+            // Legacy path — spread, methods/getters/setters, computed keys,
+            // dup keys, or unresolvable shorthand.
+            //
             // Check if any spread elements exist; if so, use ObjectSpread
             let has_spread = obj.props.iter().any(|p| matches!(p, ast::PropOrSpread::Spread(_)));
             if has_spread {
@@ -10081,30 +10349,82 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         || class_name == "ReferenceError" || class_name == "SyntaxError"
                         || class_name == "BugIndicatingError" {
                         // new Error() / new Error(message) / new Error(message, { cause })
+                        //
+                        // 2-arg form detection runs at AST level (not HIR) because Phase 3
+                        // synthesises anon classes for closed-shape object literals — the
+                        // options `{ cause: e }` would become `Expr::New { __AnonShape_N }`
+                        // after lower_expr, and the `Expr::Object(fields)` match below
+                        // would miss it. Pull `cause` directly from the AST first, then
+                        // fall through to the standard argument lowering for other shapes.
+                        let ast_args = new_expr.args.as_deref().unwrap_or(&[]);
+                        if ast_args.len() == 2 && class_name == "Error" {
+                            let msg = lower_expr(ctx, &ast_args[0].expr)?;
+                            // Peel `Expr::Paren(({ cause: e }))` — SWC preserves paren
+                            // nodes, so without unwrapping the outer Object match below
+                            // would miss `new Error(msg, ({ cause }))` and we'd silently
+                            // drop the cause.
+                            let mut opts_expr: &ast::Expr = &ast_args[1].expr;
+                            while let ast::Expr::Paren(p) = opts_expr {
+                                opts_expr = &p.expr;
+                            }
+                            // Look for `{ cause: <expr> }` or `{ cause }` at the AST level.
+                            if let ast::Expr::Object(opts_obj) = opts_expr {
+                                for prop in &opts_obj.props {
+                                    if let ast::PropOrSpread::Prop(p) = prop {
+                                        match p.as_ref() {
+                                            ast::Prop::KeyValue(kv) => {
+                                                let key = match &kv.key {
+                                                    ast::PropName::Ident(i) => i.sym.to_string(),
+                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                    _ => continue,
+                                                };
+                                                if key == "cause" {
+                                                    let cause = lower_expr(ctx, &kv.value)?;
+                                                    return Ok(Expr::ErrorNewWithCause {
+                                                        message: Box::new(msg),
+                                                        cause: Box::new(cause),
+                                                    });
+                                                }
+                                            }
+                                            // ES2022 shorthand `new Error(msg, { cause })`
+                                            // — the canonical idiom inside a `catch (cause)`
+                                            // block. Resolve the ident the same way the
+                                            // HIR Object-literal lowering does: func /
+                                            // local / class-ref precedence.
+                                            ast::Prop::Shorthand(ident) => {
+                                                let name = ident.sym.to_string();
+                                                if name != "cause" { continue; }
+                                                let cause = if let Some(func_id) = ctx.lookup_func(&name) {
+                                                    Expr::FuncRef(func_id)
+                                                } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                                    Expr::LocalGet(local_id)
+                                                } else if ctx.lookup_class(&name).is_some() {
+                                                    Expr::ClassRef(name.clone())
+                                                } else {
+                                                    // Unresolvable identifier — fall through
+                                                    // to the no-cause path below.
+                                                    continue;
+                                                };
+                                                return Ok(Expr::ErrorNewWithCause {
+                                                    message: Box::new(msg),
+                                                    cause: Box::new(cause),
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            // No recognizable `cause` key — lower the opts for side effects,
+                            // then emit a plain Error with just the message.
+                            let _ = lower_expr(ctx, &ast_args[1].expr)?;
+                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
+                        }
+
                         let args = new_expr.args.as_ref()
                             .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                             .transpose()?
                             .unwrap_or_default();
-
-                        // Detect 2-arg form: new Error(msg, { cause })
-                        if args.len() == 2 && class_name == "Error" {
-                            let mut iter = args.into_iter();
-                            let msg = iter.next().unwrap();
-                            let opts = iter.next().unwrap();
-                            // Try to extract `.cause` from the options object literal
-                            if let Expr::Object(fields) = &opts {
-                                for (key, val) in fields {
-                                    if key == "cause" {
-                                        return Ok(Expr::ErrorNewWithCause {
-                                            message: Box::new(msg),
-                                            cause: Box::new(val.clone()),
-                                        });
-                                    }
-                                }
-                            }
-                            // Fallback: just create the error without cause
-                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
-                        }
 
                         if args.is_empty() {
                             return match class_name.as_str() {

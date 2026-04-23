@@ -2593,27 +2593,54 @@ pub(crate) fn lower_native_method_call(
                     "spawn" => args.get(0),
                     _ => None,
                 };
-                if let Some(Expr::Closure { params, body, .. }) = closure_arg {
-                    let mut inner_ids: std::collections::HashSet<perry_types::LocalId> =
-                        params.iter().map(|p| p.id).collect();
-                    for stmt in body {
-                        collect_closure_introduced_ids(stmt, &mut inner_ids);
-                    }
-                    let mut outer_writes: Vec<perry_types::LocalId> = Vec::new();
-                    for stmt in body {
-                        find_outer_writes_stmt(stmt, &inner_ids, &mut outer_writes);
-                    }
-                    if let Some(&first_outer) = outer_writes.first() {
-                        anyhow::bail!(
-                            "perry/thread: closure passed to `{}` writes to outer variable (LocalId {}) — \
-                             this is not allowed because each worker thread receives a deep-copied \
-                             snapshot of captured values (and module-level slots are not shared across \
-                             workers in the way ordinary TS globals appear to be), so writes would be \
-                             silently lost or corrupted relative to user expectations. Return values \
-                             from the closure and aggregate them on the main thread instead. \
-                             See docs/src/threading/overview.md#no-shared-mutable-state.",
-                            method, first_outer,
-                        );
+                if let Some(callback) = closure_arg {
+                    match callback {
+                        Expr::Closure { params, body, .. } => {
+                            let mut inner_ids: std::collections::HashSet<perry_types::LocalId> =
+                                params.iter().map(|p| p.id).collect();
+                            for stmt in body {
+                                collect_closure_introduced_ids(stmt, &mut inner_ids);
+                            }
+                            let mut outer_writes: Vec<perry_types::LocalId> = Vec::new();
+                            for stmt in body {
+                                find_outer_writes_stmt(stmt, &inner_ids, &mut outer_writes);
+                            }
+                            if let Some(&first_outer) = outer_writes.first() {
+                                anyhow::bail!(
+                                    "perry/thread: closure passed to `{}` writes to outer variable (LocalId {}) — \
+                                     this is not allowed because each worker thread receives a deep-copied \
+                                     snapshot of captured values (and module-level slots are not shared across \
+                                     workers in the way ordinary TS globals appear to be), so writes would be \
+                                     silently lost or corrupted relative to user expectations. Return values \
+                                     from the closure and aggregate them on the main thread instead. \
+                                     See docs/src/threading/overview.md#no-shared-mutable-state.",
+                                    method, first_outer,
+                                );
+                            }
+                        }
+                        // Named-function callback bypass: `function worker(n) { counter++; }
+                        // parallelMap(xs, worker)` is semantically identical to the inline-
+                        // closure form we check above, but we don't have the callee's HIR
+                        // body accessible from FnCtx (only `func_names: FuncId -> String`,
+                        // not the full function table). Bail with a helpful diagnostic
+                        // pointing the user at the inline-closure workaround. Pure
+                        // function workers work fine when wrapped (`(x) => worker(x)`);
+                        // this just closes the compile-time safety bypass that silently
+                        // let outer-writing named functions through.
+                        Expr::FuncRef(_)
+                        | Expr::LocalGet(_)
+                        | Expr::ExternFuncRef { .. } => {
+                            anyhow::bail!(
+                                "perry/thread: `{}` callback must be an inline arrow/closure, not a \
+                                 named function reference. Compile-time thread-safety analysis can only \
+                                 inspect inline closures today; a named function could write to outer \
+                                 variables which would be silently lost on the deep-copy worker boundary. \
+                                 Workaround: wrap the named function in an inline closure — \
+                                 `{}(xs, (x) => myFn(x))`. See docs/src/threading/overview.md#no-shared-mutable-state.",
+                                method, method,
+                            );
+                        }
+                        _ => {}
                     }
                 }
             }

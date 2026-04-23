@@ -1,6 +1,7 @@
 {
-  "commit": "00fa823",
-  "generated_at": "2026-04-17T18:35:25Z",
+  "commit": "c89b3ad5",
+  "generated_at": "2026-04-23T13:05:00Z",
+  "notes": "json_roundtrip row rerun at v0.5.173 (best-of-5): Perry 314ms vs Node 377ms → Perry now 1.2x faster than Node (was 1.58x slower at v0.5.166, baseline commit 00fa823). Other rows unchanged from the 2026-04-17 sweep.",
   "benchmarks": {
     "02_loop_overhead": {
       "perry_ms": 0,
@@ -126,12 +127,12 @@
       "memory_ratio": 0.507
     },
     "bench_json_roundtrip": {
-      "perry_ms": 591,
-      "perry_rss_kb": 306832,
-      "node_ms": 375,
-      "node_rss_kb": 157313,
-      "speed_ratio": 1.576,
-      "memory_ratio": 1.95
+      "perry_ms": 314,
+      "perry_rss_kb": 310640,
+      "node_ms": 377,
+      "node_rss_kb": 186768,
+      "speed_ratio": 0.833,
+      "memory_ratio": 1.663
     },
     "bench_object_property": {
       "perry_ms": 9,

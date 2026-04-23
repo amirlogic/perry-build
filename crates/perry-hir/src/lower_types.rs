@@ -159,15 +159,108 @@ pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> T
         // Assignments return the assigned value type
         ast::Expr::Assign(assign) => infer_type_from_expr(&assign.right, ctx),
 
+        // `new C(...)` → `Type::Named(C)` for plain classes, `Type::Generic`
+        // when type args are present (`new Map<K, V>()` must stay Generic so
+        // `is_map_expr` / `is_set_expr` etc. match — they check `base == "Map"`
+        // on the Generic variant). Phase 4.1 lets `new C().method()` flow
+        // through the method-call inference path above.
+        ast::Expr::New(new_expr) => {
+            if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+                let name = ident.sym.to_string();
+                if let Some(type_args) = new_expr.type_args.as_ref() {
+                    if !type_args.params.is_empty() {
+                        let args: Vec<Type> = type_args.params.iter()
+                            .map(|t| extract_ts_type(t))
+                            .collect();
+                        return Type::Generic { base: name, type_args: args };
+                    }
+                }
+                Type::Named(name)
+            } else {
+                Type::Any
+            }
+        }
+
         // new Array(), new Map(), etc. handled separately in var decl lowering
-        // Object literals
-        ast::Expr::Object(_) => Type::Any, // Could be refined but objects have complex shapes
+        // Object literals — infer the structural shape so downstream code (direct-GEP
+        // property access, scalar replacement shape checks) can specialize. Bails to
+        // Type::Any on anything that makes the shape non-closed: spread, computed
+        // keys, methods/getters/setters, bigint keys.
+        ast::Expr::Object(obj) => {
+            let mut properties: std::collections::HashMap<String, perry_types::PropertyInfo> =
+                std::collections::HashMap::new();
+            let mut open_shape = false;
+            for prop in &obj.props {
+                match prop {
+                    ast::PropOrSpread::Spread(_) => { open_shape = true; break; }
+                    ast::PropOrSpread::Prop(p) => match p.as_ref() {
+                        ast::Prop::Shorthand(ident) => {
+                            let name = ident.sym.to_string();
+                            let ty = ctx.lookup_local_type(&name).cloned().unwrap_or(Type::Any);
+                            properties.insert(name, perry_types::PropertyInfo {
+                                ty, optional: false, readonly: false,
+                            });
+                        }
+                        ast::Prop::KeyValue(kv) => {
+                            let key = match &kv.key {
+                                ast::PropName::Ident(i) => i.sym.to_string(),
+                                ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                ast::PropName::Num(n) => n.value.to_string(),
+                                _ => { open_shape = true; break; }
+                            };
+                            let ty = infer_type_from_expr(&kv.value, ctx);
+                            properties.insert(key, perry_types::PropertyInfo {
+                                ty, optional: false, readonly: false,
+                            });
+                        }
+                        _ => { open_shape = true; break; }
+                    }
+                }
+            }
+            if open_shape {
+                Type::Any
+            } else {
+                Type::Object(perry_types::ObjectType {
+                    name: None,
+                    properties,
+                    index_signature: None,
+                })
+            }
+        }
 
         // Arrow/function expressions
         ast::Expr::Arrow(arrow) => {
-            let return_type = arrow.return_type.as_ref()
+            // Phase 4 (expansion): when the arrow has no explicit return
+            // annotation, infer from the body. Expression bodies (`(x) => x+1`)
+            // infer via `infer_type_from_expr` directly; block bodies walk
+            // return statements via `infer_body_return_type`. Generators
+            // skipped (Generator<T> shape is out of scope). Async wraps in
+            // Promise<T>.
+            let has_explicit_return_annotation = arrow.return_type.is_some();
+            let annotated = arrow.return_type.as_ref()
                 .map(|rt| extract_ts_type(&rt.type_ann))
                 .unwrap_or(Type::Any);
+            let return_type = if !has_explicit_return_annotation
+                && matches!(annotated, Type::Any)
+                && !arrow.is_generator
+            {
+                let inferred = match arrow.body.as_ref() {
+                    ast::BlockStmtOrExpr::Expr(expr) => {
+                        let t = infer_type_from_expr(expr, ctx);
+                        if matches!(t, Type::Any) { None } else { Some(t) }
+                    }
+                    ast::BlockStmtOrExpr::BlockStmt(block) => {
+                        infer_body_return_type(&block.stmts, ctx)
+                    }
+                };
+                match inferred {
+                    Some(t) if arrow.is_async => Type::Promise(Box::new(t)),
+                    Some(t) => t,
+                    None => Type::Any,
+                }
+            } else {
+                annotated
+            };
             Type::Function(perry_types::FunctionType {
                 params: arrow.params.iter().map(|p| {
                     let name = get_pat_name(p).unwrap_or_default();
@@ -181,6 +274,79 @@ pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> T
         }
 
         _ => Type::Any,
+    }
+}
+
+/// Infer a function's return type from its body's return statements, for use when
+/// the function has no explicit return annotation. Returns `None` on ambiguity
+/// (mixed return types, any Type::Any return) so the caller can fall back.
+///
+/// Walks control-flow statements but does NOT descend into nested functions,
+/// arrows, or class bodies — their return statements belong to the inner scope.
+pub(crate) fn infer_body_return_type(
+    stmts: &[ast::Stmt],
+    ctx: &LoweringContext,
+) -> Option<Type> {
+    let mut returns: Vec<Type> = Vec::new();
+    collect_return_types(stmts, ctx, &mut returns);
+    if returns.is_empty() {
+        return Some(Type::Void);
+    }
+    // All returns must agree and none may be Any — otherwise bail.
+    let first = returns[0].clone();
+    if matches!(first, Type::Any) {
+        return None;
+    }
+    if returns.iter().all(|t| *t == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn collect_return_types(
+    stmts: &[ast::Stmt],
+    ctx: &LoweringContext,
+    out: &mut Vec<Type>,
+) {
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::Return(ret) => {
+                let ty = match &ret.arg {
+                    Some(expr) => infer_type_from_expr(expr, ctx),
+                    None => Type::Void,
+                };
+                out.push(ty);
+            }
+            ast::Stmt::Block(b) => collect_return_types(&b.stmts, ctx, out),
+            ast::Stmt::If(i) => {
+                collect_return_types(std::slice::from_ref(i.cons.as_ref()), ctx, out);
+                if let Some(alt) = &i.alt {
+                    collect_return_types(std::slice::from_ref(alt.as_ref()), ctx, out);
+                }
+            }
+            ast::Stmt::Try(t) => {
+                collect_return_types(&t.block.stmts, ctx, out);
+                if let Some(catch) = &t.handler {
+                    collect_return_types(&catch.body.stmts, ctx, out);
+                }
+                if let Some(fin) = &t.finalizer {
+                    collect_return_types(&fin.stmts, ctx, out);
+                }
+            }
+            ast::Stmt::Switch(s) => {
+                for case in &s.cases {
+                    collect_return_types(&case.cons, ctx, out);
+                }
+            }
+            ast::Stmt::While(w) => collect_return_types(std::slice::from_ref(w.body.as_ref()), ctx, out),
+            ast::Stmt::DoWhile(d) => collect_return_types(std::slice::from_ref(d.body.as_ref()), ctx, out),
+            ast::Stmt::For(f) => collect_return_types(std::slice::from_ref(f.body.as_ref()), ctx, out),
+            ast::Stmt::ForIn(f) => collect_return_types(std::slice::from_ref(f.body.as_ref()), ctx, out),
+            ast::Stmt::ForOf(f) => collect_return_types(std::slice::from_ref(f.body.as_ref()), ctx, out),
+            ast::Stmt::Labeled(l) => collect_return_types(std::slice::from_ref(l.body.as_ref()), ctx, out),
+            _ => {} // Decl (nested fns), Expr, Break, Continue, Throw, Debugger, Empty, With
+        }
     }
 }
 
@@ -209,6 +375,21 @@ pub(crate) fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) 
             if let ast::MemberProp::Ident(method) = &member.prop {
                 let method_name = method.sym.as_ref();
                 let obj_ty = infer_type_from_expr(&member.obj, ctx);
+
+                // Phase 4.1: user class methods. When the receiver is typed
+                // as `Type::Named(C)` (e.g., a local declared as `p: Point` or
+                // a `new Point()` binding), look up `C.method_name`'s return
+                // type in the registry. Populated for both annotated and
+                // Phase-4-inferred return types. Runs BEFORE the built-in
+                // String/Array/Number/Math/etc. method tables so user classes
+                // can't be accidentally shadowed by built-ins that don't
+                // apply (e.g., a user class with a `.slice` method wouldn't
+                // hit the String table because we already checked Named).
+                if let Type::Named(class_name) = &obj_ty {
+                    if let Some(ty) = ctx.lookup_class_method_return_type(class_name, method_name) {
+                        return ty.clone();
+                    }
+                }
 
                 // String methods
                 if matches!(obj_ty, Type::String) {

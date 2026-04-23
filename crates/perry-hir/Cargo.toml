@@ -13,3 +13,6 @@ swc_common.workspace = true
 
 thiserror.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+perry-parser.workspace = true
