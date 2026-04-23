@@ -1,32 +1,38 @@
-
-name: Rust
+name: Build Windows Binary (Linux Runner)
 
 on:
   push:
     branches: [main]
+
   workflow_dispatch:
-  
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
-    runs-on: 'windows-latest'
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
 
-    - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Build
-      run: cargo build --release -p perry-jsruntime
-    
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: libperry_jsruntime
-        path: target/release/libperry_jsruntime.a
+      - name: Add Windows target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Install mingw
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build for Windows
+        run: cargo build --release -p perry-jsruntime --target x86_64-pc-windows-gnu
+
+      - name: List output (debug)
+        run: ls -R target/x86_64-pc-windows-gnu/release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perry-jsruntime-windows
+          path: target/x86_64-pc-windows-gnu/release/*
