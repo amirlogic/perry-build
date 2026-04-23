@@ -1,6 +1,8 @@
 name: Build Windows Binary (Linux Runner)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
